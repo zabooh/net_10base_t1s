@@ -39,11 +39,13 @@ Microchip or any third party.
 
 *******************************************************************************/
 #include <stdarg.h>
+#include <string.h>
 #include "configuration.h"
 #include "definitions.h"
 #include "drv_lan865x_local.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "tc6/tc6.h"
+#include "../../../../../../ptp_ts_ipc.h"
 
 /******************************************************************************
 *  DEFINES & MACROS
@@ -54,7 +56,7 @@ Microchip or any third party.
 #define RESET_LOW_TIME_MS       (1u)
 #define RESET_HIGH_TIME_MS      (7u)
 #define PLCA_TIMER_DELAY        (1000u)
-#define DELAY_UNLOCK_EXT        (100u)
+#define DELAY_UNLOCK_EXT        (5u)    /* reduced: TTSCAA appears ~1ms after EXST; 100ms caused TTSCMA */
 #define CONTROL_PROTECTION      (true)
 
 #define GET_TICKS()             SYS_TIME_CountToMS(SYS_TIME_CounterGet())
@@ -112,6 +114,9 @@ static const TCPIP_MAC_OBJECT* drvLAN865xObj[DRV_LAN865X_INSTANCES_NUMBER]=
 
 // Local information
 static DRV_LAN865X_DriverInfo drvLAN865XDrvInst[DRV_LAN865X_INSTANCES_NUMBER];
+/* TX Timestamp Capture Available bits (STATUS0 bits 8-10) saved by _OnStatus0 before W1C.
+ * Read and atomically cleared by DRV_LAN865X_GetAndClearTsCapture(). */
+static volatile uint32_t drvTsCaptureStatus0[DRV_LAN865X_INSTANCES_NUMBER];
 static uint8_t drvLAN865xNumOfDrivers = 0;
 static OSAL_MUTEX_HANDLE_TYPE  drvLAN865xClntMutex;
 /******************************************************************************
@@ -1349,6 +1354,12 @@ void TC6_CB_OnRxEthernetSlice(TC6_t *pInst, const uint8_t *pRx, uint16_t offset,
     }
 }
 
+/* PTP_RxTimestampEntry_t and PTP_RxFrameEntry_t defined in ptp_ts_ipc.h (included above) */
+volatile PTP_RxTimestampEntry_t g_ptp_rx_ts = {0u, false};
+
+/* Direct PTP frame capture (see ptp_ts_ipc.h) */
+volatile PTP_RxFrameEntry_t g_ptp_raw_rx = {{0u}, 0u, 0u, false};
+
 /**
  * \brief Callback when ever an Ethernet packet was received. This will notify the integrator, that now all chunks very reported by TC6_CB_OnRxEthernetPacket and the data can be processed.
  * \note This function must be implemented by the integrator.
@@ -1361,7 +1372,11 @@ void TC6_CB_OnRxEthernetSlice(TC6_t *pInst, const uint8_t *pRx, uint16_t offset,
 void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_t *rxTimestamp, void *pGlobalTag)
 {
     (void)pInst;
-    (void)rxTimestamp;
+    /* Store RX hardware timestamp for PTP task (see ptp_ts_ipc.h) */
+    if (rxTimestamp != NULL) {
+        g_ptp_rx_ts.rxTimestamp = *rxTimestamp;
+        g_ptp_rx_ts.valid       = true;
+    }
     TCPIP_MAC_PACKET *macPkt = NULL;
     DRV_LAN865X_DriverInfo *pDrvInst = _Dereference(pGlobalTag);
     if (NULL != pDrvInst) {
@@ -1375,6 +1390,25 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
             pDrvInst->rxStats.nRxPendBuffers++;
             macPkt->pMacLayer = macPkt->pDSeg->segLoad;
             macPkt->pNetLayer = macPkt->pMacLayer + sizeof(TCPIP_MAC_ETHERNET_HEADER);
+
+            /* --- Direct PTP frame capture (independent of PacketHandlerRegister) ---
+             * Check EtherType at bytes 12-13 of the raw Ethernet frame.
+             * If 0x88F7 (PTP): copy to g_ptp_raw_rx for APP_Tasks to process.
+             * The macPkt still goes to rxWaitingForPickupPackets normally;
+             * pktEth0Handler will acknowledge it when the stack delivers it. */
+            if (len >= 14u &&
+                macPkt->pDSeg->segLoad[12] == 0x88u &&
+                macPkt->pDSeg->segLoad[13] == 0xF7u)
+            {
+                uint16_t copyLen = (len > (uint16_t)PTP_RAW_BUF_SIZE) ?
+                                   (uint16_t)PTP_RAW_BUF_SIZE : len;
+                (void)memcpy((uint8_t *)g_ptp_raw_rx.data,
+                             macPkt->pDSeg->segLoad, copyLen);
+                g_ptp_raw_rx.length      = copyLen;
+                g_ptp_raw_rx.rxTimestamp = (rxTimestamp != NULL) ? *rxTimestamp : 0u;
+                g_ptp_raw_rx.pending     = true;
+            }
+
             if (0xFF == macPkt->pDSeg->segLoad[0]) {
                 macPkt->pktFlags = TCPIP_MAC_PKT_FLAG_BCAST;
             } else {
@@ -1700,16 +1734,18 @@ static bool _InitMemMap(DRV_LAN865X_DriverInfo * pDrvInst)
         {  .address=0x000400F4,  .value=0x0000C020,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400F8,  .value=0x0000B900,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400F9,  .value=0x00004E53,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x00040081,  .value=0x00000080,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* DEEP_SLEEP_CTRL_1 */
         {  .address=0x00040091,  .value=0x00009660,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x00010077,  .value=0x00000028,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x00040043,  .value=0x000000FF,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x00040044,  .value=0x0000FFFF,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x00040045,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
+        {  .address=0x00010077,  .value=0x00000028,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* MAC_TI: 40 ns/tick */
+        /* TX-Match pattern for PTP Sync detection (used by GM to capture TX timestamp) */
+        {  .address=0x00040041,  .value=0x00000088,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMPATH: EtherType high byte 0x88 */
+        {  .address=0x00040042,  .value=0x0000F710,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMPATL: EtherType low 0xF7 + PTP Sync 0x10 */
+        {  .address=0x00040043,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMMSKH: no masking (exact match) */
+        {  .address=0x00040044,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMMSKL: no masking */
+        {  .address=0x00040045,  .value=0x0000001E,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMLOC: byte offset 30 */
         {  .address=0x00040053,  .value=0x000000FF,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x00040054,  .value=0x0000FFFF,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x00040055,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x00040040,  .value=0x00000002,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
+        {  .address=0x00040040,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMCTL: disabled at startup; armed per-Sync with MACTXTSE only */
         {  .address=0x00040050,  .value=0x00000002,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400B0,  .value=0x00000103,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /*SQI CONFIGURATION*/
         {  .address=0x000400B1,  .value=0x00000910,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
@@ -1723,7 +1759,8 @@ static bool _InitMemMap(DRV_LAN865X_DriverInfo * pDrvInst)
         {  .address=0x000400B9,  .value=0x00000E13,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400BA,  .value=0x00001C25,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400BB,  .value=0x0000002B,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x0000000C,  .value=0x00000100,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* IMASK0 */
+        {  .address=0x0000000C,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* IMASK0: all unmasked, incl. bit 8 (TTSCAA) so _OnStatus0 fires on timestamp capture */
+        {  .address=0x00040081,  .value=0x000000E0,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* DEEP_SLEEP_CTRL_1 */
         
     };
 
@@ -1982,7 +2019,17 @@ static bool _InitConfig(DRV_LAN865X_DriverInfo * pDrvInst)
             break;
 
         case 46:
-            if (TC6_WriteRegister(tc, 0x000400E0, 0x0000C000, CONTROL_PROTECTION, NULL, NULL)) {
+            /* PADCTRL (0x000A0088): RMW value=0x100, mask=0x300 — enables TX timestamp output
+             * Reference: TC6_ptp_master_init() in noIP-SAM-E54-Curiosity-PTP-Grandmaster */
+            if (TC6_ReadModifyWriteRegister(tc, 0x000A0088u /* PADCTRL */, 0x00000100u, 0x00000300u, CONTROL_PROTECTION, NULL, NULL)) {
+                pDrvInst->initSubState++;
+            }
+            break;
+
+        case 47:
+            /* PPSCTL (0x000A0239): value=0x7D (=125) — enables PPS clock required for TSU counter
+             * Reference: TC6_ptp_master_init() in noIP-SAM-E54-Curiosity-PTP-Grandmaster */
+            if (TC6_WriteRegister(tc, 0x000A0239u /* PPSCTL */, 0x0000007Du, CONTROL_PROTECTION, NULL, NULL)) {
                 done = true;
             }
             break;
@@ -2063,8 +2110,10 @@ static bool _InitUserSettings(DRV_LAN865X_DriverInfo * pDrvInst)
             }
             break;
         case 8:
-            /* Cut Through / Store and Forward mode */
+            /* Cut Through / Store and Forward mode + Frame Timestamping */
             regVal = 0x9026u;
+            regVal |= 0x80u; /* FTSE: Frame Timestamp Enable (required for TTSCAA TX capture) */
+            regVal |= 0x40u; /* FTSS: 64-bit timestamps (TC6 driver strips 8 bytes on RTSA) */
             if (true == pDrvInst->drvCfg.txCutThrough) {
                 regVal |= 0x200u;
             }
@@ -2229,9 +2278,9 @@ static void _OnStatus1(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
     if (success) {
         uint8_t i;
         bool reinit = false;
-        PRINT_LIMIT("LAN865x_%d ",pDrvInst->index);
         for (i = 0u; i < 32u; i++) {
             if (0u != (value & (1u << i))) {
+                PRINT_LIMIT("LAN865x_%d ", pDrvInst->index);
                 switch (i) {
                     case 0:
                         PRINT_LIMIT("Status1.RX_Non_Recoverable_Error\r\n");
@@ -2323,7 +2372,16 @@ static void _OnStatus0(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
         if (success) {
             bool reinit = false;
             uint8_t i;
-            PRINT_LIMIT("LAN865x_%d ",pDrvInst->index);
+            /* Save TTSCAA/B/C bits (8-10) before W1C clear so the GM state machine
+             * can retrieve them via DRV_LAN865X_GetAndClearTsCapture(). */
+            if (0u != (value & 0x0700u)) {
+                for (i = 0u; i < DRV_LAN865X_INSTANCES_NUMBER; i++) {
+                    if (pDrvInst == &drvLAN865XDrvInst[i]) {
+                        drvTsCaptureStatus0[i] |= (value & 0x0700u);
+                        break;
+                    }
+                }
+            }
             while (!TC6_WriteRegister(pInst, addr, value, CONTROL_PROTECTION, _OnClearStatus0, NULL)) {
                 (void)TC6_Service(pInst, true);
             }
@@ -2331,47 +2389,44 @@ static void _OnStatus0(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
                 if (0u != (value & (1u << i))) {
                     switch (i) {
                         case 0:
-                            PRINT_LIMIT("Status0.Transmit Protocol Error\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.Transmit Protocol Error\r\n", pDrvInst->index);
                             break;
                         case 1:
-                            PRINT_LIMIT("Status0.Transmit Buffer Overflow Error\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.Transmit Buffer Overflow Error\r\n", pDrvInst->index);
                             break;
                         case 2:
-                            PRINT_LIMIT("Status0.Transmit Buffer Underflow Error\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.Transmit Buffer Underflow Error\r\n", pDrvInst->index);
                             break;
                         case 3:
-                            PRINT_LIMIT("Status0.Receive Buffer Overflow Error\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.Receive Buffer Overflow Error\r\n", pDrvInst->index);
                             break;
                         case 4:
-                            PRINT_LIMIT("Status0.Loss of Framing Error\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.Loss of Framing Error\r\n", pDrvInst->index);
                             reinit = true;
                             break;
                         case 5:
-                            PRINT_LIMIT("Status0.Header Error\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.Header Error\r\n", pDrvInst->index);
                             break;
                         case 6:
-                            PRINT_LIMIT("Status0.Reset Complete\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.Reset Complete\r\n", pDrvInst->index);
                             break;
                         case 7:
-                            PRINT_LIMIT("Status0.PHY Interrupt\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.PHY Interrupt\r\n", pDrvInst->index);
                             break;
                         case 8:
-                            PRINT_LIMIT("Status0.Transmit Timestamp Capture Available A\r\n");
                             break;
                         case 9:
-                            PRINT_LIMIT("Status0.Transmit Timestamp Capture Available B\r\n");
                             break;
                         case 10:
-                            PRINT_LIMIT("Status0.Transmit Timestamp Capture Available C\r\n");
                             break;
                         case 11:
-                            PRINT_LIMIT("Status0.Transmit Frame Check Sequence Error\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.Transmit Frame Check Sequence Error\r\n", pDrvInst->index);
                             break;
                         case 12:
-                            PRINT_LIMIT("Status0.Control Data Protection Error\r\n");
+                            PRINT_LIMIT("LAN865x_%d Status0.Control Data Protection Error\r\n", pDrvInst->index);
                             break;
                         default:
-                            PRINT_LIMIT("Status0.Unknown Bit=%d reg-val=0x%d\r\n", i, value);
+                            PRINT_LIMIT("LAN865x_%d Status0.Unknown Bit=%d reg-val=0x%d\r\n", pDrvInst->index, i, value);
                             break;
                     }
                 }
@@ -2425,4 +2480,38 @@ static void _RxPacketAck(TCPIP_MAC_PACKET* pkt, const void* param)
         pDrvInst->rxStats.nRxOkPackets++;
         TCPIP_Helper_ProtSglListTailAdd(&pDrvInst->rxFreePackets, (SGL_LIST_NODE*) pkt);
     }
+}
+
+/* --------------------------------------------------------------------------
+ * DRV_LAN865X_SendRawEthFrame
+ * Send a raw Ethernet frame through TC6 with a caller-selected TSC flag.
+ * Use tsc=0x01 for Sync (to arm Timestamp Capture A) and tsc=0x00 otherwise.
+ * -------------------------------------------------------------------------- */
+bool DRV_LAN865X_SendRawEthFrame(uint8_t idx, const uint8_t *pBuf, uint16_t len,
+                                  uint8_t tsc, DRV_LAN865X_RawTxCallback_t cb,
+                                  void *pTag)
+{
+    bool result = false;
+    if (idx < DRV_LAN865X_INSTANCES_NUMBER) {
+        DRV_LAN865X_DriverInfo *pDrv = &drvLAN865XDrvInst[idx];
+        if (SYS_STATUS_READY == pDrv->state) {
+            result = TC6_SendRawEthernetPacket(pDrv->drvTc6, pBuf, len, tsc,
+                                               (TC6_RawTxCallback_t)(void *)cb, pTag);
+        }
+    }
+    return result;
+}
+
+bool DRV_LAN865X_IsReady(uint8_t idx)
+{
+    return (idx < DRV_LAN865X_INSTANCES_NUMBER) &&
+           (drvLAN865XDrvInst[idx].state == SYS_STATUS_READY);
+}
+
+uint32_t DRV_LAN865X_GetAndClearTsCapture(uint8_t idx)
+{
+    if (idx >= DRV_LAN865X_INSTANCES_NUMBER) { return 0u; }
+    uint32_t val = drvTsCaptureStatus0[idx];
+    drvTsCaptureStatus0[idx] = 0u;
+    return val;
 }

@@ -29,10 +29,17 @@
 
 #include "app.h"
 #include <stdlib.h>
+#include <string.h>
+#include "ptp_ts_ipc.h"
+#include "PTP_FOL_task.h"
+#include "ptp_gm_task.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
 #include "system/command/sys_command.h"
 #include "system/console/sys_console.h"
+#define TCPIP_THIS_MODULE_ID    TCPIP_MODULE_MANAGER
+#include "library/tcpip/tcpip.h"
+#include "library/tcpip/src/tcpip_packet.h"
 
 // *****************************************************************************
 // *****************************************************************************
@@ -56,6 +63,30 @@
 */
 
 APP_DATA appData;
+
+// *****************************************************************************
+// PTP packet handler forward declaration
+// *****************************************************************************
+bool pktEth0Handler(TCPIP_NET_HANDLE hNet, TCPIP_MAC_PACKET* rxPkt, uint16_t frameType, const void* hParam);
+static const void *MyEth0HandlerParam = NULL;
+
+/* Maximum expected PTP frame size on wire.
+ * Sync/FollowUp messages are <= 76 bytes; Announce up to ~90 bytes.
+ * 128 bytes gives comfortable headroom for all standard PTP message types. */
+#define PTP_MAX_FRAME_SIZE  128u
+
+/* Buffer for a single pending PTP frame received in pktEth0Handler */
+typedef struct {
+    uint8_t  data[PTP_MAX_FRAME_SIZE];
+    uint16_t length;
+    uint64_t rxTimestamp;
+    bool     pending;
+} PTP_FRAME_BUFFER;
+
+static PTP_FRAME_BUFFER ptp_rx_buffer = {0};
+
+/* Track LAN865x driver ready state to detect reinit-complete while in GM mode */
+static bool lan865x_prev_ready = false;
 
 // *****************************************************************************
 // Globals: LAN865X register access state
@@ -131,15 +162,144 @@ static void lan_write(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     app_lan_state                  = APP_LAN_WAIT_WRITE;
 }
 
+static void ptp_mode_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    if (argc < 2) {
+        ptpMode_t mode = PTP_FOL_GetMode();
+        const char *modeStr = (mode == PTP_MASTER) ? "master" :
+                              (mode == PTP_SLAVE)  ? "follower" : "off";
+        SYS_CONSOLE_PRINT("PTP mode: %s\r\n", modeStr);
+        return;
+    }
+    if (strcmp(argv[1], "off") == 0) {
+        PTP_FOL_SetMode(PTP_DISABLED);
+        PTP_GM_Deinit();
+        SYS_CONSOLE_PRINT("PTP disabled\r\n");
+    } else if (strcmp(argv[1], "master") == 0) {
+        PTP_FOL_SetMode(PTP_MASTER);
+        PTP_GM_Init();
+        SYS_CONSOLE_PRINT("PTP Grandmaster enabled\r\n");
+    } else if ((strcmp(argv[1], "follower") == 0) || (strcmp(argv[1], "slave") == 0)) {
+        PTP_FOL_SetMode(PTP_SLAVE);
+        bool verbose = (argc >= 3) && (strcmp(argv[2], "v") == 0);
+        PTP_FOL_SetVerbose(verbose);
+        SYS_CONSOLE_PRINT("PTP Follower enabled%s\r\n", verbose ? " (verbose)" : "");
+    } else {
+        SYS_CONSOLE_PRINT("Usage: ptp_mode [off|master|follower]\r\n");
+    }
+}
+
+static void ptp_status_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    ptpMode_t mode = PTP_FOL_GetMode();
+    const char *modeStr = (mode == PTP_MASTER) ? "master" :
+                          (mode == PTP_SLAVE)  ? "follower" : "off";
+    SYS_CONSOLE_PRINT("PTP mode   : %s\r\n", modeStr);
+
+    if (mode == PTP_MASTER) {
+        uint32_t syncCount = 0u, gmState = 0u;
+        PTP_GM_GetStatus(&syncCount, &gmState);
+        SYS_CONSOLE_PRINT("GM syncs   : %lu\r\n", (unsigned long)syncCount);
+        SYS_CONSOLE_PRINT("GM state   : %lu\r\n", (unsigned long)gmState);
+        ptp_gm_dst_mode_t dst = PTP_GM_GetDstMode();
+        SYS_CONSOLE_PRINT("Dst mode   : %s\r\n", (dst == PTP_GM_DST_BROADCAST) ? "broadcast" : "multicast");
+    } else if (mode == PTP_SLAVE) {
+        int64_t  offset    = 0;
+        uint64_t absOffset = 0u;
+        PTP_FOL_GetOffset(&offset, &absOffset);
+        SYS_CONSOLE_PRINT("Offset ns  : %ld\r\n", (long)offset);
+        SYS_CONSOLE_PRINT("Abs off ns : %lu\r\n", (unsigned long)absOffset);
+    }
+}
+
+static void ptp_interval_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    if (argc != 2) {
+        SYS_CONSOLE_PRINT("Usage: ptp_interval <ms>  (range: 10..10000)\r\n");
+        return;
+    }
+    uint32_t ms = (uint32_t)strtoul(argv[1], NULL, 0);
+    PTP_GM_SetSyncInterval(ms);
+    SYS_CONSOLE_PRINT("Sync interval set to %lu ms\r\n", (unsigned long)ms);
+}
+
+static void ptp_offset_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    int64_t  offset    = 0;
+    uint64_t absOffset = 0u;
+    PTP_FOL_GetOffset(&offset, &absOffset);
+    SYS_CONSOLE_PRINT("Offset: %ld ns  (abs: %lu ns)\r\n",
+                      (long)offset, (unsigned long)absOffset);
+}
+
+static void ptp_reset_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    PTP_FOL_Reset();
+    SYS_CONSOLE_PRINT("PTP follower servo reset\r\n");
+}
+
+static void ptp_dst_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    if (argc < 2) {
+        ptp_gm_dst_mode_t dst = PTP_GM_GetDstMode();
+        SYS_CONSOLE_PRINT("PTP dst: %s\r\n", (dst == PTP_GM_DST_BROADCAST) ? "broadcast" : "multicast");
+        return;
+    }
+    if (strcmp(argv[1], "broadcast") == 0) {
+        PTP_GM_SetDstMode(PTP_GM_DST_BROADCAST);
+        SYS_CONSOLE_PRINT("PTP dst set to broadcast\r\n");
+    } else if (strcmp(argv[1], "multicast") == 0) {
+        PTP_GM_SetDstMode(PTP_GM_DST_MULTICAST);
+        SYS_CONSOLE_PRINT("PTP dst set to multicast\r\n");
+    } else {
+        SYS_CONSOLE_PRINT("Usage: ptp_dst [multicast|broadcast]\r\n");
+    }
+}
+
 static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
-    {"lan_read",  (SYS_CMD_FNC) lan_read,  ": read LAN865X register (lan_read <addr_hex>)"},
-    {"lan_write", (SYS_CMD_FNC) lan_write, ": write LAN865X register (lan_write <addr_hex> <value_hex>)"},
+    {"lan_read",    (SYS_CMD_FNC) lan_read,        ": read LAN865X register (lan_read <addr_hex>)"},
+    {"lan_write",   (SYS_CMD_FNC) lan_write,       ": write LAN865X register (lan_write <addr_hex> <value_hex>)"},
+    {"ptp_mode",    (SYS_CMD_FNC) ptp_mode_cmd,    ": set/get PTP mode (ptp_mode [off|master|follower])"},
+    {"ptp_status",  (SYS_CMD_FNC) ptp_status_cmd,  ": show PTP status"},
+    {"ptp_interval",(SYS_CMD_FNC) ptp_interval_cmd,": set GM Sync interval (ptp_interval <ms>)"},
+    {"ptp_offset",  (SYS_CMD_FNC) ptp_offset_cmd,  ": show follower clock offset in ns"},
+    {"ptp_reset",   (SYS_CMD_FNC) ptp_reset_cmd,   ": reset follower servo to UNINIT"},
+    {"ptp_dst",     (SYS_CMD_FNC) ptp_dst_cmd,     ": set/get PTP destination MAC (ptp_dst [multicast|broadcast])"},
 };
 
 static bool Command_Init(void) {
     return SYS_CMD_ADDGRP(lan_cmd_tbl, (int)(sizeof(lan_cmd_tbl) / sizeof(*lan_cmd_tbl)), "Test", ": Test Commands");
 }
 
+/* --------------------------------------------------------------------------
+ * pktEth0Handler — Harmony TCP/IP packet handler for eth0 (LAN865x).
+ * Called by the TCP/IP stack in interrupt/task context for every received frame.
+ * Returns true if the packet was consumed (caller must NOT free it);
+ * returns false to let the stack process the frame normally.
+ * -------------------------------------------------------------------------- */
+bool pktEth0Handler(TCPIP_NET_HANDLE hNet, TCPIP_MAC_PACKET* rxPkt,
+                    uint16_t frameType, const void* hParam)
+{
+    (void)hNet;
+    (void)hParam;
+
+    /* PTP frame (EtherType 0x88F7): buffer for processing in APP_Tasks, do not forward to IP stack */
+    if (frameType == 0x88F7u) {
+        uint64_t rxTs = 0u;
+        if (g_ptp_rx_ts.valid) {
+            rxTs = g_ptp_rx_ts.rxTimestamp;
+            g_ptp_rx_ts.valid = false;
+        }
+        /* Store the frame for later processing in APP_Tasks().
+         * If a frame is already pending, the older (stale) frame is overwritten
+         * because PTP Sync frames that are not processed promptly become irrelevant. */
+        uint16_t copyLen = rxPkt->pDSeg->segLen;
+        if (copyLen > (uint16_t)sizeof(ptp_rx_buffer.data)) {
+            copyLen = (uint16_t)sizeof(ptp_rx_buffer.data);
+        }
+        memcpy(ptp_rx_buffer.data, rxPkt->pMacLayer, copyLen);
+        ptp_rx_buffer.length      = copyLen;
+        ptp_rx_buffer.rxTimestamp = rxTs;
+        ptp_rx_buffer.pending     = true;
+        TCPIP_PKT_PacketAcknowledge(rxPkt, TCPIP_MAC_PKT_ACK_RX_OK);
+        return true;
+    }
+    return false;
+}
 
 // *****************************************************************************
 // *****************************************************************************
@@ -183,6 +343,7 @@ void APP_Tasks ( void )
         {
             bool appInitialized = true;
 
+            SYS_CONSOLE_PRINT("[APP] Build: " __DATE__ " " __TIME__ "\r\n");
 
             if (appInitialized)
             {
@@ -194,9 +355,43 @@ void APP_Tasks ( void )
 
         case APP_STATE_SERVICE_TASKS:
         {
-            static uint64_t ticks_per_ms = 0u;
+            /* Try to register the PTP packet handler with the TCPIP stack.
+             * PacketHandlerRegister() needs the interface to be "up" (bInterfaceEnabled).
+             * We log the result but do NOT block here — move to IDLE regardless so that
+             * the direct driver-level PTP capture (g_ptp_raw_rx) can work even if the
+             * stack-level handler registration fails. */
+            TCPIP_NET_HANDLE eth0_net_hd = TCPIP_STACK_IndexToNet(0);
+
+            /* Wait until network handle is valid (stack initialized) */
+            if (eth0_net_hd == NULL) {
+                break;
+            }
+
+            /* Attempt handler registration */
+            TCPIP_STACK_PROCESS_HANDLE hPktHnd =
+                TCPIP_STACK_PacketHandlerRegister(eth0_net_hd, pktEth0Handler, MyEth0HandlerParam);
+            SYS_CONSOLE_PRINT("[APP] PacketHandlerRegister: %s\r\n",
+                              (hPktHnd != NULL) ? "OK" : "FAIL");
+
+            /* Advance to IDLE regardless — g_ptp_raw_rx driver path always works */
+            appData.state = APP_STATE_IDLE;
+            break;
+        }
+
+        case APP_STATE_IDLE:
+        {
+            static uint64_t ticks_per_ms  = 0u;
+            static uint64_t last_gm_tick  = 0u;
+            static uint64_t last_fol_tick = 0u;
+            static bool     ptp_fol_initialized = false;
             if (ticks_per_ms == 0u) {
                 ticks_per_ms = (uint64_t)SYS_TIME_FrequencyGet() / 1000ULL;
+            }
+            /* === IDLE first-entry: init PTP follower HW === */
+            if (!ptp_fol_initialized) {
+                SYS_CONSOLE_PRINT("[APP] STATE_IDLE entered — calling PTP_FOL_Init\r\n");
+                PTP_FOL_Init();
+                ptp_fol_initialized = true;
             }
             uint64_t current_tick = SYS_TIME_Counter64Get();
 
@@ -268,6 +463,58 @@ void APP_Tasks ( void )
                 default:
                     break;
             }
+
+            /* === GM Service: call PTP_GM_Service() every 1 ms === */
+            if (PTP_FOL_GetMode() == PTP_MASTER) {
+                if ((current_tick - last_gm_tick) >= ticks_per_ms) {
+                    PTP_GM_Service();
+                    last_gm_tick = current_tick;
+                }
+            }
+
+            /* === FOL Service: call PTP_FOL_Service() every 1 ms === */
+            if (PTP_FOL_GetMode() == PTP_SLAVE) {
+                if ((current_tick - last_fol_tick) >= ticks_per_ms) {
+                    PTP_FOL_Service();
+                    last_fol_tick = current_tick;
+                }
+            }
+
+            /* === FOL: process a buffered PTP frame ===
+             * Primary path: g_ptp_raw_rx filled directly by TC6_CB_OnRxEthernetPacket
+             * (driver level, independent of PacketHandlerRegister success).
+             * Fallback:     ptp_rx_buffer filled by pktEth0Handler (stack level). */
+            if (g_ptp_raw_rx.pending) {
+                g_ptp_raw_rx.pending = false;   /* clear first to avoid re-entry */
+                ptpMode_t curMode = PTP_FOL_GetMode();
+                if (curMode == PTP_SLAVE) {
+                    PTP_FOL_OnFrame((const uint8_t *)g_ptp_raw_rx.data,
+                                   g_ptp_raw_rx.length,
+                                   g_ptp_raw_rx.rxTimestamp);
+                }
+            } else if (ptp_rx_buffer.pending) {
+                ptpMode_t curMode = PTP_FOL_GetMode();
+                if (curMode == PTP_SLAVE) {
+                    ptp_rx_buffer.pending = false;
+                    PTP_FOL_OnFrame(ptp_rx_buffer.data,
+                                    ptp_rx_buffer.length,
+                                    ptp_rx_buffer.rxTimestamp);
+                } else {
+                    ptp_rx_buffer.pending = false;
+                }
+            }
+
+            /* Re-run PTP_GM_Init() if the LAN865x driver recovers from a
+             * reinit (Loss-of-Framing-Error) while in GM mode. The reinit
+             * clears TX-Match registers written by PTP_GM_Init(). */
+            bool lan865x_ready = DRV_LAN865X_IsReady(0u);
+            if (!lan865x_prev_ready && lan865x_ready &&
+                (PTP_FOL_GetMode() == PTP_MASTER))
+            {
+                SYS_CONSOLE_PRINT("[PTP-GM] driver ready after reinit - re-applying TX-Match config\r\n");
+                PTP_GM_Init();
+            }
+            lan865x_prev_ready = lan865x_ready;
 
             break;
         }

@@ -774,6 +774,53 @@ TCPIP_MAC_RES DRV_LAN865X_WriteRegister(uint8_t idx, uint32_t addr, uint32_t val
 */
 TCPIP_MAC_RES DRV_LAN865X_ReadModifyWriteRegister(uint8_t idx, uint32_t addr, uint32_t value, uint32_t mask, bool protected, DRV_LAN865X_RegCallback_t modifyCallback, void *pTag);
 
+/**
+ * TX completion callback for raw Ethernet frames sent via DRV_LAN865X_SendRawEthFrame().
+ * Signature is compatible with TC6_RawTxCallback_t (void* used for TC6_t* to avoid
+ * pulling in tc6.h as a public dependency).
+ *
+ *   pInst      - TC6 instance pointer (cast from TC6_t*; may be ignored by the callback)
+ *   pTx        - Pointer to the transmitted buffer
+ *   len        - Number of bytes transmitted
+ *   pTag       - User tag supplied with DRV_LAN865X_SendRawEthFrame()
+ *   pGlobalTag - Driver instance tag (internal; may be ignored by the callback)
+ */
+typedef void (*DRV_LAN865X_RawTxCallback_t)(void *pInst, const uint8_t *pTx,
+                                             uint16_t len, void *pTag,
+                                             void *pGlobalTag);
+
+/**
+ * Send a raw Ethernet frame directly via TC6 with a selectable TSC flag.
+ *
+ *   idx  - Driver instance index (0-based)
+ *   pBuf - Pointer to the complete Ethernet frame (MAC header + payload)
+ *   len  - Total frame length in bytes
+ *   tsc  - Transmit Timestamp Capture flag: 0x01 = Capture A (use for Sync),
+ *           0x00 = no capture (use for FollowUp)
+ *   cb   - Optional TX-done callback; pass NULL if not needed
+ *   pTag - User tag forwarded to the callback
+ *
+ * Returns true if the frame was accepted by the TC6 layer, false otherwise.
+ */
+bool DRV_LAN865X_SendRawEthFrame(uint8_t idx, const uint8_t *pBuf, uint16_t len,
+                                  uint8_t tsc, DRV_LAN865X_RawTxCallback_t cb,
+                                  void *pTag);
+
+/* Returns true when the LAN865x driver instance is fully initialised and ready
+ * to accept register access and frame TX/RX requests.
+ *   idx - Driver instance index (0-based)
+ */
+bool DRV_LAN865X_IsReady(uint8_t idx);
+
+/* Returns the TX Timestamp Capture Available bits (STATUS0 bits 8-10) that were
+ * saved by the driver's status interrupt handler before it W1C-cleared STATUS0.
+ * Calling this function also clears the saved value (atomic read-and-clear).
+ * The GM state machine must poll this instead of reading STATUS0 directly to
+ * avoid the race where the driver clears TTSCAA before the GM reads it.
+ *   idx - Driver instance index (0-based)
+ * Returns: bit mask with TTSCAA/B/C bits set, or 0 if nothing captured.
+ */
+uint32_t DRV_LAN865X_GetAndClearTsCapture(uint8_t idx);
 
 
 #ifdef __cplusplus
