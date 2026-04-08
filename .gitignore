@@ -7,6 +7,7 @@
 *.inx
 **/_build/
 **/setup_flasher.config
+**/setup_compiler.config
 mcc-manifest-autosave.yml
 **/nbproject/private
 **/nbproject/Makefile-*
