@@ -7,6 +7,37 @@ Harmony 3 project for the ATSAME54P20A + LAN865x 10BASE-T1S demo.
 
 ## 1. Build Infrastructure
 
+### `tcpip_iperf_lan865x.X/setup_compiler.py`
+New file. One-time setup tool — scans `C:\Program Files\Microchip\xc32\` for
+installed XC32 versions, lets the user pick one, patches `toolchain.cmake` with
+the selected version, and saves the choice to `setup_compiler.config` (JSON).
+Must be run once after `git clone`, and again whenever a different XC32 version
+should be used.
+
+```
+python setup_compiler.py
+```
+
+Example session:
+```
+Installed XC32 versions (2 found):
+  [1] v4.60       C:\Program Files\Microchip\xc32\v4.60\bin\xc32-gcc.exe
+  [2] v5.10       C:\Program Files\Microchip\xc32\v5.10\bin\xc32-gcc.exe  <-- current
+  [0] Abort / keep current selection
+Select version number: 1
+...
+Patched toolchain.cmake: v5.10 -> v4.60
+Done. build.bat will use XC32 v4.60.
+```
+
+The script replaces the version string in all compiler-path entries inside
+`cmake/.generated/toolchain.cmake` (both forward-slash and double-backslash
+forms, covering all 17 occurrences: `CMAKE_C_COMPILER`, `CMAKE_AR`, `MP_BIN2HEX`,
+etc.). `build.bat` then uses the patched file directly — no `-D` overrides
+needed on the CMake command line.
+
+`setup_compiler.config` is listed in `.gitignore` (machine-specific).
+
 ### `tcpip_iperf_lan865x.X/build.bat`
 New file. Runs a CMake + Ninja build in a single command.
 
@@ -22,6 +53,16 @@ build.bat [incremental|clean|rebuild|help]
 | `clean` | Deletes the temporary build directory |
 | `rebuild` | Clean followed by a full build |
 | `help` | Prints the available options |
+
+**Compiler check:**  
+At startup `build.bat` reads `setup_compiler.config` (written by
+`setup_compiler.py`). If the file is missing it aborts with an error message.
+If the configured `xc32-gcc.exe` path does not exist on this machine (e.g.
+a different XC32 version is installed) it aborts with a clear message.
+Otherwise it prints the selected version before the CMake step:
+```
+Compiler  : XC32 v5.10  (C:\Program Files\Microchip\xc32\v5.10\bin\xc32-gcc.exe)
+```
 
 **Build directory:**  
 To avoid Windows MAX_PATH (260 character) issues caused by the deep project
@@ -40,8 +81,16 @@ The build output (`.elf`, `.hex`) continues to be written to the project's
 `out\tcpip_iperf_lan865x\` directory as before.
 
 **`.gitignore` additions:**  
-`**/_build/` and `*.hex` were added so that no temporary build artefacts are
-tracked by git.
+`**/_build/`, `*.hex`, `**/setup_flasher.config`, and `**/setup_compiler.config`
+were added so that no temporary or machine-specific files are tracked by git.
+
+**Out-of-box workflow after `git clone`:**
+```bat
+python setup_compiler.py    # select XC32 version (patches toolchain.cmake)
+python setup_flasher.py     # assign Board 1 / Board 2 to connected debuggers
+build.bat                   # compile
+python flash.py             # flash both boards
+```
 
 ### `tcpip_iperf_lan865x.X/setup_flasher.py`
 New file. One-time setup tool — detects connected Microchip/Atmel EDBG debuggers,
