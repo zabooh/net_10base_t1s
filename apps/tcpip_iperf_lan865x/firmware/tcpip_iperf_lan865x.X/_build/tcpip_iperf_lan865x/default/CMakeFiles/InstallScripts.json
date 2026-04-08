@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"C:/work/ptp/AN1847/harmony/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/_build/tcpip_iperf_lan865x/default/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
