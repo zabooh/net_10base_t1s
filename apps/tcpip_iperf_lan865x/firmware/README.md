@@ -103,6 +103,29 @@ human-readable summary.
 | `memoryfile.xml` (linker XML) | Flash used/free/total, RAM used/free/total |
 | `mem.map` (linker map) | `_min_heap_size` (heap reserved by linker script) |
 | `default.elf` via `xc32-nm` | Active interrupt handler names |
+| `default.elf` binary scan | Embedded build timestamp (`__DATE__` / `__TIME__`) |
+
+**Build timestamp extraction:**  
+`app.c` embeds the compile-time timestamp as a literal string via:
+```c
+SYS_CONSOLE_PRINT("[APP] Build: " __DATE__ " " __TIME__ "\r\n");
+```
+`build_summary.py` scans the ELF binary for this pattern and extracts the
+timestamp (e.g. `Apr  8 2026 17:08:51`). It appears in the summary header and
+drives the filename of the image artefacts.
+
+**Image output — `out/tcpip_iperf_lan865x/image/`:**  
+After printing the summary, the script creates (or overwrites) two files in the
+`image/` subdirectory:
+
+| File | Contents |
+|------|----------|
+| `tcpip_iperf_lan865x_<YYYYMMDD_HHMMSS>.hex` | Copy of `default.hex`, named with the build timestamp |
+| `build_summary_<YYYYMMDD_HHMMSS>.txt` | Full summary text as written to stdout |
+
+The `image/` directory is tracked by git (`!**/image/*.hex` negation rule in
+`.gitignore`) so that released binaries are always available after `git clone`
+without a rebuild.
 
 **Example output:**
 ```
@@ -110,15 +133,17 @@ human-readable summary.
   BUILD SUMMARY
 ==============================================================
 
+  Build      : Apr  8 2026 17:08:51
+
   Flash (program memory)
-    Used   :  132,005 bytes  ( 128.9 KiB)  12.6%
-    Free   :  916,571 bytes  ( 895.1 KiB)
+    Used   :  131,877 bytes  ( 128.8 KiB)  12.6%
+    Free   :  916,699 bytes  ( 895.2 KiB)
     Total  : 1,048,576 bytes  (1024.0 KiB)
     [####--------------------------]
 
   RAM (data memory)
-    Used   :   15,894 bytes  (  15.5 KiB)  6.1%
-    Free   :  246,250 bytes  ( 240.5 KiB)
+    Used   :   15,937 bytes  (  15.6 KiB)  6.1%
+    Free   :  246,207 bytes  ( 240.4 KiB)
     Total  :  262,144 bytes  ( 256.0 KiB)
     [##----------------------------]
 
@@ -141,6 +166,9 @@ human-readable summary.
         Runtime heap consumption is not measurable at link time.
 
 ==============================================================
+
+  Image HEX  : ...image\tcpip_iperf_lan865x_20260408_170851.hex
+  Summary    : ...image\build_summary_20260408_170851.txt
 ```
 
 **Interrupt classification:**  
