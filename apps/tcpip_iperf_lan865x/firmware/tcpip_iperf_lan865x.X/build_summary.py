@@ -14,8 +14,11 @@ Usage (called by build.bat after a successful build):
     python build_summary.py <BUILD_DIR> <ELF_PATH> <XC32_BIN_DIR>
 """
 
+import datetime
+import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -186,76 +189,157 @@ def read_active_interrupts(elf_path: str, xc32_bin: str) -> tuple[list, list]:
 
 
 # ---------------------------------------------------------------------------
-# 4. Print summary
+# 4. Build timestamp from ELF binary
 # ---------------------------------------------------------------------------
 
-def print_summary(mem: dict, map_info: dict, core_irqs: list, periph_irqs: list) -> None:
-    SEP  = "=" * 62
-    SEP2 = "-" * 62
-    print()
-    print(SEP)
-    print("  BUILD SUMMARY")
-    print(SEP)
+def read_build_timestamp(elf_path: str) -> tuple[str, str]:
+    """
+    Scans the ELF binary for the embedded build-time string written by:
+        SYS_CONSOLE_PRINT("[APP] Build: " __DATE__ " " __TIME__ "\\r\\n");
+    Returns (human_str, tag_str) e.g. ("Apr  8 2026 14:44:18", "20260408_144418")
+    or ("", "") if not found.
+    """
+    try:
+        with open(elf_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return "", ""
+
+    m = re.search(
+        rb'\[APP\] Build: ([A-Za-z]{3} [ \d]\d \d{4} \d{2}:\d{2}:\d{2})',
+        data,
+    )
+    if not m:
+        return "", ""
+
+    ts_str = m.group(1).decode("ascii", errors="replace")
+    try:
+        ts_norm = re.sub(r"\s+", " ", ts_str.strip())
+        dt = datetime.datetime.strptime(ts_norm, "%b %d %Y %H:%M:%S")
+        ts_tag = dt.strftime("%Y%m%d_%H%M%S")
+    except ValueError:
+        ts_tag = ts_str.replace(" ", "_").replace(":", "")
+
+    return ts_str, ts_tag
+
+
+# ---------------------------------------------------------------------------
+# 5. Format / print summary
+# ---------------------------------------------------------------------------
+
+def print_summary(mem: dict, map_info: dict, core_irqs: list, periph_irqs: list,
+                  build_ts: str = "") -> str:
+    """Prints the build summary to stdout and returns it as a string."""
+    buf = io.StringIO()
+
+    def out(s: str = "") -> None:
+        print(s)
+        buf.write(s + "\n")
+
+    SEP = "=" * 62
+    out()
+    out(SEP)
+    out("  BUILD SUMMARY")
+    out(SEP)
+
+    # --- Build timestamp ---
+    if build_ts:
+        out()
+        out(f"  Build      : {build_ts}")
 
     # --- Flash ---
     if "program" in mem:
         m = mem["program"]
         used, total, free = m["used"], m["total"], m["free"]
         pct = _pct(used, total)
-        print(f"\n  Flash (program memory)")
-        print(f"    Used   : {used:>8,} bytes  ({_kib(used):>10})  {pct}")
-        print(f"    Free   : {free:>8,} bytes  ({_kib(free):>10})")
-        print(f"    Total  : {total:>8,} bytes  ({_kib(total):>10})")
-        print(f"    {_bar(used, total)}")
+        out()
+        out(f"  Flash (program memory)")
+        out(f"    Used   : {used:>8,} bytes  ({_kib(used):>10})  {pct}")
+        out(f"    Free   : {free:>8,} bytes  ({_kib(free):>10})")
+        out(f"    Total  : {total:>8,} bytes  ({_kib(total):>10})")
+        out(f"    {_bar(used, total)}")
 
     # --- RAM ---
     if "data" in mem:
         m = mem["data"]
         used, total, free = m["used"], m["total"], m["free"]
         pct = _pct(used, total)
-        print(f"\n  RAM (data memory)")
-        print(f"    Used   : {used:>8,} bytes  ({_kib(used):>10})  {pct}")
-        print(f"    Free   : {free:>8,} bytes  ({_kib(free):>10})")
-        print(f"    Total  : {total:>8,} bytes  ({_kib(total):>10})")
-        print(f"    {_bar(used, total)}")
+        out()
+        out(f"  RAM (data memory)")
+        out(f"    Used   : {used:>8,} bytes  ({_kib(used):>10})  {pct}")
+        out(f"    Free   : {free:>8,} bytes  ({_kib(free):>10})")
+        out(f"    Total  : {total:>8,} bytes  ({_kib(total):>10})")
+        out(f"    {_bar(used, total)}")
 
     # --- Heap / Stack ---
-    print(f"\n  Linker-Reserved Regions")
+    out()
+    out("  Linker-Reserved Regions")
     if map_info.get("heap") is not None:
         h = map_info["heap"]
-        print(f"    Heap   : {h:>8,} bytes  ({_kib(h):>10})  (_min_heap_size)")
+        out(f"    Heap   : {h:>8,} bytes  ({_kib(h):>10})  (_min_heap_size)")
     else:
-        print(f"    Heap   :       -- not found in map --")
+        out("    Heap   :       -- not found in map --")
 
     if map_info.get("stack") is not None:
         s = map_info["stack"]
-        print(f"    Stack  : {s:>8,} bytes  ({_kib(s):>10})  (_min_stack_size)")
+        out(f"    Stack  : {s:>8,} bytes  ({_kib(s):>10})  (_min_stack_size)")
     else:
-        print(f"    Stack  :       -- not found in map --")
+        out("    Stack  :       -- not found in map --")
 
     # --- Interrupts ---
-    print(f"\n  Interrupt Handlers")
-    print(f"    Core IRQs        ({len(core_irqs):2d}): ", end="")
-    if core_irqs:
-        print(", ".join(core_irqs))
-    else:
-        print("none")
+    out()
+    out("  Interrupt Handlers")
+    core_str = ", ".join(core_irqs) if core_irqs else "none"
+    out(f"    Core IRQs        ({len(core_irqs):2d}): {core_str}")
 
-    print(f"    Peripheral IRQs  ({len(periph_irqs):2d}):")
+    out(f"    Peripheral IRQs  ({len(periph_irqs):2d}):")
     if periph_irqs:
         for name in periph_irqs:
-            print(f"      - {name}")
+            out(f"      - {name}")
     else:
-        print("      none")
+        out("      none")
 
     # --- Heap usage note ---
     if map_info.get("heap"):
-        print(f"\n  Note: Heap is active ({_kib(map_info['heap'])}).")
-        print(f"        Used by: musl malloc (XC32 libc), TCPIP internal heap.")
-        print(f"        Runtime heap consumption is not measurable at link time.")
+        out()
+        out(f"  Note: Heap is active ({_kib(map_info['heap'])}).")
+        out("        Used by: musl malloc (XC32 libc), TCPIP internal heap.")
+        out("        Runtime heap consumption is not measurable at link time.")
 
-    print()
-    print(SEP)
+    out()
+    out(SEP)
+    out()
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# 6. Image output  (image/<project>_<timestamp>.hex + build_summary_<ts>.txt)
+# ---------------------------------------------------------------------------
+
+def write_image(elf_path: str, summary_text: str, ts_tag: str) -> None:
+    """
+    Creates <out_dir>/image/ and writes:
+      - tcpip_iperf_lan865x_<ts_tag>.hex  (copy of default.hex)
+      - build_summary_<ts_tag>.txt        (summary text)
+    """
+    out_dir   = os.path.dirname(os.path.abspath(elf_path))
+    image_dir = os.path.join(out_dir, "image")
+    os.makedirs(image_dir, exist_ok=True)
+
+    tag         = ts_tag if ts_tag else "unknown"
+    hex_dst     = os.path.join(image_dir, f"tcpip_iperf_lan865x_{tag}.hex")
+    summary_dst = os.path.join(image_dir, f"build_summary_{tag}.txt")
+
+    hex_src = os.path.join(out_dir, "default.hex")
+    if os.path.isfile(hex_src):
+        shutil.copy2(hex_src, hex_dst)
+        print(f"  Image HEX  : {hex_dst}")
+    else:
+        print(f"  WARNING: HEX not found at {hex_src}, skipping copy.")
+
+    with open(summary_dst, "w", encoding="utf-8") as f:
+        f.write(summary_text)
+    print(f"  Summary    : {summary_dst}")
     print()
 
 
@@ -268,15 +352,17 @@ def main() -> None:
         print("Usage: python build_summary.py <BUILD_DIR> <ELF_PATH> <XC32_BIN_DIR>")
         sys.exit(1)
 
-    build_dir   = sys.argv[1]
-    elf_path    = sys.argv[2]
-    xc32_bin    = sys.argv[3]
+    build_dir = sys.argv[1]
+    elf_path  = sys.argv[2]
+    xc32_bin  = sys.argv[3]
 
-    mem        = read_memory_xml(build_dir)
-    map_info   = read_map_file(build_dir)
+    mem                    = read_memory_xml(build_dir)
+    map_info               = read_map_file(build_dir)
     core_irqs, periph_irqs = read_active_interrupts(elf_path, xc32_bin)
+    build_ts, ts_tag       = read_build_timestamp(elf_path)
 
-    print_summary(mem, map_info, core_irqs, periph_irqs)
+    summary_text = print_summary(mem, map_info, core_irqs, periph_irqs, build_ts)
+    write_image(elf_path, summary_text, ts_tag)
 
 
 if __name__ == "__main__":

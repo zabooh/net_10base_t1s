@@ -1,0 +1,38 @@
+
+==============================================================
+  BUILD SUMMARY
+==============================================================
+
+  Build      : Apr  8 2026 17:45:46
+
+  Flash (program memory)
+    Used   :  131,877 bytes  ( 128.8 KiB)  12.6%
+    Free   :  916,699 bytes  ( 895.2 KiB)
+    Total  : 1,048,576 bytes  (1024.0 KiB)
+    [####--------------------------]
+
+  RAM (data memory)
+    Used   :   15,937 bytes  (  15.6 KiB)  6.1%
+    Free   :  246,207 bytes  ( 240.4 KiB)
+    Total  :  262,144 bytes  ( 256.0 KiB)
+    [##----------------------------]
+
+  Linker-Reserved Regions
+    Heap   :   44,960 bytes  (  43.9 KiB)  (_min_heap_size)
+    Stack  :       -- not found in map --
+
+  Interrupt Handlers
+    Core IRQs        ( 7): BusFault, DebugMonitor, HardFault, MemoryManagement, NonMaskableInt, Reset, UsageFault
+    Peripheral IRQs  ( 5):
+      - DMAC_0
+      - DMAC_1
+      - SERCOM0_SPI
+      - SERCOM1_USART
+      - TC0_Timer
+
+  Note: Heap is active (43.9 KiB).
+        Used by: musl malloc (XC32 libc), TCPIP internal heap.
+        Runtime heap consumption is not measurable at link time.
+
+==============================================================
+

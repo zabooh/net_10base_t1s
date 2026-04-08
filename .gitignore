@@ -1,6 +1,7 @@
 *.o
 *.elf
 *.hex
+!**/image/*.hex
 *.map
 *.d
 *.log
