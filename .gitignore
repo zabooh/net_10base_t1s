@@ -1,9 +1,12 @@
 *.o
 *.elf
+*.hex
 *.map
 *.d
 *.log
 *.inx
+**/_build/
+**/setup_flasher.config
 mcc-manifest-autosave.yml
 **/nbproject/private
 **/nbproject/Makefile-*

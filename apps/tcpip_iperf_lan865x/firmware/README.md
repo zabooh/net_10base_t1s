@@ -8,20 +8,67 @@ Harmony 3 project for the ATSAME54P20A + LAN865x 10BASE-T1S demo.
 ## 1. Build Infrastructure
 
 ### `tcpip_iperf_lan865x.X/build.bat`
-New file. Runs a full CMake + Ninja build in a single command.
+New file. Runs a CMake + Ninja build in a single command.
 
-```bat
-cmake --preset tcpip_iperf_lan865x_default_conf --fresh
-cmake --build .
+**Usage:**
 ```
+build.bat [incremental|clean|rebuild|help]
+```
+
+| Parameter | Behaviour |
+|-----------|-----------|
+| *(none)* | Incremental build — only recompiles changed files (default) |
+| `incremental` | Same as above, explicit |
+| `clean` | Deletes the temporary build directory |
+| `rebuild` | Clean followed by a full build |
+| `help` | Prints the available options |
+
+**Build directory:**  
+To avoid Windows MAX_PATH (260 character) issues caused by the deep project
+path, the CMake intermediate files (`.o`, `.d`, `build.ninja`, `CMakeCache.txt`)
+are placed **outside the repository**:
+
+```
+C:\work\ptp\AN1847\harmony\temp\tcpip_iperf_lan865x\default\
+```
+
+The path is derived automatically at runtime relative to `build.bat` using
+`pushd`/`popd` — no hardcoded path, works after `git clone` on any machine
+(provided the project is checked out inside a `harmony\` parent directory).
+
+The build output (`.elf`, `.hex`) continues to be written to the project's
+`out\tcpip_iperf_lan865x\` directory as before.
+
+**`.gitignore` additions:**  
+`**/_build/` and `*.hex` were added so that no temporary build artefacts are
+tracked by git.
+
+### `tcpip_iperf_lan865x.X/setup_flasher.py`
+New file. One-time setup tool — detects connected Microchip/Atmel EDBG debuggers,
+lets the user assign Board 1 (Grandmaster) and Board 2 (Follower), and saves the
+result to `setup_flasher.config` (JSON). Must be run once after `git clone` or
+whenever the boards are connected to different USB ports.
+
+```
+python setup_flasher.py
+```
+
+Detection heuristics: USB VID `0x03EB` (Atmel/Microchip), serial number prefix
+`ATML`, or manufacturer string containing `microchip` / `atmel`.
+
+`setup_flasher.config` is listed in `.gitignore` (machine-specific, not committed).
 
 ### `tcpip_iperf_lan865x.X/flash.py` + `tcpip_iperf_lan865x.X/mdb_flash.py`
 New files. Flash the compiled `default.hex` to one or both target boards using
 MPLAB MDB (Microchip Debugger).
 
-- Board 1 serial: `ATML3264031800001049`
-- Board 2 serial: `ATML3264031800001290`
-- Usage: `python flash.py [--board1-only | --board2-only]`
+Board serial numbers and COM ports are read from `setup_flasher.config`.
+If the config file is missing, `flash.py` aborts with an error and instructs the
+user to run `setup_flasher.py` first.
+
+```
+python flash.py [--board1-only | --board2-only] [--hex <path>] [--swd-khz <n>]
+```
 
 ---
 
@@ -286,15 +333,15 @@ the GM/FOL task files):
 
 | Command | Description |
 |---------|-------------|
-| `Test ptp_mode off` | Disable PTP |
-| `Test ptp_mode follower` | Enable Follower mode (PTP_SLAVE) — silent |
-| `Test ptp_mode follower v` | Enable Follower mode with per-Sync verbose line (overwriting) |
-| `Test ptp_mode master` | Enable Grandmaster mode (PTP_MASTER) |
-| `Test ptp_status` | Show current mode, sync count, servo state |
-| `Test ptp_interval <ms>` | Set GM Sync interval in ms (default 125) |
-| `Test ptp_offset` | Show follower clock offset in ns |
-| `Test ptp_reset` | Reset follower servo to UNINIT |
-| `Test ptp_dst [multicast\|broadcast]` | Set PTP destination MAC |
+| `ptp_mode off` | Disable PTP |
+| `ptp_mode follower` | Enable Follower mode (PTP_SLAVE) — silent |
+| `ptp_mode follower v` | Enable Follower mode with per-Sync verbose line (overwriting) |
+| `ptp_mode master` | Enable Grandmaster mode (PTP_MASTER) |
+| `ptp_status` | Show current mode, sync count, servo state |
+| `ptp_interval <ms>` | Set GM Sync interval in ms (default 125) |
+| `ptp_offset` | Show follower clock offset in ns |
+| `ptp_reset` | Reset follower servo to UNINIT |
+| `ptp_dst [multicast\|broadcast]` | Set PTP destination MAC |
 
 ---
 
@@ -381,62 +428,7 @@ timestamp attribution in multi-instance configurations.
 
 ---
 
-## 9. Debug Output Reduction
-
-All per-frame debug prints were removed to prevent UART buffer saturation (which
-caused intermittent access violations in the test script's Windows overlapped I/O).
-Only essential one-shot and error messages are kept.
-
-### `src/app.c`
-- Removed: throttled `[PKT] handler cnt=...` (every 64 frames)
-- Removed: `[PKT] PTP 0x88F7!` per-frame print
-- Removed: throttled `[APP] SVC_TASKS try=...` counter
-- Removed: verbose PacketHandlerRegister with retry count
-- Removed: `[APP] g_ptp_raw_rx mode=...` and `[APP] ptp_rx_buffer mode=...` prints
-- **Kept**: `[APP] Build: ...`, `PacketHandlerRegister: OK/FAIL` (once), `STATE_IDLE entered` (once), error messages
-
-### `src/PTP_FOL_task.c`
-- Removed: per-frame `PTP_LOG` calls (`processSync`, `processFollowUp`, `handlePtp`, `Sync t2`, `OnFrame`, `!`, HARDSYNC offset)
-- Removed: unused `uint16_t seqId` variable in `handlePtp()` (gcc `-Werror=unused-variable`)
-- **Added**: `static uint8_t prevSyncStatus = UNINIT` — tracks previous servo state
-- **Added**: transition log block (fires **once per state change** only):
-  ```c
-  if (syncStatus != prevSyncStatus) {
-      if (syncStatus == COARSE)
-          PTP_LOG("PTP COARSE  offset=%d\r\n", (int)offset);
-      else if (syncStatus == FINE)
-          PTP_LOG("PTP FINE    offset=%d\r\n", (int)offset);
-      prevSyncStatus = syncStatus;
-  }
-  ```
-- **Added**: `prevSyncStatus = syncStatus` in `resetSlaveNode()` so re-convergence cycles re-emit each transition
-
-### `src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c`
-- Removed: throttled `[DRV-RX] cnt=...` (every 32nd frame)
-- Removed: `[DRV-RX] PTP 0x88F7 captured!` per-frame print
-- Removed: `[DBG] _OnStatus0` diagnostic print
-- Removed: `[DBG-CHK52]` 10-call counter block in `DRV_LAN865X_SendRawEthFrame`
-- Removed: `LAN865x_%d Status0.Transmit Timestamp Capture Available A/B/C` prints
-  (`case 8/9/10` in `_OnStatus1`) — TTSCAA/B/C events are handled silently by the
-  GM state machine; printing them added noise between GM overwriting lines.
-- **Fixed**: `_OnStatus0` dangling cursor — see below (original fix)
-- **Fixed**: `_OnStatus1` dangling cursor — same root cause as `_OnStatus0`:
-  unconditional `PRINT_LIMIT("LAN865x_%d ", ...)` prefix before the bit-scan loop.
-  When `value=0` (no bits set), prefix prints without newline → dangling cursor.
-  Fix: moved `LAN865x_%d` into each individual case message string:
-  ```c
-  // Before (broken):
-  PRINT_LIMIT("LAN865x_%d ", pDrvInst->index);
-  // ... switch loop — when value=0, nothing executes, no \r\n ...
-
-  // After (fixed):
-  PRINT_LIMIT("LAN865x_%d Status0.Reset Complete\r\n", pDrvInst->index);
-  // When value=0 loop body never executes → nothing printed, no dangling cursor
-  ```
-
----
-
-## 10. Test Script — `ptp_onoff_test.py`
+## 9. Test Script — `ptp_onoff_test.py`
 
 Location: `tcpip_iperf_lan865x.X/ptp_onoff_test.py`
 
