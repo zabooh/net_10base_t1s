@@ -1358,7 +1358,7 @@ void TC6_CB_OnRxEthernetSlice(TC6_t *pInst, const uint8_t *pRx, uint16_t offset,
 volatile PTP_RxTimestampEntry_t g_ptp_rx_ts = {0u, false};
 
 /* Direct PTP frame capture (see ptp_ts_ipc.h) */
-volatile PTP_RxFrameEntry_t g_ptp_raw_rx = {{0u}, 0u, 0u, false};
+volatile PTP_RxFrameEntry_t g_ptp_raw_rx = {{0u}, 0u, 0u, 0u, false};
 
 /**
  * \brief Callback when ever an Ethernet packet was received. This will notify the integrator, that now all chunks very reported by TC6_CB_OnRxEthernetPacket and the data can be processed.
@@ -1406,6 +1406,15 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
                              macPkt->pDSeg->segLoad, copyLen);
                 g_ptp_raw_rx.length      = copyLen;
                 g_ptp_raw_rx.rxTimestamp = (rxTimestamp != NULL) ? *rxTimestamp : 0u;
+                /* Only update sysTickAtRx for frames that carry a hardware RX
+                 * timestamp (= SYNC).  FollowUp frames have rxTimestamp==NULL
+                 * and arrive ~1-4 ms after SYNC.  Overwriting sysTickAtRx with
+                 * the FollowUp tick would create a systematic offset in
+                 * PTP_CLOCK_GetTime_ns() because the anchor pair
+                 * (wallclock=t2_SYNC, tick=tick_FollowUp) would be inconsistent. */
+                if (rxTimestamp != NULL) {
+                    g_ptp_raw_rx.sysTickAtRx = SYS_TIME_Counter64Get();
+                }
                 g_ptp_raw_rx.pending     = true;
             }
 

@@ -20,6 +20,7 @@ set(tcpip_iperf_lan865x_default_default_XC32_FILE_TYPE_compile
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/filters.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/PTP_FOL_task.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_gm_task.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_clock.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/config/default/crypto/src/crypto.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/config/default/driver/lan865x/src/dynamic/tc6/tc6.c"

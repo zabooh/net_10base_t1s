@@ -20,6 +20,8 @@ Key differences vs. the noIP version:
 #include <stdlib.h>
 #include "PTP_FOL_task.h"
 #include "filters.h"
+#include "ptp_clock.h"
+#include "ptp_ts_ipc.h"
 #include "config/default/driver/lan865x/drv_lan865x.h"
 #include "config/default/system/console/sys_console.h"
 
@@ -433,6 +435,13 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
     /* Convert to internal ns representation */
     uint64_t t1 = tsToInternal(&TS_SYNC.origin);
     uint64_t t2 = tsToInternal(&TS_SYNC.receipt);
+
+    /* Update software PTP clock anchor: t2 is the RTSA wallclock, sysTickAtRx
+     * was captured atomically alongside it in TC6_CB_OnRxEthernetPacket(). */
+    if (g_ptp_raw_rx.sysTickAtRx != 0u)
+    {
+        PTP_CLOCK_Update(t2, g_ptp_raw_rx.sysTickAtRx);
+    }
 
     if (TS_SYNC.receipt_prev.secondsLsb != 0u) {
         uint64_t curr = t2;

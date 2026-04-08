@@ -33,6 +33,7 @@
 #include "ptp_ts_ipc.h"
 #include "PTP_FOL_task.h"
 #include "ptp_gm_task.h"
+#include "ptp_clock.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
 #include "system/command/sys_command.h"
@@ -175,6 +176,24 @@ static void ptp_mode_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     }
 }
 
+static void ptp_time_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO; (void)argc; (void)argv;
+    if (!PTP_CLOCK_IsValid()) {
+        SYS_CONSOLE_PRINT("ptp_time: not valid (no PTP sync yet)\r\n");
+        return;
+    }
+    uint64_t now_ns = PTP_CLOCK_GetTime_ns();
+    uint32_t sec    = (uint32_t)(now_ns / 1000000000ULL);
+    uint32_t ns     = (uint32_t)(now_ns % 1000000000ULL);
+    uint32_t h      = sec / 3600u;
+    uint32_t m      = (sec % 3600u) / 60u;
+    uint32_t s      = sec % 60u;
+    SYS_CONSOLE_PRINT("ptp_time: %02lu:%02lu:%02lu.%09lu  drift=%+ldppb\r\n",
+                      (unsigned long)h, (unsigned long)m,
+                      (unsigned long)s, (unsigned long)ns,
+                      (long)PTP_CLOCK_GetDriftPPB());
+}
+
 static void ptp_status_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     ptpMode_t mode = PTP_FOL_GetMode();
     const char *modeStr = (mode == PTP_MASTER) ? "master" :
@@ -242,6 +261,7 @@ static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
     {"lan_write",   (SYS_CMD_FNC) lan_write,       ": write LAN865X register (lan_write <addr_hex> <value_hex>)"},
     {"ptp_mode",    (SYS_CMD_FNC) ptp_mode_cmd,    ": set/get PTP mode (ptp_mode [off|master|follower])"},
     {"ptp_status",  (SYS_CMD_FNC) ptp_status_cmd,  ": show PTP status"},
+    {"ptp_time",    (SYS_CMD_FNC) ptp_time_cmd,    ": show software PTP wallclock time"},
     {"ptp_interval",(SYS_CMD_FNC) ptp_interval_cmd,": set GM Sync interval (ptp_interval <ms>)"},
     {"ptp_offset",  (SYS_CMD_FNC) ptp_offset_cmd,  ": show follower clock offset in ns"},
     {"ptp_reset",   (SYS_CMD_FNC) ptp_reset_cmd,   ": reset follower servo to UNINIT"},

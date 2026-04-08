@@ -17,6 +17,8 @@ Key differences vs. the noIP reference:
 #include <stdint.h>
 #include "ptp_gm_task.h"
 #include "PTP_FOL_task.h"
+#include "ptp_clock.h"
+#include "system/time/sys_time.h"
 #include "config/default/driver/lan865x/drv_lan865x.h"
 #include "config/default/system/console/sys_console.h"
 #include "config/default/library/tcpip/tcpip.h"
@@ -609,6 +611,14 @@ void PTP_GM_Service(void)
             }
             gm_wait_ticks = 0u;
             gm_ts_nsec = gm_op_val;
+
+            /* Update software PTP clock with the freshly captured TX timestamp */
+            {
+                uint64_t wc_ns = (uint64_t)gm_ts_sec * 1000000000ULL
+                               + (uint64_t)gm_ts_nsec;
+                PTP_CLOCK_Update(wc_ns, SYS_TIME_Counter64Get());
+            }
+
             GM_SET_STATE(GM_STATE_WRITE_CLEAR);
             break;
 

@@ -33,7 +33,8 @@ extern volatile PTP_RxTimestampEntry_t g_ptp_rx_ts;
 typedef struct {
     uint8_t          data[PTP_RAW_BUF_SIZE];
     uint16_t         length;
-    uint64_t         rxTimestamp;
+    uint64_t         rxTimestamp;   /* LAN865x RTSA hardware timestamp in ns   */
+    uint64_t         sysTickAtRx;   /* SYS_TIME_Counter64Get() at same moment  */
     volatile bool    pending;
 } PTP_RxFrameEntry_t;
 
