@@ -176,6 +176,50 @@ user to run `setup_flasher.py` first.
 python flash.py [--board1-only | --board2-only] [--hex <path>] [--swd-khz <n>]
 ```
 
+### `tcpip_iperf_lan865x.X/cmake/tcpip_iperf_lan865x/default/user.cmake`
+New file. Workaround for a CMake + xc32-gcc incompatibility that causes
+`build.bat rebuild` (or any clean build where `out/` does not yet exist) to
+fail at the final bin2hex step with `default.elf: No such file`.
+
+**Root cause — MINGW backslash stripping in xc32-gcc:**  
+The XC32 toolchain binaries are MINGW executables. MINGW strips backslashes
+from command-line arguments when passing them to the child process. In the
+generated `build.ninja`, the linker output path is written as a relative
+backslash path:
+```
+TARGET_FILE = out\default.elf
+```
+The linker receives `-o out\default.elf` → MINGW strips the backslash →
+xc32-gcc creates a file literally named `outdefault.elf` in the build
+directory (no path separator). The canonical path `out\tcpip_iperf_lan865x\default.elf`,
+which `build_summary.py` and `flash.py` expect, is therefore never written and
+the build fails.
+
+**Symptom:**
+```
+build.bat rebuild
+```
+Fails at step 152 (bin2hex):
+```
+xc32-bin2hex: error: out\tcpip_iperf_lan865x\default.elf: No such file or directory
+```
+
+**Fix — `user.cmake`:**  
+`CMakeLists.txt` already contains `include(user.cmake OPTIONAL)` — the
+standard CMake user extension point. The new `user.cmake` file:
+
+1. Creates `<BUILD_DIR>/out/` at CMake configure time (`file(MAKE_DIRECTORY)`).
+2. Redirects the linker's `TARGET_FILE` to that directory via
+   `RUNTIME_OUTPUT_DIRECTORY` — Ninja now calls xc32-gcc with
+   `-o <BUILD_DIR>/out/default.elf` (absolute forward-slash path → unaffected
+   by the MINGW bug).
+3. Adds a `POST_BUILD` command that copies the resulting ELF to the canonical
+   location `out/tcpip_iperf_lan865x/default.elf` (relative to the source
+   tree) so that `bin2hex`, `build_summary.py`, and `flash.py` find it where
+   they expect it.
+
+The file is committed to the repository; no manual action is required.
+
 ---
 
 ## 2. MAC Address Randomisation

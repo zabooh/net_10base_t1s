@@ -2280,6 +2280,7 @@ static void _OnStatus1(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
         bool reinit = false;
         for (i = 0u; i < 32u; i++) {
             if (0u != (value & (1u << i))) {
+                if (i == 28u) { continue; } /* gPTP_PA_TS_EG_Status: fires every Sync, not an error — suppress */
                 PRINT_LIMIT("LAN865x_%d ", pDrvInst->index);
                 switch (i) {
                     case 0:
@@ -2322,9 +2323,6 @@ static void _OnStatus1(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
                         break;
                     case 27:
                         PRINT_LIMIT("Status1.MCLK_GEN_Status\r\n");
-                        break;
-                    case 28:
-                        PRINT_LIMIT("Status1.gPTP_PA_TS_EG_Status\r\n");
                         break;
                     case 29:
                         PRINT_LIMIT("Status1.Extended_Block_Status\r\n");
