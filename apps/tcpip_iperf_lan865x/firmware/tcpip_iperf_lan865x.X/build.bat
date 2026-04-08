@@ -27,6 +27,10 @@ for /f "usebackq delims=" %%P in (
     `powershell -NoProfile -Command "(Get-Content '%COMPILER_CONFIG%' | ConvertFrom-Json).compiler"`
 ) do set "XC32_COMPILER=%%P"
 
+for /f "usebackq delims=" %%D in (
+    `powershell -NoProfile -Command "(Get-Content '%COMPILER_CONFIG%' | ConvertFrom-Json).bin_dir"`
+) do set "XC32_BIN_DIR=%%D"
+
 :: Verify the compiler binary is present
 if not exist "%XC32_COMPILER%" (
     echo ERROR: Selected compiler not found: %XC32_COMPILER%
@@ -92,4 +96,14 @@ if errorlevel 1 (
 )
 
 echo BUILD SUCCESSFUL.
+
+:: ---------------------------------------------------------------------------
+:: Post-build summary: flash/RAM usage, heap, active interrupts
+:: ---------------------------------------------------------------------------
+set "ELF_PATH=%SCRIPT_DIR%out\tcpip_iperf_lan865x\default.elf"
+if exist "%ELF_PATH%" (
+    python "%SCRIPT_DIR%build_summary.py" "%BUILD_DIR%" "%ELF_PATH%" "%XC32_BIN_DIR%"
+) else (
+    echo WARNING: ELF not found, skipping build summary.
+)
 endlocal
