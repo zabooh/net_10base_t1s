@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
 set "CMAKE_DIR=%SCRIPT_DIR%cmake\tcpip_iperf_lan865x\default"
@@ -7,6 +7,39 @@ pushd "%SCRIPT_DIR%..\..\..\..\..\"
 set "BUILD_DIR=%CD%\temp\tcpip_iperf_lan865x\default"
 popd
 
+:: ---------------------------------------------------------------------------
+:: Read compiler selection from setup_compiler.config (written by setup_compiler.py)
+:: Uses PowerShell to parse the JSON — no extra tools required.
+:: ---------------------------------------------------------------------------
+set "COMPILER_CONFIG=%SCRIPT_DIR%setup_compiler.config"
+if not exist "%COMPILER_CONFIG%" (
+    echo ERROR: No compiler configured.
+    echo        Run "python setup_compiler.py" first to select an XC32 version.
+    exit /b 1
+)
+
+:: Extract fields from JSON via PowerShell
+for /f "usebackq delims=" %%V in (
+    `powershell -NoProfile -Command "(Get-Content '%COMPILER_CONFIG%' | ConvertFrom-Json).version"`
+) do set "XC32_VERSION=%%V"
+
+for /f "usebackq delims=" %%P in (
+    `powershell -NoProfile -Command "(Get-Content '%COMPILER_CONFIG%' | ConvertFrom-Json).compiler"`
+) do set "XC32_COMPILER=%%P"
+
+:: Verify the compiler binary is present
+if not exist "%XC32_COMPILER%" (
+    echo ERROR: Selected compiler not found: %XC32_COMPILER%
+    echo        XC32 %XC32_VERSION% does not appear to be installed on this machine.
+    echo        Run "python setup_compiler.py" to select an installed version.
+    exit /b 1
+)
+
+echo Compiler  : XC32 %XC32_VERSION%  (%XC32_COMPILER%)
+
+:: ---------------------------------------------------------------------------
+:: Parse build mode parameter
+:: ---------------------------------------------------------------------------
 set "MODE=incremental"
 if not "%~1"=="" set "MODE=%~1"
 
