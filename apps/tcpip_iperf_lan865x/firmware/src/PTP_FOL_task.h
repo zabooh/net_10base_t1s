@@ -265,6 +265,14 @@ void PTP_FOL_GetOffset(int64_t *pOffset, uint64_t *pOffsetAbs);
 void PTP_FOL_Reset(void);
 
 /**
+ * Return the calibrated clock increment values saved by the last UNINIT->MATCHFREQ
+ * transition.  Both outputs are zero when no calibration has been performed yet.
+ * These values can be fed into PTP_GM_Init() so the GM clock runs at the
+ * crystal-corrected rate instead of the nominal TI=40.
+ */
+void PTP_FOL_GetCalibratedClockInc(uint32_t *pTI, uint32_t *pTISUBN);
+
+/**
  * Enable or disable verbose per-sync logging.
  * When enabled, prints state + offset on every received Sync/FollowUp pair.
  * Usage: ptp_mode follower v

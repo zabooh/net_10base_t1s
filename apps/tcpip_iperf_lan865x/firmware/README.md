@@ -725,3 +725,174 @@ Called from `ptp_mode_cmd()` in `app.c`:
 bool verbose = (argc >= 3) && (strcmp(argv[2], "v") == 0);
 PTP_FOL_SetVerbose(verbose);
 ```
+
+---
+
+## 13. PTP Role-Swap Bug Fix
+
+### Background
+
+A **role-swap** describes the scenario where PTP mode is disabled on both boards
+(e.g. `ptp_mode off`) and then restarted with the Grandmaster and Follower roles
+swapped between the two boards.  Before this fix the new Follower never reached
+FINE state; its offset was permanently stuck at approximately **−3.13 ms**.
+
+---
+
+### Root Cause
+
+The hang was caused by two independent bugs in `src/ptp_gm_task.c`:
+
+#### Bug 1 — `PTP_GM_Init()` overwrote the crystal calibration (primary)
+
+During the first PTP session the FOL servo runs its MATCHFREQ phase and
+measures the board's actual crystal frequency by fine-tuning `MAC_TI` and
+`MAC_TISUBN`.  For board 1, for example, the calibrated value is `MAC_TI = 39`
+(nominal is 40), reflecting a real crystal frequency slightly below 25 MHz.
+
+When roles were swapped and the same board became the GM, `PTP_GM_Init()`
+unconditionally wrote `MAC_TI = 40` (nominal) to the register — destroying the
+calibration and making the GM clock run approximately 2.5 % too fast.  The new
+FOL then tried to correct this 2.5 % frequency error with a small PI servo
+whose correction range is far too narrow.  Because the error magnitude matched
+the servo's maximum per-step correction exactly, the offset converged to a fixed
+point and stayed there forever:
+
+```
+drift per sync = (40 − 39) / 40 × 125 ms = 3.125 ms
+```
+
+This is why the stuck offset was always ≈ −3.13 ms and never changed with time.
+
+#### Bug 2 — `gm_deinit_vals` set `MAC_TI = 0` (secondary)
+
+After `ptp_mode off` the deinit sequence wrote `MAC_TI = 0` to the register,
+which stopped the PTP hardware clock entirely.  This had no visible effect
+during normal operation (mode is off) but left the hardware in a broken state
+that could affect subsequent role assignments.
+
+---
+
+### Fix
+
+#### `src/PTP_FOL_task.c` and `src/PTP_FOL_task.h` — export calibrated values
+
+A new function is added that lets other modules read the TI/TISUBN values that
+the FOL servo settled on at the end of its MATCHFREQ phase:
+
+```c
+/* PTP_FOL_task.h */
+/**
+ * @brief Returns the crystal-calibrated clock increment values measured by
+ *        the FOL servo during its last MATCHFREQ phase.  If the servo has not
+ *        yet completed MATCHFREQ, returns nominal defaults (TI=40, TISUBN=0).
+ *
+ * @param pTI     Receives MAC_TI value (nanoseconds per 25 MHz tick).
+ * @param pTISUBN Receives MAC_TISUBN value (sub-nanosecond fractional part).
+ */
+void PTP_FOL_GetCalibratedClockInc(uint32_t *pTI, uint32_t *pTISUBN);
+```
+
+Implementation in `PTP_FOL_task.c` reads the existing module-level statics
+`calibratedTI_value` / `calibratedTISUBN_value` that are already stored at the
+UNINIT→MATCHFREQ→HARDSYNC transition:
+
+```c
+void PTP_FOL_GetCalibratedClockInc(uint32_t *pTI, uint32_t *pTISUBN)
+{
+    if (pTI)     *pTI     = calibratedTI_value;
+    if (pTISUBN) *pTISUBN = calibratedTISUBN_value;
+}
+```
+
+#### `src/ptp_gm_task.c` — use calibrated TI on init, keep clock running on deinit
+
+**Init sequence** (`GM_INIT_WRITE_COUNT` changed 8 → 9, `gm_init_vals[]` made
+non-const):
+
+| Index | Register | Before fix | After fix |
+|-------|----------|-----------|-----------|
+| 6 | `MAC_TISUBN` | not present | filled dynamically from `PTP_FOL_GetCalibratedClockInc()` |
+| 7 | `MAC_TI` | `40` (hardcoded nominal) | filled dynamically from `PTP_FOL_GetCalibratedClockInc()` |
+| 8 | `PPSCTL` | index 7 | index 8 (shifted) |
+
+At the start of `PTP_GM_Init()`:
+```c
+uint32_t calTI = 40u, calTISUBN = 0u;        /* fallback: nominal */
+PTP_FOL_GetCalibratedClockInc(&calTI, &calTISUBN);
+gm_init_vals[6] = calTISUBN;
+gm_init_vals[7] = calTI;
+if (calTI != 40u || calTISUBN != 0u) {
+    SYS_CONSOLE_PRINT("[PTP-GM] Using calibrated TI=%u TISUBN=0x%08lX\r\n",
+                      (unsigned)calTI, (unsigned long)calTISUBN);
+}
+```
+
+**Deinit sequence** — `gm_deinit_vals[6]` (MAC_TI) changed `0u` → `40u`:
+```c
+/* was: 0u  — froze the hardware PTP clock after ptp_mode off  */
+/* now: 40u — clock keeps ticking at nominal rate after deinit */
+static const uint32_t gm_deinit_vals[] = { ..., 40u, ... };
+```
+
+---
+
+### Test Script — `ptp_role_swap_test.py`
+
+Location: `tcpip_iperf_lan865x.X/ptp_role_swap_test.py`
+
+Automated two-phase test that verifies correct convergence after a role swap.
+
+#### Usage
+```bat
+cd tcpip_iperf_lan865x.X
+python ptp_role_swap_test.py --board1-port COM8 --board2-port COM10
+```
+
+Optional arguments:
+```
+--board1-port PORT     Serial port for board 1 (default: COM8)
+--board2-port PORT     Serial port for board 2 (default: COM10)
+--board1-ip   IP       IP address of board 1   (default: 192.168.0.30)
+--board2-ip   IP       IP address of board 2   (default: 192.168.0.20)
+--convergence-timeout  Seconds to wait for FINE (default: 30)
+--verbose              Print every offset sample to stdout
+```
+
+#### Test Phases
+
+| Phase | Board 1 | Board 2 | Description |
+|-------|---------|---------|-------------|
+| Phase 1 | Follower | Grandmaster | Normal session; wait for FINE, collect 10 offset samples |
+| — | `ptp_mode off` | `ptp_mode off` | Stop both, pause 5 s |
+| Phase 2 | **Grandmaster** | **Follower** | Roles swapped; wait for FINE, collect 10 offset samples |
+
+The script detects a stuck-offset failure (`abs(mean) > 1 000 000 ns`) and
+prints a root-cause hint pointing to the crystal-calibration overwrite.
+
+#### Pass Criteria
+- Both phases reach FINE within `--convergence-timeout`
+- Phase 2 post-swap mean offset within ±500 ns
+- Phase 2 stdev < 100 ns
+- At least 9/10 samples within ±500 ns
+
+---
+
+### Test Results
+
+#### Before fix
+
+| Metric | Phase 1 | Phase 2 (after role swap) |
+|--------|---------|--------------------------|
+| FINE reached | 2.7 s | **never** (timeout at 30 s) |
+| mean offset | +52 ns | **−3 138 186 ns** (stuck) |
+| Verdict | PASS | **FAIL** |
+
+#### After fix (two confirmed runs)
+
+| Run | Phase 1 FINE | Phase 1 mean | Phase 2 FINE | Phase 2 mean | Phase 2 stdev | ≤±500 ns |
+|-----|-------------|-------------|-------------|-------------|--------------|---------|
+| Run 1 | 2.7 s | +50.8 ns | **2.7 s** | **−4.0 ns** | 12.8 ns | 10/10 |
+| Run 2 | 3.1 s | +57.9 ns | **2.9 s** | **−9.2 ns** | 21.2 ns | 10/10 |
+
+Overall: **PASS** (6/6 test checks, both runs).

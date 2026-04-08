@@ -142,21 +142,29 @@ static void gm_set_state(gmState_t nextState, uint32_t line)
 
 /* Number of register writes in each sequence.
  * Init resets GM_TXMCTL to 0 first (ensures disarmed state after any prior run).
- * Deinit has one extra write (GM_TXMCTL) to disarm the match detector first. */
-#define GM_INIT_WRITE_COUNT   8u
+ * Deinit has one extra write (GM_TXMCTL) to disarm the match detector first.
+ * Init sequence includes MAC_TISUBN (index 6) and MAC_TI (index 7) so that a
+ * previously-calibrated FOL crystal compensation is applied when the board
+ * transitions from follower to grandmaster (prevents the ~3% clock rate error
+ * caused by switching from the crystal-compensated TI to the nominal TI=40). */
+#define GM_INIT_WRITE_COUNT   9u
 #define GM_DEINIT_WRITE_COUNT 8u
 
 static const uint32_t gm_init_addrs[GM_INIT_WRITE_COUNT] = {
-    GM_TXMCTL, GM_TXMLOC, GM_TXMPATH, GM_TXMPATL, GM_TXMMSKH, GM_TXMMSKL, MAC_TI, PPSCTL
+    GM_TXMCTL, GM_TXMLOC, GM_TXMPATH, GM_TXMPATL, GM_TXMMSKH, GM_TXMMSKL,
+    MAC_TISUBN, MAC_TI, PPSCTL
 };
-static const uint32_t gm_init_vals[GM_INIT_WRITE_COUNT] = {
+/* mutable so PTP_GM_Init() can fill in calibrated TI/TISUBN before the
+ * async write sequence starts */
+static uint32_t gm_init_vals[GM_INIT_WRITE_COUNT] = {
     0x0000u,
     30u,
     (GM_PTP_ETHERTYPE >> 8u) & 0xFFu,
     (((uint32_t)(GM_PTP_ETHERTYPE & 0xFFu)) << 8u) | 0x10u,
     0x00u,
     0x00u,
-    40u,
+    0x00000000u, /* MAC_TISUBN: filled dynamically in PTP_GM_Init() */
+    40u,         /* MAC_TI:     filled dynamically in PTP_GM_Init() */
     0x0000007Du
 };
 
@@ -164,7 +172,7 @@ static const uint32_t gm_deinit_addrs[GM_DEINIT_WRITE_COUNT] = {
     GM_TXMCTL, GM_TXMPATH, GM_TXMPATL, GM_TXMMSKH, GM_TXMMSKL, GM_TXMLOC, MAC_TI, PPSCTL
 };
 static const uint32_t gm_deinit_vals[GM_DEINIT_WRITE_COUNT] = {
-    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+    0u, 0u, 0u, 0u, 0u, 0u, 40u, 0u  /* MAC_TI=40: keep clock running after deinit */
 };
 
 /* -------------------------------------------------------------------------
@@ -354,6 +362,24 @@ void PTP_GM_Init(void)
     gm_wait_ticks       = 0u;
     gm_tick_ms          = 0u;
     gm_period_start     = 0u;
+
+    /* Use the calibrated clock increment from the FOL servo if available so
+     * that the GM clock runs at the crystal-compensated rate.  On first boot
+     * (before any FOL calibration) both outputs are 0 and the defaults (40/0)
+     * already in gm_init_vals are kept. */
+    {
+        uint32_t calTI = 0u, calTISUBN = 0u;
+        PTP_FOL_GetCalibratedClockInc(&calTI, &calTISUBN);
+        if (calTI != 0u) {
+            gm_init_vals[6] = calTISUBN; /* MAC_TISUBN */
+            gm_init_vals[7] = calTI;     /* MAC_TI     */
+            SYS_CONSOLE_PRINT("[PTP-GM] Using calibrated TI=%u TISUBN=0x%08lX\r\n",
+                               (unsigned)calTI, (unsigned long)calTISUBN);
+        } else {
+            gm_init_vals[6] = 0u;
+            gm_init_vals[7] = 40u;
+        }
+    }
 
     /* Kick off the pre-init RMW sequence:
      *   1. OA_CONFIG0 RMW(0xC0, 0xC0) — same as reference TC6_ptp_master_init step 8

@@ -664,6 +664,12 @@ void PTP_FOL_GetOffset(int64_t *pOffset, uint64_t *pOffsetAbs)
     if (pOffsetAbs) *pOffsetAbs = offset_abs;
 }
 
+void PTP_FOL_GetCalibratedClockInc(uint32_t *pTI, uint32_t *pTISUBN)
+{
+    if (pTI)     *pTI     = calibratedTI_value;
+    if (pTISUBN) *pTISUBN = calibratedTISUBN_value;
+}
+
 void PTP_FOL_Reset(void)
 {
     resetSlaveNode();
