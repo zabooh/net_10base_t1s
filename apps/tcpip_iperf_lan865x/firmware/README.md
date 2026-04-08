@@ -374,15 +374,12 @@ APP_STATE_IDLE [app.c]
   → PTP_FOL_OnFrame(data, length, rxTimestamp)
   → Follower servo computes offset and adjusts local clock
 
--- RX path (fallback via TCP/IP stack) --
+-- TCP/IP stack path (frame suppression) --
 
 TC6_CB_OnRxEthernetPacket() → TCP/IP stack → pktEth0Handler() [app.c]
-  → reads g_ptp_rx_ts, copies frame into ptp_rx_buffer
-       |
-       ↓
-APP_STATE_IDLE [app.c]
-  → checks ptp_rx_buffer.pending if g_ptp_raw_rx was not pending
-  → PTP_FOL_OnFrame(data, length, rxTimestamp)
+  → EtherType 0x88F7: TCPIP_PKT_PacketAcknowledge(TCPIP_MAC_PKT_ACK_RX_OK)
+  → returns true (consumed) — IP stack does not process PTP frames
+  → no frame copy; driver path (g_ptp_raw_rx) is the single source of truth
 ```
 
 ---
