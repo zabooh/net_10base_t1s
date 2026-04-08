@@ -138,4 +138,7 @@ ptp_gm_dst_mode_t PTP_GM_GetDstMode(void);
  *  so it never races with active SPI traffic (no TC6Error_SyncLost side-effect). */
 void PTP_GM_RequestRegDump(void);
 
+/** Enable or disable verbose per-sync logging (same \r overwrite line as follower). */
+void PTP_GM_SetVerbose(bool verbose);
+
 #endif /* PTP_GM_TASK_H */

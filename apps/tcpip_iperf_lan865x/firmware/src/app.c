@@ -160,16 +160,18 @@ static void ptp_mode_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
         PTP_GM_Deinit();
         SYS_CONSOLE_PRINT("PTP disabled\r\n");
     } else if (strcmp(argv[1], "master") == 0) {
+        bool verbose = (argc >= 3) && (strcmp(argv[2], "v") == 0);
         PTP_FOL_SetMode(PTP_MASTER);
+        PTP_GM_SetVerbose(verbose);
         PTP_GM_Init();
-        SYS_CONSOLE_PRINT("PTP Grandmaster enabled\r\n");
+        SYS_CONSOLE_PRINT("PTP Grandmaster enabled%s\r\n", verbose ? " (verbose)" : "");
     } else if ((strcmp(argv[1], "follower") == 0) || (strcmp(argv[1], "slave") == 0)) {
         PTP_FOL_SetMode(PTP_SLAVE);
         bool verbose = (argc >= 3) && (strcmp(argv[2], "v") == 0);
         PTP_FOL_SetVerbose(verbose);
         SYS_CONSOLE_PRINT("PTP Follower enabled%s\r\n", verbose ? " (verbose)" : "");
     } else {
-        SYS_CONSOLE_PRINT("Usage: ptp_mode [off|master|follower]\r\n");
+        SYS_CONSOLE_PRINT("Usage: ptp_mode [off|master [v]|follower [v]]\r\n");
     }
 }
 

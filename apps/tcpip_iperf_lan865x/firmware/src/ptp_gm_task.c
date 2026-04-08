@@ -82,6 +82,7 @@ static uint32_t         gm_sync_interval_ms = PTP_GM_SYNC_PERIOD_MS;
 static uint8_t          gm_src_mac[6]       = {0u};
 static ptp_gm_dst_mode_t gm_dst_mode        = PTP_GM_DST_BROADCAST;
 static uint8_t          gm_seq_step         = 0u;      /* current step in init/deinit write sequence */
+static bool             gm_verbose          = false;
 
 /* Frame buffers */
 static uint8_t gm_sync_buf[60];       /* 14 (eth) + 44 (syncMsg_t) + 2 pad bytes */
@@ -655,7 +656,7 @@ void PTP_GM_Service(void)
                 GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 break;
             }
-            {
+            if (gm_verbose) {
                 uint32_t h = sec / 3600u;
                 uint32_t m = (sec % 3600u) / 60u;
                 uint32_t s = sec % 60u;
@@ -993,4 +994,9 @@ void PTP_GM_SetDstMode(ptp_gm_dst_mode_t mode)
 ptp_gm_dst_mode_t PTP_GM_GetDstMode(void)
 {
     return gm_dst_mode;
+}
+
+void PTP_GM_SetVerbose(bool verbose)
+{
+    gm_verbose = verbose;
 }
