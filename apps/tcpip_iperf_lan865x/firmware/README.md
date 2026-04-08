@@ -252,31 +252,20 @@ Added after the existing `DRV_LAN865X_ReadModifyWriteRegister` declaration:
 #include "library/tcpip/src/tcpip_packet.h"
 ```
 
-#### PTP RX buffer
-```c
-typedef struct {
-    uint8_t  data[128];   // max PTP frame size
-    uint16_t length;
-    uint64_t rxTimestamp;
-    bool     pending;
-} PTP_FRAME_BUFFER;
-static PTP_FRAME_BUFFER ptp_rx_buffer = {0};
-static bool lan865x_prev_ready = false;
-```
-
 #### `pktEth0Handler()`
-Registered with `TCPIP_STACK_PacketHandlerRegister()` on eth0. Intercepts
-frames with EtherType `0x88F7` (PTP), copies them into `ptp_rx_buffer` with the
-hardware RX timestamp from `g_ptp_rx_ts`, acknowledges the packet, and returns
-`true` (consumed). All other frames are passed through to the IP stack.
+Registered with `TCPIP_STACK_PacketHandlerRegister()` on eth0. Intercepts frames
+with EtherType `0x88F7` (PTP), acknowledges and returns `true` (consumed) so the
+IP stack does not see them. No buffering — frame data is already captured by the
+primary path (`TC6_CB_OnRxEthernetPacket` → `g_ptp_raw_rx`) at driver level
+before this handler is called.
 
 #### State machine restructure
 
 | State | Behaviour |
 |-------|-----------|
 | `APP_STATE_INIT` | Prints build timestamp, sets state → `APP_STATE_SERVICE_TASKS` |
-| `APP_STATE_SERVICE_TASKS` | **One-shot**: waits until TCPIP stack is up, registers `pktEth0Handler`, sets state → `APP_STATE_IDLE` |
-| `APP_STATE_IDLE` | First entry: calls `PTP_FOL_Init()`. Main loop: LAN register service, GM/FOL service every 1 ms, FOL frame delivery (driver path + stack fallback), LOFE reinit detection |
+| `APP_STATE_SERVICE_TASKS` | Waits until `TCPIP_STACK_NetIsUp()` is true, then registers `pktEth0Handler`, sets state → `APP_STATE_IDLE` |
+| `APP_STATE_IDLE` | First entry: calls `PTP_FOL_Init()`. Main loop: LAN register service, GM/FOL service every 1 ms, FOL frame delivery from driver path, LOFE reinit detection |
 
 #### `APP_STATE_IDLE` — PTP services
 ```c
@@ -290,16 +279,11 @@ if (PTP_FOL_GetMode() == PTP_SLAVE && (current_tick - last_fol_tick) >= ticks_pe
     PTP_FOL_Service();
 }
 
-// Deliver buffered PTP frame — primary path: g_ptp_raw_rx (driver level)
+// Deliver buffered PTP frame — filled by TC6_CB_OnRxEthernetPacket (driver level)
 if (g_ptp_raw_rx.pending) {
     g_ptp_raw_rx.pending = false;
     if (PTP_FOL_GetMode() == PTP_SLAVE)
         PTP_FOL_OnFrame(g_ptp_raw_rx.data, g_ptp_raw_rx.length, g_ptp_raw_rx.rxTimestamp);
-// Fallback: ptp_rx_buffer filled by pktEth0Handler (TCP/IP stack path)
-} else if (ptp_rx_buffer.pending) {
-    ptp_rx_buffer.pending = false;
-    if (PTP_FOL_GetMode() == PTP_SLAVE)
-        PTP_FOL_OnFrame(ptp_rx_buffer.data, ptp_rx_buffer.length, ptp_rx_buffer.rxTimestamp);
 }
 
 // Re-run GM init after LAN865x LOFE recovery

@@ -70,21 +70,6 @@ APP_DATA appData;
 bool pktEth0Handler(TCPIP_NET_HANDLE hNet, TCPIP_MAC_PACKET* rxPkt, uint16_t frameType, const void* hParam);
 static const void *MyEth0HandlerParam = NULL;
 
-/* Maximum expected PTP frame size on wire.
- * Sync/FollowUp messages are <= 76 bytes; Announce up to ~90 bytes.
- * 128 bytes gives comfortable headroom for all standard PTP message types. */
-#define PTP_MAX_FRAME_SIZE  128u
-
-/* Buffer for a single pending PTP frame received in pktEth0Handler */
-typedef struct {
-    uint8_t  data[PTP_MAX_FRAME_SIZE];
-    uint16_t length;
-    uint64_t rxTimestamp;
-    bool     pending;
-} PTP_FRAME_BUFFER;
-
-static PTP_FRAME_BUFFER ptp_rx_buffer = {0};
-
 /* Track LAN865x driver ready state to detect reinit-complete while in GM mode */
 static bool lan865x_prev_ready = false;
 
@@ -277,24 +262,11 @@ bool pktEth0Handler(TCPIP_NET_HANDLE hNet, TCPIP_MAC_PACKET* rxPkt,
     (void)hNet;
     (void)hParam;
 
-    /* PTP frame (EtherType 0x88F7): buffer for processing in APP_Tasks, do not forward to IP stack */
+    /* PTP frame (EtherType 0x88F7): consumed here so the IP stack does not see it.
+     * Frame data is already captured by the primary path (TC6_CB_OnRxEthernetPacket
+     * → g_ptp_raw_rx) at driver level before this handler is called.
+     * No buffering needed here — ptp_rx_buffer fallback is retired. */
     if (frameType == 0x88F7u) {
-        uint64_t rxTs = 0u;
-        if (g_ptp_rx_ts.valid) {
-            rxTs = g_ptp_rx_ts.rxTimestamp;
-            g_ptp_rx_ts.valid = false;
-        }
-        /* Store the frame for later processing in APP_Tasks().
-         * If a frame is already pending, the older (stale) frame is overwritten
-         * because PTP Sync frames that are not processed promptly become irrelevant. */
-        uint16_t copyLen = rxPkt->pDSeg->segLen;
-        if (copyLen > (uint16_t)sizeof(ptp_rx_buffer.data)) {
-            copyLen = (uint16_t)sizeof(ptp_rx_buffer.data);
-        }
-        memcpy(ptp_rx_buffer.data, rxPkt->pMacLayer, copyLen);
-        ptp_rx_buffer.length      = copyLen;
-        ptp_rx_buffer.rxTimestamp = rxTs;
-        ptp_rx_buffer.pending     = true;
         TCPIP_PKT_PacketAcknowledge(rxPkt, TCPIP_MAC_PKT_ACK_RX_OK);
         return true;
     }
@@ -355,25 +327,24 @@ void APP_Tasks ( void )
 
         case APP_STATE_SERVICE_TASKS:
         {
-            /* Try to register the PTP packet handler with the TCPIP stack.
-             * PacketHandlerRegister() needs the interface to be "up" (bInterfaceEnabled).
-             * We log the result but do NOT block here — move to IDLE regardless so that
-             * the direct driver-level PTP capture (g_ptp_raw_rx) can work even if the
-             * stack-level handler registration fails. */
+            /* Wait until the network handle is valid (stack initialized) */
             TCPIP_NET_HANDLE eth0_net_hd = TCPIP_STACK_IndexToNet(0);
-
-            /* Wait until network handle is valid (stack initialized) */
             if (eth0_net_hd == NULL) {
                 break;
             }
 
-            /* Attempt handler registration */
+            /* Wait until the interface is up — PacketHandlerRegister() requires
+             * bInterfaceEnabled to be set, which happens after link negotiation. */
+            if (!TCPIP_STACK_NetIsUp(eth0_net_hd)) {
+                break;
+            }
+
+            /* Register the PTP packet handler */
             TCPIP_STACK_PROCESS_HANDLE hPktHnd =
                 TCPIP_STACK_PacketHandlerRegister(eth0_net_hd, pktEth0Handler, MyEth0HandlerParam);
             SYS_CONSOLE_PRINT("[APP] PacketHandlerRegister: %s\r\n",
                               (hPktHnd != NULL) ? "OK" : "FAIL");
 
-            /* Advance to IDLE regardless — g_ptp_raw_rx driver path always works */
             appData.state = APP_STATE_IDLE;
             break;
         }
@@ -481,26 +452,14 @@ void APP_Tasks ( void )
             }
 
             /* === FOL: process a buffered PTP frame ===
-             * Primary path: g_ptp_raw_rx filled directly by TC6_CB_OnRxEthernetPacket
-             * (driver level, independent of PacketHandlerRegister success).
-             * Fallback:     ptp_rx_buffer filled by pktEth0Handler (stack level). */
+             * Filled by TC6_CB_OnRxEthernetPacket at driver level.
+             * pktEth0Handler only consumes the frame so the IP stack does not see it. */
             if (g_ptp_raw_rx.pending) {
                 g_ptp_raw_rx.pending = false;   /* clear first to avoid re-entry */
-                ptpMode_t curMode = PTP_FOL_GetMode();
-                if (curMode == PTP_SLAVE) {
+                if (PTP_FOL_GetMode() == PTP_SLAVE) {
                     PTP_FOL_OnFrame((const uint8_t *)g_ptp_raw_rx.data,
                                    g_ptp_raw_rx.length,
                                    g_ptp_raw_rx.rxTimestamp);
-                }
-            } else if (ptp_rx_buffer.pending) {
-                ptpMode_t curMode = PTP_FOL_GetMode();
-                if (curMode == PTP_SLAVE) {
-                    ptp_rx_buffer.pending = false;
-                    PTP_FOL_OnFrame(ptp_rx_buffer.data,
-                                    ptp_rx_buffer.length,
-                                    ptp_rx_buffer.rxTimestamp);
-                } else {
-                    ptp_rx_buffer.pending = false;
                 }
             }
 
