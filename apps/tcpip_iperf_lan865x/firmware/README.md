@@ -88,9 +88,66 @@ were added so that no temporary or machine-specific files are tracked by git.
 ```bat
 python setup_compiler.py    # select XC32 version (patches toolchain.cmake)
 python setup_flasher.py     # assign Board 1 / Board 2 to connected debuggers
-build.bat                   # compile
+build.bat                   # compile  (summary printed automatically)
 python flash.py             # flash both boards
 ```
+
+### `tcpip_iperf_lan865x.X/build_summary.py`
+New file. Called automatically by `build.bat` after every successful build.
+Parses the linker output files and the ELF symbol table to print a concise
+human-readable summary.
+
+**Sources used:**
+| Source | Information extracted |
+|--------|----------------------|
+| `memoryfile.xml` (linker XML) | Flash used/free/total, RAM used/free/total |
+| `mem.map` (linker map) | `_min_heap_size` (heap reserved by linker script) |
+| `default.elf` via `xc32-nm` | Active interrupt handler names |
+
+**Example output:**
+```
+==============================================================
+  BUILD SUMMARY
+==============================================================
+
+  Flash (program memory)
+    Used   :  132,005 bytes  ( 128.9 KiB)  12.6%
+    Free   :  916,571 bytes  ( 895.1 KiB)
+    Total  : 1,048,576 bytes  (1024.0 KiB)
+    [####--------------------------]
+
+  RAM (data memory)
+    Used   :   15,894 bytes  (  15.5 KiB)  6.1%
+    Free   :  246,250 bytes  ( 240.5 KiB)
+    Total  :  262,144 bytes  ( 256.0 KiB)
+    [##----------------------------]
+
+  Linker-Reserved Regions
+    Heap   :   44,960 bytes  (  43.9 KiB)  (_min_heap_size)
+    Stack  :       -- not found in map --
+
+  Interrupt Handlers
+    Core IRQs        ( 7): BusFault, DebugMonitor, HardFault,
+                           MemoryManagement, NonMaskableInt, Reset, UsageFault
+    Peripheral IRQs  ( 5):
+      - DMAC_0
+      - DMAC_1
+      - SERCOM0_SPI
+      - SERCOM1_USART
+      - TC0_Timer
+
+  Note: Heap is active (43.9 KiB).
+        Used by: musl malloc (XC32 libc), TCPIP internal heap.
+        Runtime heap consumption is not measurable at link time.
+
+==============================================================
+```
+
+**Interrupt classification:**  
+Only non-dummy handlers are listed. Weak symbols (`W`) that point to
+`Dummy_Handler` are silently skipped. File-local sub-handlers (lowercase `t`,
+e.g. `SERCOM1_USART_ISR_RX_Handler`) are excluded — only the top-level IRQ
+vector entry is shown.
 
 ### `tcpip_iperf_lan865x.X/setup_flasher.py`
 New file. One-time setup tool — detects connected Microchip/Atmel EDBG debuggers,
