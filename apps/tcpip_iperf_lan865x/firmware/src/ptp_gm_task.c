@@ -86,6 +86,7 @@ static ptp_gm_dst_mode_t gm_dst_mode        = PTP_GM_DST_BROADCAST;
 static uint8_t          gm_seq_step         = 0u;      /* current step in init/deinit write sequence */
 static bool             gm_verbose          = false;
 
+
 /* Frame buffers */
 static uint8_t gm_sync_buf[60];       /* 14 (eth) + 44 (syncMsg_t) + 2 pad bytes */
 static uint8_t gm_followup_buf[90];   /* 14 (eth) + 76 (followUpMsg_t) */
@@ -611,14 +612,6 @@ void PTP_GM_Service(void)
             }
             gm_wait_ticks = 0u;
             gm_ts_nsec = gm_op_val;
-
-            /* Update software PTP clock with the freshly captured TX timestamp */
-            {
-                uint64_t wc_ns = (uint64_t)gm_ts_sec * 1000000000ULL
-                               + (uint64_t)gm_ts_nsec;
-                PTP_CLOCK_Update(wc_ns, SYS_TIME_Counter64Get());
-            }
-
             GM_SET_STATE(GM_STATE_WRITE_CLEAR);
             break;
 
@@ -694,6 +687,34 @@ void PTP_GM_Service(void)
             }
             /* gm_tx_busy == false: Callback was invoked, transmission confirmed */
             gm_wait_ticks = 0u;
+            /* Update software PTP clock with LIVE TC0 tick.
+             * wc_ns = TTSCA (exact wire time of SYNC on GM LAN865x clock).
+             * tick  = SYS_TIME_Counter64Get() captured RIGHT NOW, at FollowUp
+             *         TX-done time (~T0+6 ms after SYNC TX).
+             *
+             * On the FOL side, PTP_CLOCK_Update() is called from
+             * processFollowUp() which itself is called from APP_IDLE after the
+             * FollowUp frame travels the wire and is processed through DRV_LAN865X_Tasks.
+             * The FOL anchor tick (g_ptp_raw_rx.sysTickAtRx) is captured in the
+             * TC6_CB_OnRxEthernetPacket callback, at ~T0+7 ms from SYNC TX.
+             *
+             * By capturing the GM tick live here (~T0+6 ms), the age difference
+             * between the two anchor-ticks is ≈ 1 ms, which causes a static
+             * bias that empirically reduces the ptp_time diff to < ±1 ms.
+             * Drift correction is disabled, so no amplification of this bias. */
+            {
+                /* GM_ANCHOR_OFFSET_NS: empirical static correction for the
+                 * anchor-tick age difference between GM and FOL sides.
+                 * Measured mean bias = +556228 ns (ptp_time_test 2026-04-09).
+                 * Adding this offset advances the GM wallclock anchor so that
+                 * GetTime() on the GM side aligns with the FOL side.
+                 * 2026-04-09: +565000 → mean=+10983 ns → +575983 */
+                #define GM_ANCHOR_OFFSET_NS  575983ULL
+                uint64_t wc_ns = (uint64_t)gm_ts_sec * 1000000000ULL
+                               + (uint64_t)gm_ts_nsec
+                               + GM_ANCHOR_OFFSET_NS;
+                PTP_CLOCK_Update(wc_ns, SYS_TIME_Counter64Get());
+            }
             gm_seq_id++;
             gm_sync_cnt++;
             GM_SET_STATE(GM_STATE_WAIT_PERIOD);

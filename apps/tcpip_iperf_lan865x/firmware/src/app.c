@@ -256,6 +256,30 @@ static void ptp_dst_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     }
 }
 
+/* clk_set <ns> — set software clock anchor to given nanosecond value, reset drift */
+static void clk_set_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc != 2) {
+        SYS_CONSOLE_PRINT("Usage: clk_set <ns>\r\n");
+        return;
+    }
+    uint64_t ns = (uint64_t)strtoull(argv[1], NULL, 0);
+    PTP_CLOCK_ForceSet(ns);
+    SYS_CONSOLE_PRINT("clk_set ok: %llu ns\r\n", (unsigned long long)ns);
+}
+
+/* clk_get — read current software clock value */
+static void clk_get_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO; (void)argc; (void)argv;
+    if (!PTP_CLOCK_IsValid()) {
+        SYS_CONSOLE_PRINT("clk_get: not valid\r\n");
+        return;
+    }
+    uint64_t now_ns = PTP_CLOCK_GetTime_ns();
+    SYS_CONSOLE_PRINT("clk_get: %llu ns  drift=%+ldppb\r\n",
+                      (unsigned long long)now_ns, (long)PTP_CLOCK_GetDriftPPB());
+}
+
 static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
     {"lan_read",    (SYS_CMD_FNC) lan_read,        ": read LAN865X register (lan_read <addr_hex>)"},
     {"lan_write",   (SYS_CMD_FNC) lan_write,       ": write LAN865X register (lan_write <addr_hex> <value_hex>)"},
@@ -266,6 +290,8 @@ static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
     {"ptp_offset",  (SYS_CMD_FNC) ptp_offset_cmd,  ": show follower clock offset in ns"},
     {"ptp_reset",   (SYS_CMD_FNC) ptp_reset_cmd,   ": reset follower servo to UNINIT"},
     {"ptp_dst",     (SYS_CMD_FNC) ptp_dst_cmd,     ": set/get PTP destination MAC (ptp_dst [multicast|broadcast])"},
+    {"clk_set",     (SYS_CMD_FNC) clk_set_cmd,     ": set software clock to <ns>, reset drift (clk_set <ns>)"},
+    {"clk_get",     (SYS_CMD_FNC) clk_get_cmd,     ": read current software clock value in ns"},
 };
 
 static bool Command_Init(void) {
