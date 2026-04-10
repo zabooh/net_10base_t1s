@@ -9,7 +9,7 @@
             "imageType": "application",
             "imagePath": "./out/tcpip_iperf_lan865x/default.elf",
             "toolProperties": "default-tool",
-            "tool": "EdbgTool",
+            "tool": "EDBG",
             "packs": [
                 {
                     "name": "CMSIS",

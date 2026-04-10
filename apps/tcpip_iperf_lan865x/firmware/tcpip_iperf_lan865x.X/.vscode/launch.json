@@ -1,0 +1,34 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Note: Properties here can override MPLAB project settings
+      // WORKAROUND: tool pack 1.6.762 Jython bug:
+      //   NameError: global name 'is_debug_build' is not defined
+      // "launch" triggers MDB to reprogram via the broken script path.
+      // Use this "attach" config instead:
+      //   1. python flash.py      (flash the device first)
+      //   2. F5 -> "Attach"       (MDB connects without reprogramming)
+      "name": "Attach (after flash.py)",
+      "type": "mplab-core-da",
+      "request": "attach",
+      "project": "tcpip_iperf_lan865x",
+      "configuration": "default",
+      "stopOnEntry": true,
+      "program": "${workspaceFolder}/out/tcpip_iperf_lan865x/default.elf"
+    },
+    {
+      // Note: Properties here can override MPLAB project settings
+      // Original launch config - programs + debugs in one step.
+      // Broken with tool pack <= 1.6.762; use "Attach" above instead.
+      "name": "Launch tcpip_iperf_lan865x: default",
+      "type": "mplab-core-da",
+      "request": "launch",
+      "project": "tcpip_iperf_lan865x",
+      "configuration": "default",
+      "stopOnEntry": true,
+      "preLaunchTask": "tcpip_iperf_lan865x: default - Build",
+      "program": "${workspaceFolder}/out/tcpip_iperf_lan865x/default.elf"
+    }
+  ]
+}
