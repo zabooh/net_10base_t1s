@@ -896,3 +896,246 @@ prints a root-cause hint pointing to the crystal-calibration overwrite.
 | Run 2 | 3.1 s | +57.9 ns | **2.9 s** | **−9.2 ns** | 21.2 ns | 10/10 |
 
 Overall: **PASS** (6/6 test checks, both runs).
+
+---
+
+## 14. PTP Software Clock — `src/ptp_clock.c` / `src/ptp_clock.h`
+
+A nanosecond-resolution software wallclock based on the TC0 hardware timer
+(60 MHz / GCLK0-div-2).  Works identically on both GM and FOL boards after PTP
+convergence.
+
+### Design
+
+An anchor point `(wallclock_ns, sys_tick)` is recorded on every PTP Sync.
+`PTP_CLOCK_GetTime_ns()` interpolates the current time using the TC0 tick delta
+since the last anchor:
+
+```
+tick_delta → ns:  ticks × 50/3  (exact integer decomposition, avoids floats)
+```
+
+No SPI transfers, no mutex, and no blocking at query time.
+
+### Anchor Sources
+
+| Board role | Called from | Trigger |
+|-----------|-------------|---------|
+| Follower | `PTP_FOL_task.c` via `PTP_CLOCK_Update()` | Every Sync/FollowUp received (~125 ms) |
+| Grandmaster | `ptp_gm_task.c` via `PTP_CLOCK_Update()` | TX timestamp captured (TTSCAA) |
+
+### TC0 Tick-Rate Correction (TISUBN)
+
+The FOL servo writes the crystal-calibrated value to `MAC_TISUBN` once at
+UNINIT→MATCHFREQ.  This corrects the LAN865x hardware timer frequency to match
+the GM.  From MATCHFREQ onward the anchor-based interpolation is accurate to
+within the re-anchoring residual (~65–130 µs stdev).
+
+### `drift_ppb` — Residual Frequency Error
+
+After the TISUBN correction, `drift_ppb` reports the remaining frequency error
+observed by the PTP servo (in parts per billion):
+
+```c
+int32_t PTP_CLOCK_GetDriftPPB(void);   // read
+void    PTP_CLOCK_SetDriftPPB(int32_t); // written by PTP_FOL_task.c
+```
+
+`drift_ppb` is updated at every Sync frame when the servo is in COARSE or FINE
+state, computed from the FIR-filtered rate ratio:
+
+```c
+PTP_CLOCK_SetDriftPPB((int32_t)((rateRatioFIR - 1.0) * 1e9));
+```
+
+Observed values: **±0…20 ppb** residual after TISUBN correction.
+Resets to 0 on `clk_set 0` (`PTP_CLOCK_ForceSet()`).
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `clk_get` | Print current wallclock and drift: `clk_get: <ns>  drift=<±ppb>ppb` |
+| `clk_set 0` | Zero the wallclock (independent timer baseline) |
+
+---
+
+## 15. PTP Sync Before/After Test — `tcpip_iperf_lan865x.X/ptp_sync_before_after_test.py`
+
+Demonstrates PTP synchronisation in a single automated run with a before/after
+comparison.
+
+### Test Phases
+
+| Phase | Description |
+|-------|-------------|
+| **Phase 0 — Free Running** | Both clocks zeroed simultaneously, `clk_get` pairs collected for 60 s. Linear regression shows raw crystal drift. |
+| **PTP Setup** | IP config, start Follower + Grandmaster, wait for FINE. |
+| **Phase 1 — PTP Active** | Clocks re-zeroed, `clk_get` pairs collected for 60 s with PTP running. |
+| **Comparison** | Side-by-side table: slope, residual stdev, drift reduction %. |
+
+### Usage
+
+```bat
+cd tcpip_iperf_lan865x.X
+python ptp_sync_before_after_test.py --gm-port COM8 --fol-port COM10
+```
+
+### PASS Criteria
+
+| Criterion | Default threshold |
+|-----------|------------------|
+| `|slope_ptp| < threshold` | 2.0 ppm |
+| `residual stdev < threshold` | 500 µs |
+
+### Measurement Method — Swap Symmetry
+
+Alternating samples query GM first, then FOL; the next sample queries FOL
+first, then GM. The send-time skew between the two parallel threads is subtracted
+from the `clk_get` difference, eliminating systematic bias from the host PC
+scheduler.
+
+### Synopsis of Results (10 runs total)
+
+| Run | Free-run (ppm) | PTP slope (ppm) | PTP stdev (µs) | drift stdev (ppb) | FINE (s) |
+|-----|---------------|-----------------|----------------|-------------------|----------|
+| 1 | +179.3 | −0.243 | 68 | 0¹ | 2.8 |
+| 2 | +209.0 | −0.183 | 66 | 0¹ | 2.9 |
+| 3 | −75.4 | +0.146 | 129 | 0¹ | 2.7 |
+| 4 | −518.5 | +0.666 | 92 | 6 | 2.7 |
+| 5 | −229.3 | +0.641 | 121 | 10 | 2.7 |
+| 6–10² | −532…−46 | −0.43…+0.75 | 60…78 | 6–10 | 2.7 |
+
+¹ Runs 1–3 predated the `drift_ppb` firmware update (always 0).  
+² Runs 6–10 from the reproducibility test.
+
+**All 10 runs: PASS**
+
+---
+
+## 16. PTP Reproducibility Test — `tcpip_iperf_lan865x.X/ptp_reproducibility_test.py`
+
+Runs `ptp_sync_before_after_test.py` N times (default 5) and aggregates all
+results in a single summary table. Purpose: automated verification of test
+reproducibility.
+
+### Usage
+
+```bat
+cd tcpip_iperf_lan865x.X
+python ptp_reproducibility_test.py --gm-port COM8 --fol-port COM10
+python ptp_reproducibility_test.py --gm-port COM8 --fol-port COM10 --runs 3
+```
+
+All arguments (`--free-run-s`, `--ptp-s`, `--slope-threshold-ppm`, etc.) are
+forwarded to the sub-test.
+
+### Log File Integrity
+
+For each run the reproducibility test generates a unique log filename
+(`ptp_sync_before_after_test_<YYYYMMDD_HHMMSS>.log`) **before** starting the
+sub-test and passes it via `--log-file`.  After `subprocess.run()` returns
+(blocking), that exact file is parsed — no directory search, no ambiguity.
+
+### Summary Table Columns
+
+| Column | Description |
+|--------|-------------|
+| `Free(ppm)` | Free-run crystal drift (Phase 0 slope) |
+| `FreeStd` | Free-run residual stdev |
+| `FINE(s)` | PTP convergence time to FINE state |
+| `PTP(ppm)` | PTP-active slope (Phase 1) |
+| `PTPStd` | PTP-active residual stdev |
+| `dFOLstd` | Follower `drift_ppb` stdev during Phase 1 |
+| `Reduc%` | Slope reduction by PTP in percent |
+| `Dur(s)` | Single-run wall-clock duration |
+| `Result` | PASS / FAIL |
+
+### Confirmed Reproducibility Run (2026-04-10)
+
+5 consecutive runs, 60 s free-run + 60 s PTP each, total **12 minutes**:
+
+| Run | Free (ppm) | PTP (ppm) | PTP stdev | FINE (s) | Reduc. |
+|-----|-----------|-----------|-----------|----------|--------|
+| 1 | −532.5 | +0.502 | 60 µs | 2.7 s | 99.9% |
+| 2 | −517.6 | +0.198 | 61 µs | 2.7 s | 100.0% |
+| 3 | −293.3 | +0.745 | 61 µs | 2.7 s | 99.7% |
+| 4 | −365.7 | +0.306 | 78 µs | 2.7 s | 99.9% |
+| 5 | −45.7 | −0.429 | 62 µs | 2.7 s | 99.1% |
+
+**PTP slope**: mean = +0.26 ppm · stdev = ±0.44 ppm  
+**PTP stdev**: mean = 64 µs · stdev = ±7.6 µs  
+**FINE time**: 2.7 s in all 5 runs  
+**Overall: PASS (5/5)**
+
+---
+
+## 17. HW/SW Timer Synchronisation Test — `tcpip_iperf_lan865x.X/hw_timer_sync_test.py`
+
+Validates that the TC0-based software clock (`PTP_CLOCK`) works correctly
+**without** PTP Ethernet synchronisation.  It measures the raw crystal
+frequency difference between the two boards and verifies that the TC0
+tick-to-nanosecond interpolation is internally consistent.
+
+### Purpose
+
+| What it proves | What it does NOT prove |
+|----------------|----------------------|
+| TC0 tick-to-ns conversion is correct on both boards | Correct PTP anchor capture (→ `ptp_time_test.py`) |
+| `PTP_CLOCK_GetTime_ns()` interpolation is consistent | PTP Ethernet timestamping (RTSA / TTSCAL) |
+| UART serialisation latency correction (`perf_counter_ns`) works | |
+| Crystal frequency ratio between the two boards is measured accurately | |
+
+### Test Steps
+
+| Step | Description |
+|------|-------------|
+| 0 — Simultaneous `clk_set 0` | Both clocks zeroed in parallel threads; thread launch skew measured. |
+| 1 — Settle | 2 s pause so both boards start collecting from a stable baseline. |
+| 2 — Collect N paired samples | 100 swap-symmetrised `clk_get` pairs at 100 ms intervals (~12 s total). Linear regression over `diff(t) = intercept + slope * t` removes the crystal trend; residuals must be below threshold. |
+
+### PASS Criterion
+
+`residual stdev < 500 µs`
+
+The growing mean offset (linear drift) is **expected** and does NOT cause a
+FAIL — two free-running crystal oscillators always drift apart at a constant
+rate.  The PASS check only verifies that the *residuals after removing that
+linear trend* are small, which confirms that the TC0 interpolation is
+self-consistent.
+
+### Output Quantities
+
+| Quantity | Meaning |
+|----------|---------|
+| `intercept` | Clock offset right after `clk_set 0` — combined effect of thread launch skew, UART latency, and FreeRTOS scheduling. Typical: −700 … 0 µs. |
+| `slope` (ppm) | Crystal frequency difference Board B − Board A. Varies run-to-run (−400 … +10 ppm) because the TISUBN register retains a PTP-era correction from the preceding session. |
+| `residual stdev` | Measurement noise = UART serialisation jitter. Typical: 60 … 200 µs. |
+| `drift A / B` | Reported `drift_ppb` — always 0 ppb when PTP is inactive. |
+
+### Usage
+
+```bat
+cd tcpip_iperf_lan865x.X
+python hw_timer_sync_test.py --a-port COM8 --b-port COM10
+```
+
+Optional arguments: `--n <samples>` (default 100), `--pause-ms` (default 100),
+`--threshold-us` (default 500), `--settle-s` (default 2), `--log-file <path>`.
+
+### Confirmed Results (6 valid runs, 2026-04-09 / 2026-04-10)
+
+| Run | Date/time | Slope (ppm) | Intercept (µs) | Res. stdev (µs) | Result |
+|-----|-----------|-------------|----------------|-----------------|--------|
+| 1 | 2026-04-09 17:56 | −321.2 | −687 | 91 | PASS |
+| 2 | 2026-04-09 17:57 | −266.0 | −424 | 134 | PASS |
+| 3 | 2026-04-10 09:08 | −0.0¹ | −22 | 145 | PASS |
+| 4 | 2026-04-10 09:08 | −392.4 | −453 | 192 | PASS |
+| 5 | 2026-04-10 09:12 | +5.5 | −66 | 62 | PASS |
+| 6 | 2026-04-10 09:19 | −139.9 | −691 | 149 | PASS |
+
+¹ Run 3 was executed immediately after a PTP session; the TISUBN register
+retained its PTP-era crystal-rate correction, making the apparent slope ≈ 0.
+The TC0 interpolation was still verified consistent (stdev 145 µs < 500 µs).
+
+**All 6 runs: PASS (3/3 steps each)**
