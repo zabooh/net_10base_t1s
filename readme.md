@@ -1365,7 +1365,12 @@ The fix is idempotent — running `setup_debug.py` multiple times is safe.
 
 ## 7. Reinforcement Learning — Coding with AI
 
-This chapter is about a different kind of loop: using AI-assisted coding not just to write firmware, but to *improve* it automatically by measuring what the firmware does and feeding that measurement back into the next code change.
+This chapter covers two related but distinct concepts:
+
+- **Coding with AI:** GitHub Copilot / Claude write the orchestrator code — this happens *during development* and is already standard practice in this project.
+- **RL in the loop:** An algorithm (ranging from a simple for-loop up to an LLM) selects the next firmware parameters *at runtime*, builds the firmware, flashes the board, and interprets the measurement as a reward signal.
+
+The core argument: the **hardware-in-the-loop environment** is already fully present in this project. Only the orchestrator that drives it is missing.
 
 ### 7.1 Closed-Loop RL — The Core Idea
 
@@ -1374,62 +1379,67 @@ Reinforcement Learning (RL) is a framework in which an **Agent** repeatedly take
 Applied to embedded firmware development the loop looks like this:
 
 ```
+ ┌─────────────────────────────────────────────────────────────┐
+ │                    AGENT  (see §7.4 for three levels)       │
+ │                                                             │
+ │  Level 1 — for-loop / grid search  (no AI model)           │
+ │  Level 2 — Bayesian optimiser      (statistical model)     │
+ │  Level 3 — LLM as policy           (real AI API call)      │
+ └───────────────────┬──────────────────────▲──────────────────┘
+                     │ Action               │ Reward + next State
+                     │ (new #define values) │ (stdev, fine_s, pass)
+                     ▼                      │
  ┌─────────────────────────────────────────────────────────┐
- │                      AGENT (AI / script)                │
+ │                    ENVIRONMENT                          │
  │                                                         │
- │  policy: given current state, choose next parameter set │
- └───────────────┬─────────────────────▲───────────────────┘
-                 │ Action              │ Reward + next State
-                 ▼                     │
- ┌───────────────────────────────────────────────────────┐
- │                    ENVIRONMENT                        │
- │                                                       │
- │  1. edit firmware constant(s) (e.g. PTP_SYNC_INTERVAL)│
- │  2. build.bat  →  hex file                            │
- │  3. flash.py   →  device programmed                   │
- │  4. ptp_reproducibility_test.py  →  metrics JSON      │
- │     • stdev_ns  (lower = better)                      │
- │     • slope_ppm (closer to 0 = better)                │
- │     • fine_s    (lower = better)                      │
- │     • pass      (boolean)                             │
- └───────────────────────────────────────────────────────┘
+ │  1. render_params()  — writes #define values to params.h│
+ │  2. build.bat        — compiles → hex file              │
+ │  3. flash.py         — programs the board               │
+ │  4. ptp_reproducibility_test.py  — measures, emits JSON │
+ │       • stdev_ns   (lower = better)                     │
+ │       • slope_ppm  (closer to 0 = better)               │
+ │       • fine_s     (lower = better)                     │
+ │       • pass       (boolean)                            │
+ └─────────────────────────────────────────────────────────┘
 ```
 
-The key insight is that **the environment already exists** in this project:
+**Key point:** The Environment is identical across all three levels. Only the Agent changes.
+
+The **environment already exists** in this project:
 
 | Environment step | Tool already present |
 |------------------|----------------------|
 | Edit firmware    | `PTP_FOL_task.h`, `filters.h` (plain `#define` values) |
 | Build            | `build.bat` (one-command, reproducible) |
-| Flash            | `flash.py` (one-command, serial-port detection) |
+| Flash            | `flash.py` (one-command, automatic port detection) |
 | Measure          | `ptp_reproducibility_test.py` (structured JSON output) |
 
-Only an **orchestrator layer** is missing — a script that strings these four steps together and drives an RL or search algorithm over the parameter space.
+Only the **orchestrator layer** is missing — a script that strings these four steps together and drives a search algorithm or AI model over the parameter space.
 
 ### 7.2 Closing the Loop — What the Orchestrator Needs
 
-The orchestrator must:
+Regardless of the chosen agent level, the orchestrator must:
 
-1. **Parameterize the firmware** — substitute numeric `#define` values before each build.  
-   Safest approach: keep a `params_template.h` with `{{PLACEHOLDER}}` tokens; the orchestrator renders it into the real header before calling `build.bat`.
+1. **Parameterise the firmware** — substitute numeric `#define` values before each build.  
+   Safest approach: a `params_template.h` with `{{PLACEHOLDER}}` tokens; the orchestrator renders it into the real header before calling `build.bat`.
 
-2. **Build and flash without human interaction** — both tools already support this; the orchestrator simply calls them as subprocesses and checks the exit code.
+2. **Build and flash without operator interaction** — both tools already support this; the orchestrator calls them as subprocesses and checks the exit code.
 
-3. **Parse the reward signal** from `ptp_reproducibility_test.py`.  
-   The test already has a `--json` output mode; the orchestrator reads the resulting file.
+3. **Parse the reward signal** — `ptp_reproducibility_test.py` has a `--json` output mode; the orchestrator reads the resulting file.
 
-4. **Implement a search or learning policy** — this can be as simple as a grid search or random search, or as sophisticated as Bayesian optimisation (`scikit-optimize`) or a Q-learning table.
+4. **Implement a search or learning policy** — Level 1: for-loop. Level 2: Bayesian optimiser. Level 3: LLM (see §7.4).
 
-5. **Gate dangerous actions** — optionally require a human `y/n` before flashing a firmware whose predicted outcome is outside a safe operating envelope (e.g. TI value that would exceed hardware limits).
+5. **Gate dangerous actions** — optionally require a `y/n` confirmation before flashing if the proposed parameter value is outside a safe operating envelope (e.g. a TI value that would exceed hardware limits).
 
-Minimal orchestrator skeleton:
+Minimal orchestrator skeleton (shared by all three levels):
 
 ```python
-import subprocess, json, pathlib, itertools
+import subprocess, json, pathlib
 
-PARAMS_HEADER = pathlib.Path("src/params.h")  # generated before every build
+PARAMS_HEADER = pathlib.Path("src/params.h")  # re-created before every build
 
 def render_params(params: dict) -> None:
+    """Write a params.h containing the desired #define values."""
     lines = [f"#define {k} {v}" for k, v in params.items()]
     PARAMS_HEADER.write_text("\n".join(lines) + "\n")
 
@@ -1450,11 +1460,13 @@ def measure(port_gm: str, port_fol: str) -> dict:
     return json.loads(pathlib.Path("result.json").read_text())
 
 def reward(metrics: dict) -> float:
+    """Reward function: lower stdev and faster FINE lock = higher reward."""
     if not metrics["pass"]:
         return -1000.0
     return -metrics["stdev_ns"] - 0.1 * metrics["fine_s"]
 
 def run_episode(params: dict, port_gm: str, port_fol: str) -> float:
+    """One full cycle: parameters → build → flash → measure → reward."""
     render_params(params)
     if not build() or not flash():
         return -1000.0
@@ -1478,33 +1490,37 @@ Parameters interact non-linearly: a smaller `HARDSYNC_FINE_THRESHOLD` makes FINE
 
 ### 7.4 Concrete Example — Tuning `PTP_SYNC_INTERVAL`
 
-This is a 1-D discrete optimisation problem — a good first test for any orchestrator.
+`PTP_SYNC_INTERVAL` is a 1-D optimisation problem — a good first test for the infrastructure. The three levels below show how the agent becomes progressively smarter while the Environment remains unchanged.
 
-**Search space:**  `PTP_SYNC_INTERVAL` ∈ {62, 125, 250, 500, 1000} ms
+**Reward function** (identical for all three levels):
 
-**State:** observed `stdev_ns` from the previous episode  
-**Action:** next interval value from the candidate set  
-**Reward:** $r = -\sigma_{\text{ns}} - 0.1 \cdot t_{\text{FINE}}$  where $\sigma$ is stdev in ns and $t_{\text{FINE}}$ is seconds to reach FINE lock
+$$r = -\sigma_{\text{ns}} \;-\; 0.1 \cdot t_{\text{FINE}}$$
 
-Even a plain grid search over these five values produces a full characterisation in 5 × (≈30 s build/flash + ≈30 s test) ≈ **5 minutes** of wall time — fast enough to run overnight with multiple random seeds.
+$\sigma$ = standard deviation of the offset in ns, $t_{\text{FINE}}$ = seconds to reach FINE lock
+
+---
+
+#### Level 1 — Grid Search (no AI model, just a for-loop)
+
+> **No AI call.** The agent is a for-loop; `run_episode` is the only thing invoked.
 
 ```python
-# grid_search_interval.py — exhaustive 1-D search over PTP_SYNC_INTERVAL
+# grid_search_interval.py
 import argparse, json, pathlib
-from orchestrator import run_episode   # the skeleton above
+from orchestrator import run_episode
 
 CANDIDATES = [62, 125, 250, 500, 1000]  # milliseconds
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gm",  required=True, help="serial port of grandmaster board")
-    ap.add_argument("--fol", required=True, help="serial port of follower board")
+    ap.add_argument("--gm",  required=True)
+    ap.add_argument("--fol", required=True)
     args = ap.parse_args()
 
     results = []
-    for interval in CANDIDATES:
+    for interval in CANDIDATES:                          # ← this IS the entire "agent"
         params = {"PTP_SYNC_INTERVAL": f"{interval}u"}
-        r = run_episode(params, args.gm, args.fol)
+        r = run_episode(params, args.gm, args.fol)      # build → flash → measure
         print(f"interval={interval:5d} ms  reward={r:10.1f}")
         results.append({"interval_ms": interval, "reward": r})
 
@@ -1516,11 +1532,7 @@ if __name__ == "__main__":
     main()
 ```
 
-Run it:
-
-```bat
-python grid_search_interval.py --gm COM3 --fol COM4
-```
+Runtime: 5 × (≈30 s build/flash + ≈30 s test) ≈ **5 minutes** — a full characterisation in the time it takes to make a coffee.
 
 Expected output (values illustrative):
 
@@ -1534,6 +1546,130 @@ interval= 1000 ms  reward=   -61.7
 Best: 250 ms  (reward -38.9)
 ```
 
-Once the grid search confirms a promising region the same orchestrator can be wrapped in a Bayesian optimiser (`skopt.gp_minimize`) or a multi-armed bandit to extend the search to multiple parameters simultaneously.
+---
 
-> **Note on AI-assisted coding:** The test scripts, orchestrator skeleton, and this entire chapter were produced with the help of GitHub Copilot (Claude Sonnet). The workflow itself — AI proposes code → firmware is built and measured → metrics feed back into the next prompt — is the closed loop described above, applied at the level of the development process rather than inside the firmware.
+#### Level 2 — Bayesian Optimisation (statistical model, no LLM)
+
+> **No LLM call.** A Gaussian process model (`skopt`) learns a surrogate function over the parameter space and selects the next candidate so as to maximise information gain. This significantly reduces the number of required build-flash cycles — important when the search space is larger (multiple parameters simultaneously).
+
+```python
+# bayes_search_interval.py
+import argparse
+from skopt import gp_minimize
+from skopt.space import Integer
+from orchestrator import run_episode
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gm",  required=True)
+    ap.add_argument("--fol", required=True)
+    ap.add_argument("--calls", type=int, default=12)   # total number of builds
+    args = ap.parse_args()
+
+    def objective(params):
+        interval = params[0]
+        r = run_episode({"PTP_SYNC_INTERVAL": f"{interval}u"}, args.gm, args.fol)
+        print(f"interval={interval:5d} ms  reward={r:10.1f}")
+        return -r   # skopt minimises → negate
+
+    result = gp_minimize(
+        objective,
+        dimensions=[Integer(62, 1000, name="interval_ms")],
+        n_calls=args.calls,    # ← Bayesian model picks every next point
+        random_state=42,
+    )
+    print(f"\nBest interval: {result.x[0]} ms  (reward {-result.fun:.1f})")
+
+if __name__ == "__main__":
+    main()
+```
+
+With `--calls 12`, Bayesian optimisation typically matches the result of a full grid search over 20–30 points. The benefit grows significantly when tuning multiple parameters simultaneously (§7.3).
+
+---
+
+#### Level 3 — LLM as Policy (real AI API call)
+
+> **This is where AI is called.** The LLM sees the accumulated measurement history and proposes the next candidate — as a chat prompt. It acts as an "intelligent" agent that can also provide reasoning.
+
+```python
+# llm_search_interval.py
+import argparse, json
+import openai
+from orchestrator import run_episode
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gm",  required=True)
+    ap.add_argument("--fol", required=True)
+    ap.add_argument("--rounds", type=int, default=8)
+    args = ap.parse_args()
+
+    client = openai.OpenAI()   # API key from environment variable OPENAI_API_KEY
+    history = []
+
+    for round_nr in range(args.rounds):
+        # ── Step 1: ask the LLM which value to test next ─────────────────────
+        system_prompt = (
+            "You are an optimisation assistant for a PTP timestamp servo. "
+            "Your task: choose the next value for PTP_SYNC_INTERVAL (ms) "
+            "to maximise the reward r = -stdev_ns - 0.1*fine_s. "
+            "Allowed values: 62..2000 ms (integer). "
+            "Reply with a single integer only, no explanation."
+        )
+        user_msg = (
+            f"Results so far: {json.dumps(history, indent=2)}\n\n"
+            f"Round {round_nr + 1}/{args.rounds}: which value should I test next?"
+        )
+        response = client.chat.completions.create(   # ← AI API call
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_msg},
+            ],
+            max_tokens=10,
+            temperature=0.2,
+        )
+        interval = int(response.choices[0].message.content.strip())
+        print(f"[LLM suggests] interval={interval} ms")
+
+        # ── Step 2: build, flash, measure ────────────────────────────────────
+        r = run_episode({"PTP_SYNC_INTERVAL": f"{interval}u"}, args.gm, args.fol)
+        history.append({"round": round_nr + 1, "interval_ms": interval, "reward": r})
+        print(f"  → reward={r:.1f}")
+
+    best = max(history, key=lambda x: x["reward"])
+    print(f"\nBest result: {best['interval_ms']} ms  (reward {best['reward']:.1f})")
+
+if __name__ == "__main__":
+    main()
+```
+
+Example console output:
+
+```
+[LLM suggests] interval=250 ms
+  → reward=-41.3
+[LLM suggests] interval=200 ms
+  → reward=-38.1
+[LLM suggests] interval=175 ms
+  → reward=-36.8
+[LLM suggests] interval=150 ms
+  → reward=-39.7
+...
+Best result: 175 ms  (reward -36.8)
+```
+
+After each measurement the LLM sees the complete `history` JSON and can explain its next suggestion — e.g. "175 ms was better than 200 ms, so I'll try 160 ms next". This explainability distinguishes Level 3 from Level 2.
+
+---
+
+#### Summary of the three levels
+
+| Level | Agent | AI model | Builds for a good result | Setup required |
+|-------|-------|----------|--------------------------|----------------|
+| 1 — Grid Search | for-loop | none | N (all candidates) | no external library |
+| 2 — Bayesian Opt. | `skopt` GP model | statistical | ~12–15 | `pip install scikit-optimize` |
+| 3 — LLM Policy | GPT-4o / Copilot | LLM (API call) | ~8–12 | OpenAI API key |
+
+> **Note on "Coding with AI":** The orchestrator scripts, the `run_episode` skeleton, and this entire chapter were written with the help of GitHub Copilot (Claude Sonnet). The workflow — Copilot proposes code → firmware is built and measured → results feed back into the next prompt — is itself the closed loop described in §7.1, applied at the level of the development process rather than inside the firmware.
