@@ -85,7 +85,7 @@ is not present in the original.
 | **Bug fix** — role-swap | `ptp_gm_task.c`, `PTP_FOL_task.c/.h` | −3.13 ms stuck offset after GM↔FOL swap |
 | MAC randomisation | `initialization.c` | Unique MAC addresses via hardware TRNG |
 | LAN865x register CLI | `app.c` | `lan_read` / `lan_write` without a debugger |
-| Build tooling | `build.bat`, `setup_compiler.py`, `setup_flasher.py`, `flash.py`, `build_summary.py`, `user.cmake` | Reproducible one-command builds |
+| Build tooling | `build.bat`, `setup_compiler.py`, `setup_flasher.py`, `setup_debug.py`, `flash.py`, `build_summary.py`, `user.cmake` | Reproducible one-command builds; `setup_debug.py` fixes a DFP tool-pack bug that prevents VS Code debugging |
 
 ### Architecture — PTP Data Flow
 
@@ -164,6 +164,7 @@ All further commands assume you are in the working directory from the Clone step
 ```bat
 python setup_compiler.py   # pick the installed XC32 version
 python setup_flasher.py    # assign Board 1 (GM) and Board 2 (FOL) to their debuggers
+python setup_debug.py      # fix SAME54_DFP tool-pack bug (required for VS Code debugging)
 ```
 
 > **Note:** Both boards must be connected via USB (EDBG/debugger port) before
@@ -1327,3 +1328,30 @@ the actual compiler is still XC32 via CMake + Ninja.
   build directory; the C/C++ extension picks it up automatically once CMake has
   configured at least once
 - For flashing, run `python flash.py` from the integrated terminal
+
+#### Debugging in VS Code
+
+The repository includes a pre-configured `launch.json` with two debug
+configurations:
+
+| Config | Description |
+|--------|-------------|
+| **Launch tcpip_iperf_lan865x: default** | Builds, programs, and starts the debugger in one step |
+| **Attach (after flash.py)** | Attaches to an already-flashed device (workaround for tool pack bugs) |
+
+**One-time prerequisite:** run `setup_debug.py` once per machine after clone:
+
+```bat
+python setup_debug.py
+```
+
+This patches `%USERPROFILE%\.mchp_packs\Microchip\SAME54_DFP\<ver>\scripts\dap_cortex-m4.py`
+to add a missing global variable `is_debug_build` that tool pack version 1.6.762
+omits. Without this patch, every debug session fails at the *Erasing...* step with:
+
+```
+NameError: global name 'is_debug_build' is not defined
+Failed to start session: Debugger::program : Failed to program the target device
+```
+
+The fix is idempotent — running `setup_debug.py` multiple times is safe.
