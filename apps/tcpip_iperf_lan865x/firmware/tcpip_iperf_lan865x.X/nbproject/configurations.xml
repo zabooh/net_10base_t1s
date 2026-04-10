@@ -538,6 +538,11 @@
         <itemPath>../src/third_party/wolfssl/wolfssl/certs_test.h</itemPath>
       </logicalFolder>
       <itemPath>../src/app.h</itemPath>
+      <itemPath>../src/ptp_clock.h</itemPath>
+      <itemPath>../src/ptp_gm_task.h</itemPath>
+      <itemPath>../src/PTP_FOL_task.h</itemPath>
+      <itemPath>../src/filters.h</itemPath>
+      <itemPath>../src/ptp_ts_ipc.h</itemPath>
     </logicalFolder>
     <logicalFolder name="ExternalFiles"
                    displayName="Important Files"
@@ -864,6 +869,10 @@
       </logicalFolder>
       <itemPath>../src/app.c</itemPath>
       <itemPath>../src/main.c</itemPath>
+      <itemPath>../src/ptp_clock.c</itemPath>
+      <itemPath>../src/ptp_gm_task.c</itemPath>
+      <itemPath>../src/PTP_FOL_task.c</itemPath>
+      <itemPath>../src/filters.c</itemPath>
     </logicalFolder>
   </logicalFolder>
   <projectmakefile>Makefile</projectmakefile>
