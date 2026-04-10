@@ -467,6 +467,7 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
                                                   rateRatio, 0.5);
                 rateRatioFIR = firLowPassFilterF((double)diffRemote / (double)diffLocal,
                                                  &rateRatiolpfState);
+                PTP_CLOCK_SetDriftPPB((int32_t)((rateRatioFIR - 1.0) * 1e9));
             } else {
                 PTP_LOG("Filtered rateRatio outlier\r\n");
             }

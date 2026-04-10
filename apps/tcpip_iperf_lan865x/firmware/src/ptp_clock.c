@@ -74,6 +74,11 @@ int32_t PTP_CLOCK_GetDriftPPB(void)
     return s_drift_ppb;
 }
 
+void PTP_CLOCK_SetDriftPPB(int32_t drift_ppb)
+{
+    s_drift_ppb = drift_ppb;
+}
+
 bool PTP_CLOCK_IsValid(void)
 {
     return s_valid;

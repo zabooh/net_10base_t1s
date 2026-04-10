@@ -51,6 +51,14 @@ uint64_t PTP_CLOCK_GetTime_ns(void);
 int32_t  PTP_CLOCK_GetDriftPPB(void);
 
 /**
+ * Update the reported crystal drift value.
+ *
+ * Called by PTP_FOL_task.c whenever rateRatioFIR is recalculated.
+ * @param drift_ppb  (rateRatioFIR - 1.0) * 1e9, rounded to int32_t
+ */
+void     PTP_CLOCK_SetDriftPPB(int32_t drift_ppb);
+
+/**
  * Returns true once at least one anchor point has been recorded.
  */
 bool     PTP_CLOCK_IsValid(void);
