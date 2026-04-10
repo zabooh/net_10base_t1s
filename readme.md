@@ -7,13 +7,18 @@ synchronisation accuracy over 10BASE-T1S.
 
 ### Origin
 
-The PTP implementation is derived from **Microchip Application Note AN1847**
+This repository is a **fork** of the Microchip Harmony 3 `net_10base_t1s` package:
+
+> **https://github.com/Microchip-MPLAB-Harmony/net_10base_t1s.git**
+> Base commit: `586ffc15708fcc2c02b182967d872837a15f69f7` (tag: **v1.4.3**)
+
+The PTP implementation added on top is derived from **Microchip Application Note AN1847**
 (*Precision Time Protocol over 10BASE-T1S*) and its accompanying open-source
-reference project:
+reference project, which is itself a fork of:
 
 > **https://github.com/MicrochipTech/LAN865x-TimeSync.git**
 
-The reference project targets a different Harmony 3 demo application
+The AN1847 reference project targets a different Harmony 3 demo application
 (`t1s_100baset_bridge`). The work described here ports and adapts that
 implementation to the `tcpip_iperf_lan865x` project, resolves two bugs found
 during testing (see §2), and adds the `ptp_clock.c` software wallclock which
@@ -26,6 +31,12 @@ is not present in the original.
 - [Overview](#overview)
   - [Summary of Changes](#summary-of-changes)
   - [Architecture — PTP Data Flow](#architecture--ptp-data-flow)
+- [How To Reproduce](#how-to-reproduce)
+  - [Prerequisites](#prerequisites)
+  - [Clone](#clone)
+  - [Tool Setup](#tool-setup)
+  - [Build & Flash](#build--flash)
+  - [First Console Test](#first-console-test)
 - [1. PTP Implementation](#1-ptp-implementation)
   - [1.1 New Source Files](#11-new-source-files)
   - [1.2 LAN865x Driver Changes](#12-lan865x-driver-changes)
@@ -108,6 +119,106 @@ TC6_CB_OnRxEthernetPacket() → TCP/IP stack → pktEth0Handler() [app.c]
   → EtherType 0x88F7: TCPIP_PKT_PacketAcknowledge(TCPIP_MAC_PKT_ACK_RX_OK)
   → returns true (consumed) — IP stack does not process PTP frames
   → no frame copy; driver path (g_ptp_raw_rx) is the single source of truth
+```
+
+---
+
+## How To Reproduce
+
+The following steps take you from a fresh `git clone` to live PTP output on two
+boards in about 10 minutes.
+
+### Prerequisites
+
+| Requirement | Notes |
+|-------------|-------|
+| **Hardware** | 2× ATSAME54-Curiosity-Ultra + LAN865x click board, connected via T1S bus |
+| **MPLAB XC32** | v4.60 or v5.x, installed under `C:\Program Files\Microchip\xc32\` |
+| **CMake ≥ 4.1 + Ninja** | Must be on `PATH` |
+| **MPLAB X IDE / MDB** | Required by `flash.py` for programming |
+| **Python 3.9+** | `pip install pyserial` for the serial test scripts |
+| **Terminal emulator** | Two independent windows, 115200 8N1 (e.g. PuTTY, Tera Term) |
+
+### Clone
+
+```bat
+git clone https://github.com/zabooh/net_10base_t1s.git
+cd net_10base_t1s
+```
+
+The repository contains pre-built HEX images in
+`apps/tcpip_iperf_lan865x/firmware/out/tcpip_iperf_lan865x/image/`
+(tracked via a `.gitignore` negation rule) — a rebuild is optional for a quick
+first test.
+
+### Tool Setup
+
+Run these two scripts once per machine. Both are interactive and save their
+result to a git-ignored `.config` file.
+
+All scripts must be run from inside the project's working directory:
+
+```bat
+cd <local-repo-dir>\apps\tcpip_iperf_lan865x\firmware\tcpip_iperf_lan865x.X
+
+python setup_compiler.py   # pick the installed XC32 version
+python setup_flasher.py    # assign Board 1 (GM) and Board 2 (FOL) to their debuggers
+```
+
+> **Note:** Both boards must be connected via USB (EDBG/debugger port) before
+> running `setup_flasher.py`. The script detects all plugged-in EDBG debuggers
+> and lets you assign which one is Board 1 (Grandmaster) and which is Board 2
+> (Follower). If only one board is connected, the script will not be able to
+> configure both entries.
+
+### Build & Flash
+
+```bat
+build.bat          # incremental build  (use "build.bat rebuild" for a clean build)
+python flash.py    # flash both boards in sequence
+```
+
+A build summary (flash/RAM usage, interrupt handlers, HEX path) is printed
+automatically after every successful build. See §6.2 for details.
+
+### First Console Test
+
+Open two serial terminal windows (115200 8N1, no flow control):
+
+- **Board 1 — Grandmaster** (COM8 by default)
+- **Board 2 — Follower** (COM10 by default)
+
+After reset both boards print the Harmony boot banner and then stay idle.
+Activate PTP from each terminal:
+
+**Board 1 — Grandmaster (verbose mode):**
+```
+> ptp_mode master v
+```
+
+**Board 2 — Follower (verbose mode):**
+```
+> ptp_mode follower v
+```
+
+Expected Board 2 output — the servo steps through these states:
+
+```
+PTP MATCHFREQ  offset=...
+PTP HARDSYNC   offset=...
+PTP COARSE     offset=...
+PTP FINE       offset=...
+[V] FINE  t1=00:00:05.123456789  t2=00:00:05.123514600  off=      +57 ns
+[V] FINE  t1=00:00:05.248334810  t2=00:00:05.248392100  off=      +55 ns
+```
+
+Once the follower prints `FINE` continuously, synchronisation is established.
+Offsets below ±200 ns are typical for the initial lock; steady-state offsets
+are usually below ±1 µs.
+
+Check the servo state at any time:
+```
+> ptp_status
 ```
 
 ---
