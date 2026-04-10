@@ -66,6 +66,7 @@ is not present in the original.
 - [6. Hardware & Build Setup](#6-hardware--build-setup)
   - [6.1 Hardware Configuration](#61-hardware-configuration)
   - [6.2 Build Infrastructure](#62-build-infrastructure)
+  - [6.3 Building with MPLAB X IDE](#63-building-with-mplab-x-ide)
 
 ---
 
@@ -1261,3 +1262,31 @@ backslashes from command-line arguments, so the linker receives
 location `out/tcpip_iperf_lan865x/default.elf`. Loaded via the standard
 `include(user.cmake OPTIONAL)` hook in `CMakeLists.txt` — no manual action
 required.
+
+### 6.3 Building with MPLAB X IDE
+
+The project can also be opened and built directly in **MPLAB X IDE** as an
+alternative to `build.bat`. The `nbproject/` directory contains all necessary
+project metadata; MPLAB X generates the required `Makefile-impl.mk` and
+`Makefile-variables.mk` automatically when the project is opened.
+
+#### Steps
+
+1. Open MPLAB X IDE
+2. **File → Open Project** → select `tcpip_iperf_lan865x.X/`
+3. MPLAB X detects the project type (`com.microchip.mplab.nbide.embedded.makeproject`)
+   and generates the missing Makefile fragments automatically
+4. Select the `default` configuration
+5. **Production → Build Main Project** (or press F11)
+
+#### Notes
+
+- The XC32 toolchain version configured in MPLAB X must match the version used
+  by `setup_compiler.py` / `build.bat` to ensure identical compiler flags
+- All PTP source files (`ptp_clock.c`, `ptp_gm_task.c`, `PTP_FOL_task.c`,
+  `filters.c`) are registered in `nbproject/configurations.xml` and will appear
+  in the MPLAB X project tree automatically
+- MPLAB X uses its own intermediate build directory (inside `build/`) — this is
+  separate from the CMake build tree under `C:\...\temp\`
+- For flashing, `flash.py` (MPLAB MDB) remains the recommended method; MPLAB X
+  can also program via **Run → Run Main Project** if a debugger is attached
