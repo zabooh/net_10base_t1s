@@ -68,6 +68,11 @@ is not present in the original.
   - [6.2 Build Infrastructure](#62-build-infrastructure)
   - [6.3 Building with MPLAB X IDE](#63-building-with-mplab-x-ide)
   - [6.4 Building with Visual Studio Code](#64-building-with-visual-studio-code)
+- [7. Reinforcement Learning — Coding with AI](#7-reinforcement-learning--coding-with-ai)
+  - [7.1 Closed-Loop RL — The Core Idea](#71-closed-loop-rl--the-core-idea)
+  - [7.2 Closing the Loop — What the Orchestrator Needs](#72-closing-the-loop--what-the-orchestrator-needs)
+  - [7.3 Firmware Parameters Worth Tuning](#73-firmware-parameters-worth-tuning)
+  - [7.4 Concrete Example — Tuning PTP_SYNC_INTERVAL](#74-concrete-example--tuning-ptp_sync_interval)
 
 ---
 
@@ -1355,3 +1360,180 @@ Failed to start session: Debugger::program : Failed to program the target device
 ```
 
 The fix is idempotent — running `setup_debug.py` multiple times is safe.
+
+---
+
+## 7. Reinforcement Learning — Coding with AI
+
+This chapter is about a different kind of loop: using AI-assisted coding not just to write firmware, but to *improve* it automatically by measuring what the firmware does and feeding that measurement back into the next code change.
+
+### 7.1 Closed-Loop RL — The Core Idea
+
+Reinforcement Learning (RL) is a framework in which an **Agent** repeatedly takes **Actions**, observes the resulting **State** of an **Environment**, and receives a scalar **Reward** signal. The agent's goal is to maximise cumulative reward over time.
+
+Applied to embedded firmware development the loop looks like this:
+
+```
+ ┌─────────────────────────────────────────────────────────┐
+ │                      AGENT (AI / script)                │
+ │                                                         │
+ │  policy: given current state, choose next parameter set │
+ └───────────────┬─────────────────────▲───────────────────┘
+                 │ Action              │ Reward + next State
+                 ▼                     │
+ ┌───────────────────────────────────────────────────────┐
+ │                    ENVIRONMENT                        │
+ │                                                       │
+ │  1. edit firmware constant(s) (e.g. PTP_SYNC_INTERVAL)│
+ │  2. build.bat  →  hex file                            │
+ │  3. flash.py   →  device programmed                   │
+ │  4. ptp_reproducibility_test.py  →  metrics JSON      │
+ │     • stdev_ns  (lower = better)                      │
+ │     • slope_ppm (closer to 0 = better)                │
+ │     • fine_s    (lower = better)                      │
+ │     • pass      (boolean)                             │
+ └───────────────────────────────────────────────────────┘
+```
+
+The key insight is that **the environment already exists** in this project:
+
+| Environment step | Tool already present |
+|------------------|----------------------|
+| Edit firmware    | `PTP_FOL_task.h`, `filters.h` (plain `#define` values) |
+| Build            | `build.bat` (one-command, reproducible) |
+| Flash            | `flash.py` (one-command, serial-port detection) |
+| Measure          | `ptp_reproducibility_test.py` (structured JSON output) |
+
+Only an **orchestrator layer** is missing — a script that strings these four steps together and drives an RL or search algorithm over the parameter space.
+
+### 7.2 Closing the Loop — What the Orchestrator Needs
+
+The orchestrator must:
+
+1. **Parameterize the firmware** — substitute numeric `#define` values before each build.  
+   Safest approach: keep a `params_template.h` with `{{PLACEHOLDER}}` tokens; the orchestrator renders it into the real header before calling `build.bat`.
+
+2. **Build and flash without human interaction** — both tools already support this; the orchestrator simply calls them as subprocesses and checks the exit code.
+
+3. **Parse the reward signal** from `ptp_reproducibility_test.py`.  
+   The test already has a `--json` output mode; the orchestrator reads the resulting file.
+
+4. **Implement a search or learning policy** — this can be as simple as a grid search or random search, or as sophisticated as Bayesian optimisation (`scikit-optimize`) or a Q-learning table.
+
+5. **Gate dangerous actions** — optionally require a human `y/n` before flashing a firmware whose predicted outcome is outside a safe operating envelope (e.g. TI value that would exceed hardware limits).
+
+Minimal orchestrator skeleton:
+
+```python
+import subprocess, json, pathlib, itertools
+
+PARAMS_HEADER = pathlib.Path("src/params.h")  # generated before every build
+
+def render_params(params: dict) -> None:
+    lines = [f"#define {k} {v}" for k, v in params.items()]
+    PARAMS_HEADER.write_text("\n".join(lines) + "\n")
+
+def build() -> bool:
+    return subprocess.run(["build.bat"], check=False).returncode == 0
+
+def flash() -> bool:
+    return subprocess.run(["python", "flash.py"], check=False).returncode == 0
+
+def measure(port_gm: str, port_fol: str) -> dict:
+    result = subprocess.run(
+        ["python", "ptp_reproducibility_test.py",
+         "--gm", port_gm, "--fol", port_fol, "--json", "result.json"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return {"pass": False, "stdev_ns": 1e9, "slope_ppm": 1e6, "fine_s": 1e6}
+    return json.loads(pathlib.Path("result.json").read_text())
+
+def reward(metrics: dict) -> float:
+    if not metrics["pass"]:
+        return -1000.0
+    return -metrics["stdev_ns"] - 0.1 * metrics["fine_s"]
+
+def run_episode(params: dict, port_gm: str, port_fol: str) -> float:
+    render_params(params)
+    if not build() or not flash():
+        return -1000.0
+    return reward(measure(port_gm, port_fol))
+```
+
+### 7.3 Firmware Parameters Worth Tuning
+
+The servo has several numeric constants that are good candidates for automated optimisation.  All live in plain C headers — no MCC regeneration required.
+
+| Parameter | Location | Current value | Effect |
+|-----------|----------|---------------|--------|
+| `PTP_SYNC_INTERVAL` | `PTP_FOL_task.h:80` | 500 ms | Sync message period; lower = faster reaction, higher = smoother frequency estimate |
+| `FIR_FILER_SIZE` | `filters.h:40` | 16 taps | Rate-ratio FIR smoothing; larger = less noise, more lag |
+| `FIR_FILER_SIZE_FINE` | `filters.h:41` | 3 taps | Offset FIR in COARSE/FINE state; trades jitter vs. responsiveness |
+| `HARDSYNC_COARSE_THRESHOLD` | `PTP_FOL_task.h:86` | 300 ns | Offset boundary HARDSYNC→COARSE; too small = coarse never reached; too large = noise triggers coarse |
+| `HARDSYNC_FINE_THRESHOLD` | `PTP_FOL_task.h:87` | 150 ns | Offset boundary COARSE→FINE; governs when TISUBN fine-tuning activates |
+| `MATCHFREQ_RESET_THRESHOLD` | `PTP_FOL_task.h:83` | 100 000 000 ns | Safety guard: offset above this resets to MATCHFREQ |
+
+Parameters interact non-linearly: a smaller `HARDSYNC_FINE_THRESHOLD` makes FINE reachable faster but requires a correspondingly small `FIR_FILER_SIZE_FINE` to avoid oscillation. This coupling is exactly why manual hand-tuning is tedious and RL is attractive.
+
+### 7.4 Concrete Example — Tuning `PTP_SYNC_INTERVAL`
+
+This is a 1-D discrete optimisation problem — a good first test for any orchestrator.
+
+**Search space:**  `PTP_SYNC_INTERVAL` ∈ {62, 125, 250, 500, 1000} ms
+
+**State:** observed `stdev_ns` from the previous episode  
+**Action:** next interval value from the candidate set  
+**Reward:** $r = -\sigma_{\text{ns}} - 0.1 \cdot t_{\text{FINE}}$  where $\sigma$ is stdev in ns and $t_{\text{FINE}}$ is seconds to reach FINE lock
+
+Even a plain grid search over these five values produces a full characterisation in 5 × (≈30 s build/flash + ≈30 s test) ≈ **5 minutes** of wall time — fast enough to run overnight with multiple random seeds.
+
+```python
+# grid_search_interval.py — exhaustive 1-D search over PTP_SYNC_INTERVAL
+import argparse, json, pathlib
+from orchestrator import run_episode   # the skeleton above
+
+CANDIDATES = [62, 125, 250, 500, 1000]  # milliseconds
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gm",  required=True, help="serial port of grandmaster board")
+    ap.add_argument("--fol", required=True, help="serial port of follower board")
+    args = ap.parse_args()
+
+    results = []
+    for interval in CANDIDATES:
+        params = {"PTP_SYNC_INTERVAL": f"{interval}u"}
+        r = run_episode(params, args.gm, args.fol)
+        print(f"interval={interval:5d} ms  reward={r:10.1f}")
+        results.append({"interval_ms": interval, "reward": r})
+
+    best = max(results, key=lambda x: x["reward"])
+    print(f"\nBest: {best['interval_ms']} ms  (reward {best['reward']:.1f})")
+    pathlib.Path("grid_results.json").write_text(json.dumps(results, indent=2))
+
+if __name__ == "__main__":
+    main()
+```
+
+Run it:
+
+```bat
+python grid_search_interval.py --gm COM3 --fol COM4
+```
+
+Expected output (values illustrative):
+
+```
+interval=   62 ms  reward=   -87.3
+interval=  125 ms  reward=   -45.1
+interval=  250 ms  reward=   -38.9
+interval=  500 ms  reward=   -42.2
+interval= 1000 ms  reward=   -61.7
+
+Best: 250 ms  (reward -38.9)
+```
+
+Once the grid search confirms a promising region the same orchestrator can be wrapped in a Bayesian optimiser (`skopt.gp_minimize`) or a multi-armed bandit to extend the search to multiple parameters simultaneously.
+
+> **Note on AI-assisted coding:** The test scripts, orchestrator skeleton, and this entire chapter were produced with the help of GitHub Copilot (Claude Sonnet). The workflow itself — AI proposes code → firmware is built and measured → metrics feed back into the next prompt — is the closed loop described above, applied at the level of the development process rather than inside the firmware.
