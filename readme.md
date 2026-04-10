@@ -143,7 +143,7 @@ boards in about 10 minutes.
 
 ```bat
 git clone https://github.com/zabooh/net_10base_t1s.git
-cd net_10base_t1s
+cd net_10base_t1s\apps\tcpip_iperf_lan865x\firmware\tcpip_iperf_lan865x.X
 ```
 
 The repository contains pre-built HEX images in
@@ -156,11 +156,10 @@ first test.
 Run these two scripts once per machine. Both are interactive and save their
 result to a git-ignored `.config` file.
 
-All scripts must be run from inside the project's working directory:
+All further commands assume you are in the working directory from the Clone step
+(`tcpip_iperf_lan865x.X\`):
 
 ```bat
-cd <local-repo-dir>\apps\tcpip_iperf_lan865x\firmware\tcpip_iperf_lan865x.X
-
 python setup_compiler.py   # pick the installed XC32 version
 python setup_flasher.py    # assign Board 1 (GM) and Board 2 (FOL) to their debuggers
 ```
