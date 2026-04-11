@@ -1673,3 +1673,51 @@ After each measurement the LLM sees the complete `history` JSON and can explain 
 | 3 — LLM Policy | GPT-4o / Copilot | LLM (API call) | ~8–12 | OpenAI API key |
 
 > **Note on "Coding with AI":** The orchestrator scripts, the `run_episode` skeleton, and this entire chapter were written with the help of GitHub Copilot (Claude Sonnet). The workflow — Copilot proposes code → firmware is built and measured → results feed back into the next prompt — is itself the closed loop described in §7.1, applied at the level of the development process rather than inside the firmware.
+
+---
+
+## Python Dependency Management
+
+Several Python scripts in this repository require third-party packages (e.g. `pyserial`).
+Two helper files automate the detection and installation of these packages.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `analyze_dependencies.py` | Scans all `.py` files, detects third-party imports, writes `requirements.txt` |
+| `install_dependencies.bat` | Windows batch script that installs every package listed in `requirements.txt` |
+| `requirements.txt` | Auto-generated list of pip packages required by this repository |
+
+### Workflow
+
+**Step 1 — Analyze (run once, or after adding new Python scripts)**
+
+```
+python analyze_dependencies.py
+```
+
+The script walks the entire repository, parses every `.py` file with Python's `ast`
+module, filters out standard-library modules and local files, and writes a fresh
+`requirements.txt`.
+
+**Step 2 — Install (Windows)**
+
+Double-click `install_dependencies.bat` or run it from a command prompt:
+
+```
+install_dependencies.bat
+```
+
+The batch script:
+1. Checks that Python is installed and available on `PATH`
+2. Checks that `pip` is available
+3. Upgrades pip to the latest version
+4. Runs `pip install -r requirements.txt`
+5. Shows clear status messages and error hints if anything goes wrong
+
+### Prerequisites
+
+- Python 3.8 or newer — https://www.python.org/downloads/
+  *(check "Add Python to PATH" during installation)*
+- An internet connection for the initial package download
