@@ -73,6 +73,23 @@ is not present in the original.
   - [7.2 Closing the Loop — What the Orchestrator Needs](#72-closing-the-loop--what-the-orchestrator-needs)
   - [7.3 Firmware Parameters Worth Tuning](#73-firmware-parameters-worth-tuning)
   - [7.4 Concrete Example — Tuning PTP_SYNC_INTERVAL](#74-concrete-example--tuning-ptp_sync_interval)
+- [8. Python Dependency Management](#8-python-dependency-management)
+- [9. PTP Implementation — In-Depth Analysis](#9-ptp-implementation--in-depth-analysis)
+  - [9.1 Key Source Files](#91-key-source-files)
+  - [9.2 Grandmaster Implementation](#92-grandmaster-implementation)
+    - [Initialisation](#initialisation)
+    - [Sending a Sync Message](#sending-a-sync-message)
+    - [Grandmaster Data Structures](#grandmaster-data-structures)
+  - [9.3 Follower Implementation](#93-follower-implementation)
+    - [Initialisation](#initialisation-1)
+    - [Sync Reception Path](#sync-reception-path)
+    - [FollowUp Processing and Servo](#followup-processing-and-servo)
+    - [Servo State Machine](#servo-state-machine)
+    - [Register-Write State Machine](#register-write-state-machine)
+  - [9.4 Synchronisation Flow — Complete Message Trace](#94-synchronisation-flow--complete-message-trace)
+  - [9.5 Pseudo-Code of the Synchronisation Procedure](#95-pseudo-code-of-the-synchronisation-procedure)
+  - [9.6 Key Data Structures](#96-key-data-structures)
+  - [9.7 Data-Flow Summary](#97-data-flow-summary)
 
 ---
 
@@ -1676,7 +1693,7 @@ After each measurement the LLM sees the complete `history` JSON and can explain 
 
 ---
 
-## Python Dependency Management
+## 8. Python Dependency Management
 
 Several Python scripts in this repository require third-party packages (e.g. `pyserial`).
 Two helper files automate the detection and installation of these packages.
@@ -1721,3 +1738,544 @@ The batch script:
 - Python 3.8 or newer — https://www.python.org/downloads/
   *(check "Add Python to PATH" during installation)*
 - An internet connection for the initial package download
+
+---
+
+## 9. PTP Implementation — In-Depth Analysis
+
+This chapter provides a detailed, file-level analysis of the PTP (IEEE 1588)
+implementation: Grandmaster (GM) and Follower (FOL), the complete synchronisation
+message flow, and annotated pseudo-code.
+
+### 9.1 Key Source Files
+
+| File | Role |
+|------|------|
+| `src/ptp_gm_task.c` | GM state machine — sends Sync/FollowUp, reads TX timestamps |
+| `src/ptp_gm_task.h` | GM public API, register macros, timing constants |
+| `src/PTP_FOL_task.c` | FOL message processing, clock servo algorithm |
+| `src/PTP_FOL_task.h` | FOL public API, all PTP wire-format structs |
+| `src/ptp_clock.c/.h` | Software PTP wallclock (ns resolution, TC0 interpolation) |
+| `src/ptp_ts_ipc.h` | IPC structs for HW RX-timestamps between driver and app |
+| `src/app.c` | Application state machine — service dispatcher for GM and FOL |
+| `src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c` | LAN865x driver, `TC6_CB_OnRxEthernetPacket()` |
+
+---
+
+### 9.2 Grandmaster Implementation
+
+#### Initialisation
+
+`PTP_GM_Init()` is called when the user issues `ptp_mode master`
+(`app.c:167`, `ptp_gm_task.c:349`).
+
+```
+PTP_GM_Init()
+  → read board MAC via TCPIP_STACK_NetAddressMac()
+  → adopt calibrated TI/TISUBN values from FOL servo (if available)
+  → enter state GM_STATE_RMW_CONFIG0_READ
+```
+
+**Pre-init RMW sequence** (mirrors `TC6_ptp_master_init` steps 8 and 9):
+
+1. **OA_CONFIG0 RMW** (`0x00000004`): set bits 7 and 6 (FTSE) — enables hardware
+   timestamping (`ptp_gm_task.c:729–777`, mask `0xC0`).
+2. **PADCTRL RMW** (`0x000A0088`): set bit 8, clear bit 9
+   (`ptp_gm_task.c:779–829`).
+
+**Normal init sequence** — 9 sequential register writes
+(`ptp_gm_task.c:157–173`):
+
+| Register | Address | Value | Purpose |
+|----------|---------|-------|---------|
+| `GM_TXMCTL` | `0x00040040` | `0x0000` | Reset TX-Match detector |
+| `GM_TXMLOC` | `0x00040045` | `30` | Match position inside frame |
+| `GM_TXMPATH` | `0x00040041` | `0x88` | Pattern: EtherType high byte |
+| `GM_TXMPATL` | `0x00040042` | `0xF710` | Pattern: EtherType low byte + offset |
+| `GM_TXMMSKH/L` | `0x00040043/44` | `0x00` | Pattern masks |
+| `MAC_TISUBN` | `0x0001006F` | calibrated sub-increment | Sub-nanosecond clock increment |
+| `MAC_TI` | `0x00010077` | calibrated TI (default: 40) | Nanosecond clock increment |
+| `PPSCTL` | `0x000A0239` | `0x7D` | Enable 1PPS output |
+
+#### Sending a Sync Message
+
+`PTP_GM_Service()` is called every 1 ms from `APP_STATE_IDLE` (`app.c:489`).
+The full per-cycle sequence:
+
+```
+GM_STATE_WAIT_PERIOD  ── every 125 ms ──▶ GM_STATE_SEND_SYNC
+  build_sync()
+  WriteRegister(GM_TXMCTL, 0x0002)         // TXME=1: arm TX-Match detector
+  wait write callback
+  SendRawEthFrame(sync_buf, tsc=1)         // tsc=1 → capture TX timestamp
+  wait TX-done callback
+  → GM_STATE_READ_STATUS0
+  DRV_LAN865X_GetAndClearTsCapture()       // check TTSCAA/B/C
+  ReadRegister(GM_OA_TTSCAH)               // t1 seconds
+  ReadRegister(GM_OA_TTSCAL)               // t1 nanoseconds
+  WriteRegister(GM_OA_STATUS0, status0)    // W1C: clear capture flags
+  → GM_STATE_SEND_FOLLOWUP
+  build_followup(t1_sec, t1_nsec + 7650)  // apply PTP_GM_STATIC_OFFSET
+  SendRawEthFrame(followup_buf, tsc=0)
+  wait TX-done callback
+  PTP_CLOCK_Update(t1 + GM_ANCHOR_OFFSET_NS, SYS_TIME_Counter64Get())
+  gm_seq_id++
+  → GM_STATE_WAIT_PERIOD
+```
+
+**Sync frame layout** (`build_sync`, `ptp_gm_task.c:263–289`):
+- 14-byte Ethernet header — EtherType `0x88F7`, destination broadcast or
+  PTP L2 multicast `01:80:C2:00:00:0E`
+- 44-byte `syncMsg_t` — `tsmt=0x10`, `version=0x02`, `messageLength=0x002C`,
+  `sequenceID`, `flags[0]=0x02, flags[1]=0x08`
+- `originTimestamp` is zero — the precise value is carried by the FollowUp
+
+**FollowUp frame layout** (`build_followup`, `ptp_gm_task.c:291–319`):
+- `preciseOriginTimestamp` = TTSCA + `PTP_GM_STATIC_OFFSET` (7 650 ns TX-path
+  compensation)
+- Organisation-Specific TLV type `0x0003`, OUI `00:80:C2`, sub-type `01`
+  (cumulative rate-ratio)
+
+#### Grandmaster Data Structures
+
+```c
+// ptp_gm_task.c:70–97 — runtime state
+gmState_t gm_state;            // current state-machine state
+uint32_t  gm_ts_sec/nsec;      // TX timestamp from TTSCA registers
+uint16_t  gm_seq_id;           // PTP sequence ID
+uint32_t  gm_sync_interval_ms; // default 125 ms
+
+// frame buffers
+uint8_t gm_sync_buf[60];       // 14 (ETH) + 44 (syncMsg_t) + 2 pad
+uint8_t gm_followup_buf[90];   // 14 (ETH) + 76 (followUpMsg_t)
+```
+
+---
+
+### 9.3 Follower Implementation
+
+#### Initialisation
+
+`PTP_FOL_Init()` is called from `APP_STATE_IDLE` on first entry (`app.c:412`)
+and again from `resetSlaveNode()` on every follower reset
+(`PTP_FOL_task.c:638`):
+
+```
+PTP_FOL_Init()
+  → WriteRegister(PPSCTL, 0x02)              // stop PPS output
+  → WriteRegister(SEVINTEN, PPSDONE_Msk)     // enable PPS-done interrupt
+  → memset(TS_SYNC, 0)                       // clear timestamp store
+  → initialise FIR/IIR filter buffers
+```
+
+Follower operation starts when `PTP_FOL_SetMode(PTP_SLAVE)` is called
+(e.g. `ptp_mode follower` CLI command, `app.c:170`), which in turn calls
+`resetSlaveNode()` (`PTP_FOL_task.c:663–668`).
+
+#### Sync Reception Path
+
+Hardware data flow:
+
+```
+LAN865x SPI footer carries the RTSA timestamp
+  → TC6_CB_OnRxEthernetPacket()   [drv_lan865x_api.c:1372]
+      checks EtherType == 0x88F7
+      copies frame → g_ptp_raw_rx.data
+      g_ptp_raw_rx.rxTimestamp = RTSA  (sec[63:32] | ns[31:0])
+      if SYNC (rxTimestamp != NULL):
+          g_ptp_raw_rx.sysTickAtRx = SYS_TIME_Counter64Get()
+      g_ptp_raw_rx.pending = true
+
+app.c:505  (APP_STATE_IDLE polling loop)
+  → PTP_FOL_OnFrame(data, length, rxTimestamp)
+
+PTP_FOL_OnFrame()   [PTP_FOL_task.c:688]
+  → extracts sec/nsec from rxTimestamp
+  → handlePtp(pData, len, sec, nsec)
+
+handlePtp()         [PTP_FOL_task.c:614]
+  → parses messageType = ptpHeader.tsmt & 0x0F
+  → MSG_SYNC      → processSync()  + stores TS_SYNC.receipt = {sec, nsec}
+  → MSG_FOLLOW_UP → processFollowUp()  (servo core)
+```
+
+`processSync()` (`PTP_FOL_task.c:369`) validates the sequence ID and stores t2
+(the RTSA hardware receive timestamp) in `TS_SYNC.receipt`.
+
+#### FollowUp Processing and Servo
+
+`processFollowUp()` (`PTP_FOL_task.c:392`) is the clock-servo core:
+
+```c
+// t1 — precise GM send time from FollowUp frame
+t1 = preciseOriginTimestamp (byte-swapped) + correctionField / 65536
+
+// t2 — local receive time from RTSA (stored during processSync)
+t2 = TS_SYNC.receipt
+
+// update the software clock anchor
+PTP_CLOCK_Update(t2, g_ptp_raw_rx.sysTickAtRx)
+
+// frequency error measurement
+diffLocal  = t2_now - t2_prev   // local interval between two SYNCs
+diffRemote = t1_now - t1_prev   // GM interval between two SYNCs
+rateRatio  = diffRemote / diffLocal
+rateRatioFIR = FIR_filter(rateRatio)   // averaged over 16 samples
+
+// offset calculation
+offset = t2 - t1   // positive: follower is ahead; negative: follower lags
+```
+
+> **Note on delay measurement:** no Delay_Req / Delay_Resp exchange is
+> implemented.  The system uses one-way hardware timestamping only.
+> Propagation delay is compensated by the static constant
+> `PTP_GM_STATIC_OFFSET = 7 650 ns` added to the FollowUp timestamp on the
+> GM side (`ptp_gm_task.h:61`).
+
+#### Servo State Machine
+
+(`PTP_FOL_task.c:485–572`)
+
+| State | Entry condition | Action |
+|-------|----------------|--------|
+| `UNINIT` | initial state | accumulate 16 rate-ratio samples |
+| `UNINIT` → `MATCHFREQ` | after 16 samples | compute TI/TISUBN → `FOL_ACTION_SET_CLOCK_INC` |
+| `MATCHFREQ` | `\|offset\| > 100 000 000 ns` | `hardResync = 1` |
+| `MATCHFREQ` → `HARDSYNC` | `\|offset\| ≤ 100 000 000 ns` | — |
+| `HARDSYNC` | `\|offset\| > 0x3FFF FFFF` | → `UNINIT` (full reset) |
+| `HARDSYNC` | `\|offset\| > 16 777 215 ns` | capped direct adjust → `FOL_ACTION_ADJUST_OFFSET` |
+| `HARDSYNC` → `COARSE` | `\|offset\| > 300 ns` | FIR-coarse filter → `FOL_ACTION_ADJUST_OFFSET` |
+| `COARSE/FINE` | `\|offset\| > 150 ns` | FIR-fine filter → `FOL_ACTION_ADJUST_OFFSET` → `FINE` |
+
+When `hardResync == 1` the follower writes `t1` directly into `MAC_TSL` /
+`MAC_TN` to hard-set the LAN865x hardware clock
+(`FOL_ACTION_HARD_SYNC`, `PTP_FOL_task.c:421–426`).
+
+#### Register-Write State Machine
+
+`PTP_FOL_Service()` is called every 1 ms (`app.c:496`).  It serialises all
+LAN865x SPI writes through the `fol_pending_action` flag
+(`PTP_FOL_task.c:143–291`):
+
+| Action | Registers written | Effect |
+|--------|-----------------|--------|
+| `FOL_ACTION_HARD_SYNC` | `MAC_TSL`, `MAC_TN` | Hard-set LAN865x clock to t1 |
+| `FOL_ACTION_SET_CLOCK_INC` | `MAC_TISUBN`, `MAC_TI` | Apply crystal-drift correction |
+| `FOL_ACTION_ADJUST_OFFSET` | `MAC_TA` | Fine-adjust LAN865x clock (signed offset) |
+| `FOL_ACTION_ENABLE_PPS` | `PPSCTL` | Enable 1PPS output after first lock |
+
+---
+
+### 9.4 Synchronisation Flow — Complete Message Trace
+
+**Timestamp notation**
+- **t1** — precise Sync send time on the GM LAN865x (from TTSCA registers)
+- **t2** — Sync receive time on the FOL LAN865x (from RTSA in SPI footer)
+
+```
+GRANDMASTER                                  FOLLOWER
+(ptp_gm_task.c)                              (PTP_FOL_task.c / drv_lan865x_api.c)
+│                                                        │
+│   ── every 125 ms ──                                   │
+│                                                        │
+│  1. build_sync()                                       │
+│     WriteRegister(GM_TXMCTL, 0x0002)                  │
+│                                                        │
+│  2. SendRawEthFrame(sync_buf, tsc=1)                   │
+│     ──── SYNC (EtherType 0x88F7) ────────────────────▶ │
+│     LAN865x: captures t1 via TX-Match detector         │
+│                                                        │  LAN865x: captures t2 via RTSA
+│                                                        │  TC6_CB_OnRxEthernetPacket:
+│                                                        │    g_ptp_raw_rx.rxTimestamp = t2
+│                                                        │    g_ptp_raw_rx.sysTickAtRx = TC0 tick
+│                                                        │    g_ptp_raw_rx.pending = true
+│                                                        │
+│  3. Read OA_STATUS0  → check TTSCAA                   │
+│  4. Read TTSCA_H  (seconds of t1)                      │
+│  5. Read TTSCA_L  (nanoseconds of t1)                  │
+│  6. Write OA_STATUS0  (W1C clear)                      │
+│                                                        │
+│  7. build_followup(t1 + 7 650 ns)                      │
+│     SendRawEthFrame(followup_buf, tsc=0)               │
+│     ──── FOLLOW_UP ───────────────────────────────────▶ │
+│                                                        │  app.c: g_ptp_raw_rx.pending:
+│  8. PTP_CLOCK_Update(t1 + anchor_offset, TC0 tick)     │    PTP_FOL_OnFrame()
+│     (update GM software clock)                         │    handlePtp → processSync:
+│                                                        │      TS_SYNC.receipt = t2
+│                                                        │    handlePtp → processFollowUp:
+│                                                        │      t1 from preciseOriginTimestamp
+│                                                        │      offset = t2 − t1
+│                                                        │      rateRatio = diffRemote/diffLocal
+│                                                        │      PTP_CLOCK_Update(t2, sysTickAtRx)
+│                                                        │      → servo state machine
+│                                                        │      → fol_pending_action set
+│                                                        │
+│                                                        │  PTP_FOL_Service() (1 ms tick):
+│                                                        │    WriteRegister(MAC_TSL / MAC_TN)
+│                                                        │    or WriteRegister(MAC_TI / TISUBN)
+│                                                        │    or WriteRegister(MAC_TA)
+│                                                        │
+│   ── next 125 ms period ──                             │
+```
+
+---
+
+### 9.5 Pseudo-Code of the Synchronisation Procedure
+
+```
+//=======================================================================
+// PTP GRANDMASTER — main service loop (called every 1 ms)
+//=======================================================================
+
+PROCEDURE PTP_GM_Service():
+    every 125 ms:
+        // Step 1 — arm TX-Match detector
+        WriteRegister(GM_TXMCTL, 0x0002)   // TXME = 1
+        wait write callback
+
+        // Step 2 — send SYNC with timestamp-capture request
+        syncFrame = buildSyncFrame(sequenceID = gm_seq_id)
+        SendRawEthFrame(syncFrame, tsc = 1)
+        wait TX callback  // frame is now on the wire
+
+        // Step 3 — read TX timestamp from LAN865x hardware
+        wait STATUS0.TTSCAA == 1           // capture slot available
+        t1_sec  = ReadRegister(GM_OA_TTSCAH)
+        t1_nsec = ReadRegister(GM_OA_TTSCAL)
+        WriteRegister(GM_OA_STATUS0, status0)  // W1C: clear capture flags
+
+        // Step 4 — apply static TX-path compensation
+        t1_nsec += PTP_GM_STATIC_OFFSET    // 7 650 ns
+        if t1_nsec >= 1_000_000_000:
+            t1_sec  += 1
+            t1_nsec -= 1_000_000_000
+
+        // Step 5 — send FOLLOW_UP carrying t1
+        followUpFrame = buildFollowUpFrame(
+            sequenceID             = gm_seq_id,
+            preciseOriginTimestamp = { t1_sec, t1_nsec }
+        )
+        SendRawEthFrame(followUpFrame, tsc = 0)
+        wait TX callback
+
+        // Step 6 — update software clock anchor
+        wc_ns = t1_sec * 1_000_000_000 + t1_nsec + GM_ANCHOR_OFFSET_NS
+        PTP_CLOCK_Update(wc_ns, SYS_TIME_Counter64Get())
+
+        gm_seq_id++
+
+
+//=======================================================================
+// FOLLOWER — driver callback (interrupt context)
+//=======================================================================
+
+CALLBACK TC6_CB_OnRxEthernetPacket(frame, len, rxTimestamp):
+    if EtherType == 0x88F7:                    // PTP frame
+        g_ptp_raw_rx.data        = frame
+        g_ptp_raw_rx.rxTimestamp = rxTimestamp  // t2: RTSA (sec[63:32] | ns[31:0])
+        if rxTimestamp != NULL:                 // SYNC only — FollowUp has no TS
+            g_ptp_raw_rx.sysTickAtRx = SYS_TIME_Counter64Get()
+        g_ptp_raw_rx.pending = true
+
+
+//=======================================================================
+// FOLLOWER — application task (polling, 1 ms)
+//=======================================================================
+
+PROCEDURE APP_STATE_IDLE():
+    if g_ptp_raw_rx.pending:
+        g_ptp_raw_rx.pending = false
+        PTP_FOL_OnFrame(data, len, rxTimestamp)
+
+
+//=======================================================================
+// FOLLOWER — frame entry point
+//=======================================================================
+
+PROCEDURE PTP_FOL_OnFrame(pData, len, rxTimestamp):
+    sec  = rxTimestamp[63:32]
+    nsec = rxTimestamp[31:0]
+    handlePtp(pData, len, sec, nsec)
+
+PROCEDURE handlePtp(pData, len, sec, nsec):
+    messageType = pData[14].tsmt & 0x0F    // after 14-byte ETH header
+    if messageType == MSG_SYNC:
+        processSync(pData)
+        TS_SYNC.receipt = { sec, nsec }    // t2: hardware receive timestamp
+    elif messageType == MSG_FOLLOW_UP:
+        processFollowUp(pData)
+
+
+//=======================================================================
+// FOLLOWER — SYNC processing
+//=======================================================================
+
+PROCEDURE processSync(syncMsg):
+    seqId = syncMsg.header.sequenceID  (byte-swapped)
+    if mismatch > 10: resetSlaveNode()
+    else:             syncReceived = 1
+
+
+//=======================================================================
+// FOLLOWER — FOLLOW_UP processing and clock servo
+//=======================================================================
+
+PROCEDURE processFollowUp(followUpMsg):
+    // Extract t1 from wire
+    t1 = followUpMsg.preciseOriginTimestamp  (byte-swapped)
+         + correctionField / 65536
+
+    // t2 was stored during processSync
+    t2 = TS_SYNC.receipt
+
+    // Update software clock anchor
+    PTP_CLOCK_Update(t2, g_ptp_raw_rx.sysTickAtRx)
+
+    // Frequency-error measurement
+    diffLocal  = t2_now - t2_prev       // local interval
+    diffRemote = t1_now - t1_prev       // GM interval
+    rateRatio  = diffRemote / diffLocal
+    rateRatioFIR = FIR_filter(rateRatio)   // 16-tap mean
+    PTP_CLOCK_SetDriftPPB((rateRatioFIR - 1.0) * 1e9)
+
+    // Clock offset
+    offset = t2 - t1
+
+    // Servo state machine
+    switch syncStatus:
+
+        case UNINIT:
+            if runs >= 16:
+                // compute crystal-drift compensation
+                mac_ti     = floor(40.0 * rateRatioFIR)
+                mac_tisubn = frac(40.0 * rateRatioFIR) * 16_777_216
+                schedule FOL_ACTION_SET_CLOCK_INC
+                syncStatus = MATCHFREQ
+
+        case MATCHFREQ:
+            if |offset| > 100_000_000 ns: hardResync = 1
+            else:                          syncStatus = HARDSYNC
+
+        case HARDSYNC (and beyond):
+            if |offset| > 0x3FFF_FFFF:
+                syncStatus = UNINIT   // full reset
+
+            elif |offset| > 16_777_215 ns:
+                ta = sign(offset) | min(|offset|, 16_777_215)
+                schedule FOL_ACTION_ADJUST_OFFSET
+
+            elif |offset| > 300 ns:
+                ta = FIR_coarse_filter(offset)
+                schedule FOL_ACTION_ADJUST_OFFSET
+                syncStatus = COARSE
+
+            else:
+                ta = FIR_fine_filter(offset)
+                schedule FOL_ACTION_ADJUST_OFFSET
+                syncStatus = FINE
+
+    if hardResync:
+        // Hard-set LAN865x clock directly to GM time
+        fol_reg_values.tsl = t1.seconds
+        fol_reg_values.tn  = t1.nanoseconds
+        schedule FOL_ACTION_HARD_SYNC
+        hardResync = 0
+
+
+//=======================================================================
+// FOLLOWER — register-write serialiser (called every 1 ms)
+//=======================================================================
+
+PROCEDURE PTP_FOL_Service():
+    switch fol_pending_action:
+        FOL_ACTION_HARD_SYNC:
+            WriteRegister(MAC_TSL, t1_seconds)    // set LAN865x seconds
+            WriteRegister(MAC_TN,  t1_nanosecs)   // set LAN865x nanoseconds
+
+        FOL_ACTION_SET_CLOCK_INC:
+            WriteRegister(MAC_TISUBN, tisubn)     // sub-nanosecond increment
+            WriteRegister(MAC_TI,     ti)         // nanosecond increment
+
+        FOL_ACTION_ADJUST_OFFSET:
+            WriteRegister(MAC_TA, sign_bit | |offset|)  // signed offset step
+
+        FOL_ACTION_ENABLE_PPS:
+            WriteRegister(PPSCTL, 0x7D)           // enable 1PPS output
+
+
+//=======================================================================
+// SOFTWARE PTP CLOCK  (ptp_clock.c)
+//=======================================================================
+
+PROCEDURE PTP_CLOCK_Update(wallclock_ns, sys_tick):
+    s_anchor_wc_ns = wallclock_ns   // last known PTP time
+    s_anchor_tick  = sys_tick       // TC0 tick captured at that moment
+    s_valid        = true
+
+FUNCTION PTP_CLOCK_GetTime_ns():
+    delta_tick = SYS_TIME_Counter64Get() - s_anchor_tick
+    delta_ns   = delta_tick * (50 / 3)   // 60 MHz → 50/3 ns per tick (exact)
+    return s_anchor_wc_ns + delta_ns
+```
+
+---
+
+### 9.6 Key Data Structures
+
+**`ptpSync_ct`** (`PTP_FOL_task.h:222–228`) — follower timestamp store:
+```c
+typedef struct {
+    timeStamp_t origin;       // t1: GM send time (from FollowUp)
+    timeStamp_t origin_prev;  // t1 from the previous Sync cycle
+    timeStamp_t receipt;      // t2: local receive time (from RTSA)
+    timeStamp_t receipt_prev; // t2 from the previous Sync cycle
+} ptpSync_ct;
+```
+
+**`PTP_RxFrameEntry_t`** (`ptp_ts_ipc.h:33–39`) — IPC between driver and app:
+```c
+typedef struct {
+    uint8_t  data[128];        // raw frame bytes
+    uint16_t length;
+    uint64_t rxTimestamp;      // RTSA: sec[63:32] | ns[31:0]
+    uint64_t sysTickAtRx;      // TC0 tick captured at SYNC arrival
+    bool     pending;          // true = app must process this frame
+} PTP_RxFrameEntry_t;
+```
+
+**`syncMsg_t` / `followUpMsg_t`** (`PTP_FOL_task.h:183–198`) — PTP wire formats:
+```c
+typedef struct {
+    ptpHeader_t    header;
+    ptpTimeStamp_t originTimestamp;       // zero in SYNC; filled in FollowUp
+} syncMsg_t;
+
+typedef struct {
+    ptpHeader_t    header;
+    ptpTimeStamp_t preciseOriginTimestamp; // exact t1 from GM hardware clock
+    tlv_followUp_t tlv;                   // Organisation-Specific TLV
+} followUpMsg_t;
+```
+
+---
+
+### 9.7 Data-Flow Summary
+
+```
+GM LAN865x hardware clock  (TTSCA registers)
+    ──▶ t1  (seconds + nanoseconds of the SYNC send event)
+    ──▶ FollowUp frame  (preciseOriginTimestamp = t1 + 7 650 ns)
+    ──▶ PTP_CLOCK_Update(t1 + anchor_offset, TC0 tick)   ← GM software clock
+
+FOL LAN865x hardware clock  (RTSA in SPI footer)
+    ──▶ t2  (64-bit: sec[63:32] | ns[31:0])
+    ──▶ g_ptp_raw_rx.rxTimestamp
+    ──▶ handlePtp → processFollowUp
+    ──▶ offset = t2 − t1
+    ──▶ servo → write MAC_TA / MAC_TI / MAC_TSL
+    ──▶ PTP_CLOCK_Update(t2, sysTickAtRx)                ← FOL software clock
+
+Software PTP Clock  (ptp_clock.c — both boards):
+    anchor (wc_ns, tick) + TC0 interpolation
+    ──▶ PTP_CLOCK_GetTime_ns()  ← used by CLI ptp_time and ptp_time_test.py
+```
