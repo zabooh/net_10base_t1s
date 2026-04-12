@@ -61,6 +61,20 @@ Adapted from noIP-SAM-E54-Curiosity-PTP-Follower/ptp_task.h for Harmony TCP/IP b
 #define EG0CTL              (0x000A0226u)
 #define PPSCTL              (0x000A0239u)
 
+/* -------------------------------------------------------------------------
+ * TX-Match Slot B registers for Delay_Req hardware timestamping
+ * ---------------------------------------------------------------------- */
+#define FOL_TXMBCTL   0x00040050u   /* TX-Match B Control */
+#define FOL_TXMBLOC   0x00040055u   /* TX-Match B Location */
+#define FOL_TXMBPATH  0x00040051u   /* TX-Match B Pattern High */
+#define FOL_TXMBPATL  0x00040052u   /* TX-Match B Pattern Low */
+#define FOL_TXMMBSKH  0x00040053u   /* TX-Match B Mask High */
+#define FOL_TXMMBSKL  0x00040054u   /* TX-Match B Mask Low */
+#define FOL_OA_TTSCBH 0x00040059u   /* Timestamp Capture B High (seconds) */
+#define FOL_OA_TTSCBL 0x0004005Au   /* Timestamp Capture B Low (nanoseconds) */
+#define FOL_OA_STATUS0 0x00000008u  /* STATUS0 register */
+#define FOL_STS0_TTSCAB 0x00000200u /* TTSCAB bit mask (bit 9) */
+
 #define SEVINTEN            (0x000A023Au)
 #define SEVINTEN_PPSDONE_Pos 30u
 #define SEVINTEN_PPSDONE_Msk (1u << SEVINTEN_PPSDONE_Pos)
