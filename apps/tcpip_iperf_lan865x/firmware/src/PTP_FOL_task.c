@@ -45,6 +45,10 @@ typedef enum {
     FOL_REG_WAIT_TI,
     FOL_REG_WRITE_TA,
     FOL_REG_WAIT_TA,
+    FOL_REG_READ_TTSCBH,
+    FOL_REG_WAIT_TTSCBH,
+    FOL_REG_READ_TTSCBL,
+    FOL_REG_WAIT_TTSCBL,
     FOL_REG_DONE
 } fol_reg_state_t;
 
@@ -62,6 +66,7 @@ typedef struct {
     uint32_t tisubn_value;
     uint32_t ti_value;
     uint32_t ta_value;
+    uint32_t read_value;  /* for register read operations */
 } fol_reg_values_t;
 
 static fol_reg_state_t  fol_reg_state         = FOL_REG_IDLE;
@@ -85,6 +90,9 @@ static volatile bool fol_tx_busy         = false;
 
 /* t3: follower Delay_Req send time (ns, from software clock) */
 static int64_t  fol_t3_ns               = 0;
+static uint32_t fol_t3_sec             = 0u;     /* TTSCB seconds */
+static uint32_t fol_t3_nsec            = 0u;     /* TTSCB nanoseconds */
+static bool     fol_t3_capture_pending = false;  /* awaiting TTSCB read */
 /* t4: GM receive time of Delay_Req (ns, from Delay_Resp receiveTimestamp) */
 static int64_t  fol_t4_ns               = 0;
 
@@ -160,12 +168,34 @@ static void fol_reg_write_callback(void *reserved1, bool success, uint32_t addr,
     }
 }
 
+static void fol_reg_read_callback(void *reserved1, bool success, uint32_t addr,
+                                  uint32_t value, void *pTag, void *reserved2)
+{
+    (void)reserved1; (void)addr; (void)pTag; (void)reserved2;
+    if (success) {
+        fol_reg_values.read_value = value;
+        fol_reg_write_complete = true;
+    } else {
+        PTP_LOG("[FOL] Register read failed: addr=0x%08X\r\n", (unsigned int)addr);
+        fol_reg_state      = FOL_REG_IDLE;
+        fol_pending_action = FOL_ACTION_NONE;
+    }
+}
+
 #define FOL_REG_TIMEOUT_MS 100u
 
 void PTP_FOL_Service(void)
 {
     if (ptpMode != PTP_SLAVE) {
         return;
+    }
+
+    /* Check if TTSCB capture is pending */
+    if (fol_t3_capture_pending && fol_reg_state == FOL_REG_IDLE) {
+        uint32_t status0 = DRV_LAN865X_GetAndClearTsCapture(0u);
+        if ((status0 & FOL_STS0_TTSCAB) != 0u) {
+            fol_reg_state = FOL_REG_READ_TTSCBH;
+        }
     }
 
     switch (fol_reg_state) {
@@ -306,6 +336,47 @@ void PTP_FOL_Service(void)
             }
             break;
 
+        case FOL_REG_READ_TTSCBH:
+            fol_reg_write_complete = false;
+            fol_reg_timeout = FOL_REG_TIMEOUT_MS;
+            (void)DRV_LAN865X_ReadRegister(0u, FOL_OA_TTSCBH, true, fol_reg_read_callback, NULL);
+            fol_reg_state = FOL_REG_WAIT_TTSCBH;
+            break;
+
+        case FOL_REG_WAIT_TTSCBH:
+            if (fol_reg_write_complete) {
+                fol_t3_sec = fol_reg_values.read_value;
+                fol_reg_timeout = FOL_REG_TIMEOUT_MS;
+                fol_reg_state = FOL_REG_READ_TTSCBL;
+            } else if (--fol_reg_timeout == 0u) {
+                PTP_LOG("[FOL] Timeout waiting for TTSCBH read\r\n");
+                fol_reg_state = FOL_REG_IDLE;
+                fol_t3_capture_pending = false;
+            }
+            break;
+
+        case FOL_REG_READ_TTSCBL:
+            fol_reg_write_complete = false;
+            fol_reg_timeout = FOL_REG_TIMEOUT_MS;
+            (void)DRV_LAN865X_ReadRegister(0u, FOL_OA_TTSCBL, true, fol_reg_read_callback, NULL);
+            fol_reg_state = FOL_REG_WAIT_TTSCBL;
+            break;
+
+        case FOL_REG_WAIT_TTSCBL:
+            if (fol_reg_write_complete) {
+                fol_t3_nsec = fol_reg_values.read_value;
+                fol_t3_ns = (int64_t)((uint64_t)fol_t3_sec * SEC_IN_NS + (uint64_t)fol_t3_nsec);
+                fol_t3_capture_pending = false;
+                PTP_LOG("[FOL] t3 captured: %lu.%09lu (TTSCB hardware)\r\n",
+                        (unsigned long)fol_t3_sec, (unsigned long)fol_t3_nsec);
+                fol_reg_state = FOL_REG_IDLE;
+            } else if (--fol_reg_timeout == 0u) {
+                PTP_LOG("[FOL] Timeout waiting for TTSCBL read\r\n");
+                fol_reg_state = FOL_REG_IDLE;
+                fol_t3_capture_pending = false;
+            }
+            break;
+
         case FOL_REG_DONE:
             fol_reg_state      = FOL_REG_IDLE;
             fol_pending_action = FOL_ACTION_NONE;
@@ -391,17 +462,18 @@ static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
     msg->header.logMessageInterval = 0x7Fu;
     /* originTimestamp = 0 (as per IEEE 1588 §11.3.2) */
 
-    /* Record t3 from software clock before sending */
-    fol_t3_ns = (int64_t)PTP_CLOCK_GetTime_ns();
-
     /* Save t1 and t2 so processDelayResp() can compute delay for this cycle */
     /* Store in global TS_SYNC which already holds these values. */
     (void)t1_ns; (void)t2_ns;  /* delay calculation uses TS_SYNC directly   */
 
+    /* Arm TX-Match B detector for Delay_Req timestamp capture */
+    (void)DRV_LAN865X_WriteRegister(0u, FOL_TXMBCTL, 0x00000002u, true, NULL, NULL);
+
+    /* Send with tsc=0x02 to capture TX-timestamp in TTSCB */
     fol_tx_busy = true;
     if (!DRV_LAN865X_SendRawEthFrame(0u, fol_delay_req_buf,
                                      FOL_DELAY_REQ_BUF_SIZE,
-                                     0u,  /* no TX-Match timestamp needed  */
+                                     0x02u,  /* Capture Timestamp B */
                                      fol_tx_callback, NULL)) {
         fol_tx_busy = false;
         PTP_LOG("[FOL] Delay_Req send failed\r\n");
@@ -409,7 +481,8 @@ static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
     }
 
     fol_delay_req_pending = true;
-    PTP_LOG("[FOL] Delay_Req sent (seq=%u)\r\n", (unsigned)fol_delay_req_seq_id);
+    fol_t3_capture_pending = true;  /* Trigger TTSCB read in Service() */
+    PTP_LOG("[FOL] Delay_Req sent (seq=%u), awaiting TTSCB\r\n", (unsigned)fol_delay_req_seq_id);
     fol_delay_req_seq_id++;
 }
 
@@ -470,12 +543,15 @@ static void resetSlaveNode(void)
     diffRemote          = 0;
 
     /* Reset Delay_Req / Delay_Resp state */
-    fol_delay_req_pending = false;
-    fol_delay_valid       = false;
-    fol_mean_path_delay   = 0;
-    fol_t3_ns             = 0;
-    fol_t4_ns             = 0;
-    fol_delay_req_seq_id  = 0u;
+    fol_delay_req_pending  = false;
+    fol_t3_capture_pending = false;
+    fol_delay_valid        = false;
+    fol_mean_path_delay    = 0;
+    fol_t3_ns              = 0;
+    fol_t3_sec             = 0u;
+    fol_t3_nsec            = 0u;
+    fol_t4_ns              = 0;
+    fol_delay_req_seq_id   = 0u;
 
     memset(&TS_SYNC, 0, sizeof(ptpSync_ct));
 
@@ -804,6 +880,14 @@ void handlePtp(uint8_t *pData, uint32_t size, uint32_t sec, uint32_t nsec)
 
 void PTP_FOL_Init(void)
 {
+    /* Configure TX-Match Slot B for Delay_Req (messageType 0x01) */
+    DRV_LAN865X_WriteRegister(0u, FOL_TXMBCTL,  0x00000000u, true, NULL, NULL); /* Reset */
+    DRV_LAN865X_WriteRegister(0u, FOL_TXMBLOC,  30u,         true, NULL, NULL); /* Match at byte 30 */
+    DRV_LAN865X_WriteRegister(0u, FOL_TXMBPATH, 0x00000088u, true, NULL, NULL); /* EtherType high 0x88 */
+    DRV_LAN865X_WriteRegister(0u, FOL_TXMBPATL, 0x0000F701u, true, NULL, NULL); /* EtherType low 0xF7 + msgType 0x01 */
+    DRV_LAN865X_WriteRegister(0u, FOL_TXMMBSKH, 0x00000000u, true, NULL, NULL); /* Mask high */
+    DRV_LAN865X_WriteRegister(0u, FOL_TXMMBSKL, 0x00000000u, true, NULL, NULL); /* Mask low */
+
     /* Set up PPS output (stopped; PPSCTL=0x02 = pulse-width / period preset) */
     DRV_LAN865X_WriteRegister(0u, PPSCTL,   0x00000002u,       true, NULL, NULL);
     DRV_LAN865X_WriteRegister(0u, SEVINTEN, SEVINTEN_PPSDONE_Msk, true, NULL, NULL);
