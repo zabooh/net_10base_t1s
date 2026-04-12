@@ -213,6 +213,7 @@ static void ptp_status_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
         PTP_FOL_GetOffset(&offset, &absOffset);
         SYS_CONSOLE_PRINT("Offset ns  : %ld\r\n", (long)offset);
         SYS_CONSOLE_PRINT("Abs off ns : %lu\r\n", (unsigned long)absOffset);
+        SYS_CONSOLE_PRINT("Mean delay : %ld ns\r\n", (long)PTP_FOL_GetMeanPathDelay());
     }
 }
 
@@ -410,6 +411,14 @@ void APP_Tasks ( void )
             if (!ptp_fol_initialized) {
                 SYS_CONSOLE_PRINT("[APP] STATE_IDLE entered — calling PTP_FOL_Init\r\n");
                 PTP_FOL_Init();
+                /* Provide follower with local MAC so it can build Delay_Req frames */
+                TCPIP_NET_HANDLE netH = TCPIP_STACK_IndexToNet(0);
+                if (netH != NULL) {
+                    const uint8_t *pMac = TCPIP_STACK_NetAddressMac(netH);
+                    if (pMac != NULL) {
+                        PTP_FOL_SetMac(pMac);
+                    }
+                }
                 ptp_fol_initialized = true;
             }
             uint64_t current_tick = SYS_TIME_Counter64Get();
@@ -508,6 +517,11 @@ void APP_Tasks ( void )
                     PTP_FOL_OnFrame((const uint8_t *)g_ptp_raw_rx.data,
                                    g_ptp_raw_rx.length,
                                    g_ptp_raw_rx.rxTimestamp);
+                } else if (PTP_FOL_GetMode() == PTP_MASTER) {
+                    /* GM: respond to Delay_Req frames from followers */
+                    PTP_GM_OnDelayReq((const uint8_t *)g_ptp_raw_rx.data,
+                                      g_ptp_raw_rx.length,
+                                      g_ptp_raw_rx.rxTimestamp);
                 }
             }
 
