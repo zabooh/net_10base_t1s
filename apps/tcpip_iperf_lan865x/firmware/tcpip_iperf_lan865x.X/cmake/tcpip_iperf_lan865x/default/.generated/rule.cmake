@@ -1,6 +1,10 @@
 # The following functions contains all the flags passed to the different build stages.
 
-set(PACK_REPO_PATH "C:/Users/M91221/.mchp_packs" CACHE PATH "Path to the root of a pack repository.")
+if(NOT DEFINED PACK_REPO_PATH OR PACK_REPO_PATH STREQUAL "")
+    set(PACK_REPO_PATH "$ENV{USERPROFILE}/.mchp_packs" CACHE PATH "Path to the root of a pack repository.")
+else()
+    set(PACK_REPO_PATH "${PACK_REPO_PATH}" CACHE PATH "Path to the root of a pack repository.")
+endif()
 
 function(tcpip_iperf_lan865x_default_default_XC32_assemble_rule target)
     set(options

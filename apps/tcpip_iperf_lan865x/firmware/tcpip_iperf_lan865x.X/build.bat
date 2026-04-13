@@ -82,7 +82,7 @@ goto :build
 :incremental
 :build
 echo [1/2] Configuring with CMake...
-cmake --preset tcpip_iperf_lan865x_default_conf -S "%CMAKE_DIR%" -B "%BUILD_DIR%"
+cmake --preset tcpip_iperf_lan865x_default_conf -S "%CMAKE_DIR%" -B "%BUILD_DIR%" -DPACK_REPO_PATH="%USERPROFILE%/.mchp_packs"
 if errorlevel 1 (
     echo ERROR: CMake configure failed.
     exit /b 1
