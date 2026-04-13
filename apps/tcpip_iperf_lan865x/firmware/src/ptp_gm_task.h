@@ -141,4 +141,15 @@ void PTP_GM_RequestRegDump(void);
 /** Enable or disable verbose per-sync logging (same \r overwrite line as follower). */
 void PTP_GM_SetVerbose(bool verbose);
 
+/**
+ * Process a received Delay_Req frame and send a Delay_Resp back to the
+ * requesting port.  Safe to call from APP_Tasks() when in GM (master) mode.
+ *
+ *   pData       - Pointer to the start of the Ethernet frame (MAC header included).
+ *   len         - Total frame length in bytes.
+ *   rxTimestamp - 64-bit hardware RX timestamp (Bit[63:32]=seconds, Bit[31:0]=ns).
+ *                 This is used as t4 in the Delay_Resp receiveTimestamp field.
+ */
+void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp);
+
 #endif /* PTP_GM_TASK_H */

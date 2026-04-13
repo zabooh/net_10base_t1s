@@ -71,6 +71,28 @@ static volatile bool    fol_reg_write_complete = false;
 static uint32_t         fol_reg_timeout       = 0u;
 
 /* -------------------------------------------------------------------------
+ * Delay Request / Response state
+ * ---------------------------------------------------------------------- */
+
+/* Frame buffer for outgoing Delay_Req: 14 (eth) + 44 (delayReqMsg_t) */
+#define FOL_DELAY_REQ_BUF_SIZE  58u
+static uint8_t  fol_delay_req_buf[FOL_DELAY_REQ_BUF_SIZE];
+
+static uint8_t  fol_src_mac[6]           = {0u};
+static uint16_t fol_delay_req_seq_id     = 0u;
+static bool     fol_delay_req_pending    = false;  /* awaiting Delay_Resp */
+static volatile bool fol_tx_busy         = false;
+
+/* t3: follower Delay_Req send time (ns, from software clock) */
+static int64_t  fol_t3_ns               = 0;
+/* t4: GM receive time of Delay_Req (ns, from Delay_Resp receiveTimestamp) */
+static int64_t  fol_t4_ns               = 0;
+
+/* Mean path delay and corrected offset (both in ns) */
+static int64_t  fol_mean_path_delay     = 0;
+static bool     fol_delay_valid         = false;  /* at least one Delay_Resp received */
+
+/* -------------------------------------------------------------------------
  * Globals (mirror of ptp_task.c)
  * ---------------------------------------------------------------------- */
 
@@ -316,6 +338,121 @@ uint64_t tsToInternal(const timeStamp_t *ts)
 }
 
 /* -------------------------------------------------------------------------
+ * Delay_Req TX callback
+ * ---------------------------------------------------------------------- */
+
+static void fol_tx_callback(void *pInst, const uint8_t *pTx, uint16_t len,
+                             void *pTag, void *pGlobalTag)
+{
+    (void)pInst; (void)pTx; (void)len; (void)pTag; (void)pGlobalTag;
+    fol_tx_busy = false;
+}
+
+/* Build and send a Delay_Req frame.
+ * t1, t2 are the timestamps from the latest processed FollowUp so that the
+ * (t2-t1) term used for delay calculation matches the same Sync cycle. */
+static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
+{
+    if (fol_tx_busy || fol_delay_req_pending) {
+        return;  /* previous Delay_Req still outstanding */
+    }
+
+    /* Build Ethernet header */
+    /* Destination: PTP L2 multicast 01:1B:19:00:00:00 (primary multicast) */
+    fol_delay_req_buf[0] = 0x01u; fol_delay_req_buf[1] = 0x1Bu;
+    fol_delay_req_buf[2] = 0x19u; fol_delay_req_buf[3] = 0x00u;
+    fol_delay_req_buf[4] = 0x00u; fol_delay_req_buf[5] = 0x00u;
+    /* Source MAC */
+    fol_delay_req_buf[6]  = fol_src_mac[0]; fol_delay_req_buf[7]  = fol_src_mac[1];
+    fol_delay_req_buf[8]  = fol_src_mac[2]; fol_delay_req_buf[9]  = fol_src_mac[3];
+    fol_delay_req_buf[10] = fol_src_mac[4]; fol_delay_req_buf[11] = fol_src_mac[5];
+    /* EtherType 0x88F7 */
+    fol_delay_req_buf[12] = PTP_ETHER_TYPE_H;
+    fol_delay_req_buf[13] = PTP_ETHER_TYPE_L;
+
+    /* Build Delay_Req message body */
+    delayReqMsg_t *msg = (delayReqMsg_t *)(&fol_delay_req_buf[14]);
+    memset(msg, 0, sizeof(delayReqMsg_t));
+    msg->header.tsmt          = (uint8_t)MSG_DELAY_REQ;  /* messageType=0x01 */
+    msg->header.version       = 0x02u;                    /* PTPv2 */
+    msg->header.messageLength = htons((uint16_t)sizeof(delayReqMsg_t));
+    /* clockIdentity from MAC (EUI-64) */
+    msg->header.sourcePortIdentity.clockIdentity[0] = fol_src_mac[0];
+    msg->header.sourcePortIdentity.clockIdentity[1] = fol_src_mac[1];
+    msg->header.sourcePortIdentity.clockIdentity[2] = fol_src_mac[2];
+    msg->header.sourcePortIdentity.clockIdentity[3] = 0xFFu;
+    msg->header.sourcePortIdentity.clockIdentity[4] = 0xFEu;
+    msg->header.sourcePortIdentity.clockIdentity[5] = fol_src_mac[3];
+    msg->header.sourcePortIdentity.clockIdentity[6] = fol_src_mac[4];
+    msg->header.sourcePortIdentity.clockIdentity[7] = fol_src_mac[5];
+    msg->header.sourcePortIdentity.portNumber = htons(1u);
+    msg->header.sequenceID    = htons(fol_delay_req_seq_id);
+    msg->header.controlField  = 0x01u;  /* Delay_Req control value */
+    msg->header.logMessageInterval = 0x7Fu;
+    /* originTimestamp = 0 (as per IEEE 1588 §11.3.2) */
+
+    /* Record t3 from software clock before sending */
+    fol_t3_ns = (int64_t)PTP_CLOCK_GetTime_ns();
+
+    /* Save t1 and t2 so processDelayResp() can compute delay for this cycle */
+    /* Store in global TS_SYNC which already holds these values. */
+    (void)t1_ns; (void)t2_ns;  /* delay calculation uses TS_SYNC directly   */
+
+    fol_tx_busy = true;
+    if (!DRV_LAN865X_SendRawEthFrame(0u, fol_delay_req_buf,
+                                     FOL_DELAY_REQ_BUF_SIZE,
+                                     0u,  /* no TX-Match timestamp needed  */
+                                     fol_tx_callback, NULL)) {
+        fol_tx_busy = false;
+        PTP_LOG("[FOL] Delay_Req send failed\r\n");
+        return;
+    }
+
+    fol_delay_req_pending = true;
+    PTP_LOG("[FOL] Delay_Req sent (seq=%u)\r\n", (unsigned)fol_delay_req_seq_id);
+    fol_delay_req_seq_id++;
+}
+
+/* Parse a received Delay_Resp and update the mean path delay. */
+static void processDelayResp(delayRespMsg_t *ptpPkt, uint64_t rxTimestamp)
+{
+    (void)rxTimestamp;
+
+    if (!fol_delay_req_pending) {
+        return;  /* unsolicited Delay_Resp — ignore */
+    }
+
+    /* Verify that the Delay_Resp is addressed to us (requestingPortIdentity) */
+    if (memcmp(ptpPkt->requestingPortIdentity.clockIdentity,
+               ((delayReqMsg_t *)&fol_delay_req_buf[14])->header.sourcePortIdentity.clockIdentity,
+               sizeof(clockIdentity_t)) != 0) {
+        PTP_LOG("[FOL] Delay_Resp for different clock — ignored\r\n");
+        return;
+    }
+
+    /* Extract t4: GM's receive time of our Delay_Req (receiveTimestamp field) */
+    uint32_t t4_sec  = htonl(ptpPkt->receiveTimestamp.secondsLsb);
+    uint32_t t4_nsec = htonl(ptpPkt->receiveTimestamp.nanoseconds);
+    fol_t4_ns = (int64_t)((uint64_t)t4_sec * SEC_IN_NS + (uint64_t)t4_nsec);
+
+    /* Retrieve t1 and t2 from the latest processed FollowUp cycle */
+    int64_t t1_ns = (int64_t)tsToInternal(&TS_SYNC.origin);
+    int64_t t2_ns = (int64_t)tsToInternal(&TS_SYNC.receipt);
+
+    /* IEEE 1588 §11.3 mean path delay:
+     *   delay = ((t2 - t1) + (t4 - t3)) / 2                           */
+    int64_t forward  = t2_ns - t1_ns;          /* path: GM → follower  */
+    int64_t backward = fol_t4_ns - fol_t3_ns;  /* path: follower → GM  */
+    fol_mean_path_delay = (forward + backward) / 2;
+    fol_delay_valid     = true;
+    fol_delay_req_pending = false;
+
+    PTP_LOG("[FOL] Delay_Resp: t3=%lld t4=%lld delay=%lld ns\r\n",
+            (long long)fol_t3_ns, (long long)fol_t4_ns,
+            (long long)fol_mean_path_delay);
+}
+
+/* -------------------------------------------------------------------------
  * Slave-node reset
  * ---------------------------------------------------------------------- */
 
@@ -331,6 +468,14 @@ static void resetSlaveNode(void)
     hardResync          = 1;    /* force hard-sync on first FollowUp after reset */
     diffLocal           = 0;
     diffRemote          = 0;
+
+    /* Reset Delay_Req / Delay_Resp state */
+    fol_delay_req_pending = false;
+    fol_delay_valid       = false;
+    fol_mean_path_delay   = 0;
+    fol_t3_ns             = 0;
+    fol_t4_ns             = 0;
+    fol_delay_req_seq_id  = 0u;
 
     memset(&TS_SYNC, 0, sizeof(ptpSync_ct));
 
@@ -478,6 +623,15 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
     }
 
     offset     = (int64_t)t2 - (int64_t)t1;
+
+    /* Apply IEEE 1588 mean path delay correction when a Delay_Resp has been
+     * received.  The corrected offset is:
+     *   offset_from_master = ((t2-t1) - (t4-t3)) / 2
+     *                      = (t2-t1) - mean_path_delay               */
+    if (fol_delay_valid) {
+        offset -= fol_mean_path_delay;
+    }
+
     uint8_t neg = (offset < 0) ? 0u : 1u;
     offset_abs  = (uint64_t)llabs(offset);
 
@@ -595,11 +749,21 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
         uint32_t t2_s   = t2_sec % 60u;
         static const char *stateNames[] = {"UNINIT   ", "MATCHFREQ", "HARDSYNC ", "COARSE   ", "FINE     "};
         uint8_t si = (syncStatus < 5u) ? syncStatus : 4u;
-        PTP_LOG("[V] %s  t1=%02lu:%02lu:%02lu.%09lu  t2=%02lu:%02lu:%02lu.%09lu  off=%+10d ns\r",
+        PTP_LOG("[V] %s  t1=%02lu:%02lu:%02lu.%09lu  t2=%02lu:%02lu:%02lu.%09lu  off=%+10d ns  delay=%lld ns\r",
                 stateNames[si],
                 (unsigned long)t1_h, (unsigned long)t1_m, (unsigned long)t1_s, (unsigned long)t1_ns,
                 (unsigned long)t2_h, (unsigned long)t2_m, (unsigned long)t2_s, (unsigned long)t2_ns,
-                (int)offset);
+                (int)offset, (long long)fol_mean_path_delay);
+    }
+
+    /* Initiate Delay_Req / Delay_Resp exchange for path delay measurement.
+     * Only send when a valid MAC is available and the clock is at least
+     * in MATCHFREQ state so the t3 software-clock reading is meaningful. */
+    if (fol_src_mac[0] != 0u || fol_src_mac[1] != 0u || fol_src_mac[2] != 0u ||
+        fol_src_mac[3] != 0u || fol_src_mac[4] != 0u || fol_src_mac[5] != 0u) {
+        if (syncStatus >= MATCHFREQ) {
+            sendDelayReq(t1, t2);
+        }
     }
 }
 
@@ -626,6 +790,9 @@ void handlePtp(uint8_t *pData, uint32_t size, uint32_t sec, uint32_t nsec)
             TS_SYNC.receipt.secondsLsb  = sec;
             TS_SYNC.receipt.nanoseconds = nsec;
         }
+    } else if (messageType == (uint8_t)MSG_DELAY_RESP) {
+        uint64_t rxTs = ((uint64_t)sec << 32u) | (uint64_t)nsec;
+        processDelayResp((delayRespMsg_t *)ptpPkt, rxTs);
     } else {
         PTP_LOG("[FOL] Unknown msgType=%u, ignored\r\n", (unsigned)messageType);
     }
@@ -683,6 +850,18 @@ void PTP_FOL_GetCalibratedClockInc(uint32_t *pTI, uint32_t *pTISUBN)
 void PTP_FOL_Reset(void)
 {
     resetSlaveNode();
+}
+
+void PTP_FOL_SetMac(const uint8_t *pMac)
+{
+    if (pMac != NULL) {
+        memcpy(fol_src_mac, pMac, 6u);
+    }
+}
+
+int64_t PTP_FOL_GetMeanPathDelay(void)
+{
+    return fol_delay_valid ? fol_mean_path_delay : 0;
 }
 
 void PTP_FOL_OnFrame(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)

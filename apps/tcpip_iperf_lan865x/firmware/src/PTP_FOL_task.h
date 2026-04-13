@@ -201,6 +201,19 @@ typedef struct
 {
     ptpHeader_t    header;
     ptpTimeStamp_t originTimestamp;
+} delayReqMsg_t;
+
+typedef struct
+{
+    ptpHeader_t    header;
+    ptpTimeStamp_t receiveTimestamp;
+    portIdentity_t requestingPortIdentity;
+} delayRespMsg_t;
+
+typedef struct
+{
+    ptpHeader_t    header;
+    ptpTimeStamp_t originTimestamp;
     uint8_t        reserved[10];
 } pdelayReqMsg_t;
 
@@ -278,6 +291,18 @@ void PTP_FOL_GetCalibratedClockInc(uint32_t *pTI, uint32_t *pTISUBN);
  * Usage: ptp_mode follower v
  */
 void PTP_FOL_SetVerbose(bool verbose);
+
+/**
+ * Provide the follower with its own source MAC address so it can build
+ * outgoing Delay_Req frames.  Call once after the TCPIP stack is up.
+ */
+void PTP_FOL_SetMac(const uint8_t *pMac);
+
+/**
+ * Return the last calculated mean path delay in nanoseconds.
+ * Returns 0 when no Delay_Resp has been received yet.
+ */
+int64_t PTP_FOL_GetMeanPathDelay(void);
 
 /**
  * Service function for PTP Follower - must be called periodically (e.g., every 1ms).

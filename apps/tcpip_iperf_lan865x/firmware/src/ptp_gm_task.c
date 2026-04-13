@@ -90,6 +90,8 @@ static bool             gm_verbose          = false;
 /* Frame buffers */
 static uint8_t gm_sync_buf[60];       /* 14 (eth) + 44 (syncMsg_t) + 2 pad bytes */
 static uint8_t gm_followup_buf[90];   /* 14 (eth) + 76 (followUpMsg_t) */
+#define GM_DELAY_RESP_BUF_SIZE  68u    /* 14 (eth) + 54 (delayRespMsg_t) */
+static uint8_t gm_delay_resp_buf[GM_DELAY_RESP_BUF_SIZE];
 #if (PTP_GM_SYNC_TX_MODE == 1)
 static uint8_t gm_noip_buf[60];       /* matches Test noip_send frame size */
 static uint32_t gm_noip_seq = 0u;
@@ -1030,4 +1032,77 @@ ptp_gm_dst_mode_t PTP_GM_GetDstMode(void)
 void PTP_GM_SetVerbose(bool verbose)
 {
     gm_verbose = verbose;
+}
+
+void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
+{
+    if (len < (uint16_t)(sizeof(ethHeader_t) + sizeof(delayReqMsg_t))) {
+        return;  /* frame too short */
+    }
+
+    const ptpHeader_t *hdr = (const ptpHeader_t *)(pData + sizeof(ethHeader_t));
+    uint8_t messageType = hdr->tsmt & 0x0Fu;
+    if (messageType != (uint8_t)MSG_DELAY_REQ) {
+        return;  /* not a Delay_Req — ignore */
+    }
+
+    /* t4: time the GM received the Delay_Req (from RTSA hardware timestamp) */
+    uint32_t t4_sec  = (uint32_t)((rxTimestamp >> 32u) & 0xFFFFFFFFu);
+    uint32_t t4_nsec = (uint32_t)( rxTimestamp         & 0xFFFFFFFFu);
+
+    /* Requestor source MAC (bytes 6-11 of the received Ethernet frame) */
+    const uint8_t *req_mac = pData + 6u;
+
+    /* Build Delay_Resp Ethernet header: unicast reply to requesting port */
+    gm_delay_resp_buf[0] = req_mac[0]; gm_delay_resp_buf[1] = req_mac[1];
+    gm_delay_resp_buf[2] = req_mac[2]; gm_delay_resp_buf[3] = req_mac[3];
+    gm_delay_resp_buf[4] = req_mac[4]; gm_delay_resp_buf[5] = req_mac[5];
+    /* Source: GM MAC */
+    gm_delay_resp_buf[6]  = gm_src_mac[0]; gm_delay_resp_buf[7]  = gm_src_mac[1];
+    gm_delay_resp_buf[8]  = gm_src_mac[2]; gm_delay_resp_buf[9]  = gm_src_mac[3];
+    gm_delay_resp_buf[10] = gm_src_mac[4]; gm_delay_resp_buf[11] = gm_src_mac[5];
+    /* EtherType 0x88F7 (same as Sync frames) */
+    gm_delay_resp_buf[12] = (uint8_t)((GM_PTP_ETHERTYPE >> 8u) & 0xFFu);
+    gm_delay_resp_buf[13] = (uint8_t)( GM_PTP_ETHERTYPE        & 0xFFu);
+
+    /* Build Delay_Resp message body */
+    delayRespMsg_t *msg = (delayRespMsg_t *)(&gm_delay_resp_buf[14]);
+    memset(msg, 0, sizeof(delayRespMsg_t));
+    msg->header.tsmt          = (uint8_t)MSG_DELAY_RESP;  /* messageType=0x09 */
+    msg->header.version       = 0x02u;
+    msg->header.messageLength = htons((uint16_t)sizeof(delayRespMsg_t));
+    msg->header.flags[1]      = 0x08u;
+    msg->header.logMessageInterval = 0x7Fu;
+    msg->header.controlField  = 0x03u;  /* Delay_Resp control value */
+    /* Copy sequenceID from the Delay_Req */
+    msg->header.sequenceID    = hdr->sequenceID;
+    /* GM clock identity */
+    fill_clock_identity((uint8_t *)msg->header.sourcePortIdentity.clockIdentity);
+    msg->header.sourcePortIdentity.portNumber = htons(1u);
+
+    /* receiveTimestamp = t4 (GM hardware receive time of the Delay_Req) */
+    msg->receiveTimestamp.secondsMsb = 0u;
+    msg->receiveTimestamp.secondsLsb = htonl(t4_sec);
+    msg->receiveTimestamp.nanoseconds = htonl(t4_nsec);
+
+    /* requestingPortIdentity: copy from the Delay_Req source port identity */
+    memcpy(&msg->requestingPortIdentity, &hdr->sourcePortIdentity,
+           sizeof(portIdentity_t));
+
+    /* Send the Delay_Resp.  Re-use the existing gm_tx_busy + gm_tx_cb
+     * mechanism — only send if the TX path is not busy with a Sync/FollowUp. */
+    if (!gm_tx_busy) {
+        gm_tx_busy = true;
+        if (!gm_send_raw_eth_frame(gm_delay_resp_buf, GM_DELAY_RESP_BUF_SIZE,
+                                   0u, gm_tx_cb, NULL)) {
+            gm_tx_busy = false;
+            SYS_CONSOLE_PRINT("[PTP-GM] Delay_Resp send failed\r\n");
+        } else {
+            SYS_CONSOLE_PRINT("[PTP-GM] Delay_Resp sent (seq=%u t4=%lu.%09lu)\r\n",
+                              (unsigned)htons(hdr->sequenceID),
+                              (unsigned long)t4_sec, (unsigned long)t4_nsec);
+        }
+    } else {
+        SYS_CONSOLE_PRINT("[PTP-GM] Delay_Resp skipped (TX busy)\r\n");
+    }
 }
