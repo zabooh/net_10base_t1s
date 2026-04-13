@@ -34,10 +34,21 @@ if(NOT EXISTS "${NORMAL_ELF}")
 endif()
 ]=])
 
-set_target_properties(tcpip_iperf_lan865x_default_image_fZZHodlt PROPERTIES
+# Resolve the generated image target name dynamically.
+# MPLAB X regenerates .generated/main.cmake with a random suffix on every MCC
+# run (e.g. _fZZHodlt → _oo_hyzaM).  Parsing the file avoids manual updates.
+file(READ "${CMAKE_CURRENT_LIST_DIR}/.generated/main.cmake" _main_cmake_content)
+string(REGEX MATCH "add_executable\\(([A-Za-z0-9_]+)" _m "${_main_cmake_content}")
+set(_image_target "${CMAKE_MATCH_1}")
+if(NOT _image_target)
+    message(FATAL_ERROR "user.cmake: could not determine image target name from .generated/main.cmake")
+endif()
+message(STATUS "user.cmake: image target = ${_image_target}")
+
+set_target_properties(${_image_target} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out")
 
-add_custom_command(TARGET tcpip_iperf_lan865x_default_image_fZZHodlt POST_BUILD
+add_custom_command(TARGET ${_image_target} POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E make_directory
         "${tcpip_iperf_lan865x_default_output_dir}"
     # Step 1: normalize ELF location (handles both old and new MINGW behavior)

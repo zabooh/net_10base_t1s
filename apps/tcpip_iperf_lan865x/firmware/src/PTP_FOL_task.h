@@ -45,6 +45,11 @@ Adapted from noIP-SAM-E54-Curiosity-PTP-Follower/ptp_task.h for Harmony TCP/IP b
 #define OA_IMASK1_SEVM_Msk  (1U << OA_IMASK1_SEVM_Pos)
 
 #define PADCTRL             (0x000A0088u)
+#define FOL_OA_CONFIG0      (0x00000004u)   /* OA_CONFIG0: FTSE (bit7) + companion (bit6) */
+#define FOL_OA_CONFIG0_RMW_VALUE  (0x000000C0u)
+#define FOL_OA_CONFIG0_RMW_MASK   (0x000000C0u)
+#define FOL_PADCTRL_RMW_VALUE     (0x00000100u)  /* set bit 8 */
+#define FOL_PADCTRL_RMW_MASK      (0x00000300u)  /* mask bits 8+9 */
 #define MAC_TISUBN          (0x0001006Fu)
 #define MAC_TSH             (0x00010070u)
 #define MAC_TSL             (0x00010074u)

@@ -76,6 +76,25 @@ static volatile bool    fol_reg_write_complete = false;
 static uint32_t         fol_reg_timeout       = 0u;
 
 /* -------------------------------------------------------------------------
+ * HW init state machine — runs once at follower activation.
+ * Sets OA_CONFIG0 (FTSE, bit 7+6) and PADCTRL (bit 8 set, bit 9 clear)
+ * so the LAN865x generates RTSA RX timestamps.  Without this t2=0 always
+ * and the servo never advances past UNINIT.
+ * ---------------------------------------------------------------------- */
+typedef enum {
+    FOL_HW_INIT_READ_CONFIG0,
+    FOL_HW_INIT_WAIT_CONFIG0_READ,
+    FOL_HW_INIT_WAIT_CONFIG0_WRITE,
+    FOL_HW_INIT_READ_PADCTRL,
+    FOL_HW_INIT_WAIT_PADCTRL_READ,
+    FOL_HW_INIT_WAIT_PADCTRL_WRITE,
+    FOL_HW_INIT_DONE
+} fol_hw_init_state_t;
+
+static fol_hw_init_state_t fol_hw_init_state = FOL_HW_INIT_READ_CONFIG0;
+static bool                fol_hw_init_done  = false;
+
+/* -------------------------------------------------------------------------
  * Delay Request / Response state
  * ---------------------------------------------------------------------- */
 
@@ -188,6 +207,79 @@ void PTP_FOL_Service(void)
 {
     if (ptpMode != PTP_SLAVE) {
         return;
+    }
+
+    /* ---- Phase 0: HW init — enable FTSE on LAN865x before servo starts ---- */
+    if (!fol_hw_init_done) {
+        switch (fol_hw_init_state) {
+            case FOL_HW_INIT_READ_CONFIG0:
+                fol_reg_write_complete = false;
+                fol_reg_timeout = FOL_REG_TIMEOUT_MS;
+                (void)DRV_LAN865X_ReadRegister(0u, FOL_OA_CONFIG0, true,
+                                               fol_reg_read_callback, NULL);
+                fol_hw_init_state = FOL_HW_INIT_WAIT_CONFIG0_READ;
+                break;
+            case FOL_HW_INIT_WAIT_CONFIG0_READ:
+                if (fol_reg_write_complete) {
+                    uint32_t nv = (fol_reg_values.read_value & ~FOL_OA_CONFIG0_RMW_MASK)
+                                 | FOL_OA_CONFIG0_RMW_VALUE;
+                    PTP_LOG("[FOL] OA_CONFIG0 RMW: 0x%08X -> 0x%08X\r\n",
+                            (unsigned)fol_reg_values.read_value, (unsigned)nv);
+                    fol_reg_write_complete = false;
+                    fol_reg_timeout = FOL_REG_TIMEOUT_MS;
+                    (void)DRV_LAN865X_WriteRegister(0u, FOL_OA_CONFIG0, nv, true,
+                                                    fol_reg_write_callback, NULL);
+                    fol_hw_init_state = FOL_HW_INIT_WAIT_CONFIG0_WRITE;
+                } else if (--fol_reg_timeout == 0u) {
+                    PTP_LOG("[FOL] HW-init timeout (OA_CONFIG0 read), retry\r\n");
+                    fol_hw_init_state = FOL_HW_INIT_READ_CONFIG0;
+                }
+                break;
+            case FOL_HW_INIT_WAIT_CONFIG0_WRITE:
+                if (fol_reg_write_complete) {
+                    fol_reg_write_complete = false;
+                    fol_reg_timeout = FOL_REG_TIMEOUT_MS;
+                    (void)DRV_LAN865X_ReadRegister(0u, PADCTRL, true,
+                                                   fol_reg_read_callback, NULL);
+                    fol_hw_init_state = FOL_HW_INIT_WAIT_PADCTRL_READ;
+                } else if (--fol_reg_timeout == 0u) {
+                    PTP_LOG("[FOL] HW-init timeout (OA_CONFIG0 write), retry\r\n");
+                    fol_hw_init_state = FOL_HW_INIT_READ_CONFIG0;
+                }
+                break;
+            case FOL_HW_INIT_READ_PADCTRL:  /* kept for clarity; transitioned from above */
+                break;
+            case FOL_HW_INIT_WAIT_PADCTRL_READ:
+                if (fol_reg_write_complete) {
+                    uint32_t nv = (fol_reg_values.read_value & ~FOL_PADCTRL_RMW_MASK)
+                                 | FOL_PADCTRL_RMW_VALUE;
+                    PTP_LOG("[FOL] PADCTRL RMW: 0x%08X -> 0x%08X\r\n",
+                            (unsigned)fol_reg_values.read_value, (unsigned)nv);
+                    fol_reg_write_complete = false;
+                    fol_reg_timeout = FOL_REG_TIMEOUT_MS;
+                    (void)DRV_LAN865X_WriteRegister(0u, PADCTRL, nv, true,
+                                                    fol_reg_write_callback, NULL);
+                    fol_hw_init_state = FOL_HW_INIT_WAIT_PADCTRL_WRITE;
+                } else if (--fol_reg_timeout == 0u) {
+                    PTP_LOG("[FOL] HW-init timeout (PADCTRL read), retry\r\n");
+                    fol_hw_init_state = FOL_HW_INIT_READ_CONFIG0;
+                }
+                break;
+            case FOL_HW_INIT_WAIT_PADCTRL_WRITE:
+                if (fol_reg_write_complete) {
+                    PTP_LOG("[FOL] HW-init done (FTSE enabled, PADCTRL set)\r\n");
+                    fol_hw_init_done  = true;
+                    fol_hw_init_state = FOL_HW_INIT_DONE;
+                } else if (--fol_reg_timeout == 0u) {
+                    PTP_LOG("[FOL] HW-init timeout (PADCTRL write), retry\r\n");
+                    fol_hw_init_state = FOL_HW_INIT_READ_CONFIG0;
+                }
+                break;
+            default:
+                fol_hw_init_done = true;
+                break;
+        }
+        return;  /* block normal service until HW init is complete */
     }
 
     /* Check if TTSCB capture is pending */
@@ -880,6 +972,14 @@ void handlePtp(uint8_t *pData, uint32_t size, uint32_t sec, uint32_t nsec)
 
 void PTP_FOL_Init(void)
 {
+    /* Start the LAN865x PTP clock at nominal rate (40 ns/tick = 25 MHz).
+     * Without MAC_TI > 0 the hardware clock is stopped: RTSA is always 0
+     * regardless of FTSE, so t2 is always 0 and the servo never advances.
+     * The calibrated value overwrites this once the servo reaches MATCHFREQ. */
+    DRV_LAN865X_WriteRegister(0u, MAC_TI,     40u,         true, NULL, NULL);
+    DRV_LAN865X_WriteRegister(0u, MAC_TISUBN,  0x00000000u, true, NULL, NULL);
+    PTP_LOG("[FOL] MAC_TI=40 written (clock started)\r\n");
+
     /* Configure TX-Match Slot B for Delay_Req (messageType 0x01) */
     DRV_LAN865X_WriteRegister(0u, FOL_TXMBCTL,  0x00000000u, true, NULL, NULL); /* Reset */
     DRV_LAN865X_WriteRegister(0u, FOL_TXMBLOC,  30u,         true, NULL, NULL); /* Match at byte 30 */
@@ -902,6 +1002,11 @@ void PTP_FOL_Init(void)
 
     offsetCoarseState.buffer     = &offsetCoarseValue[0];
     offsetCoarseState.filterSize = sizeof(offsetCoarseValue) / sizeof(offsetCoarseValue[0]);
+
+    /* Reset HW-init state machine so Service() re-runs OA_CONFIG0/PADCTRL RMW
+     * on every follower activation (required after board reset or mode toggle). */
+    fol_hw_init_done  = false;
+    fol_hw_init_state = FOL_HW_INIT_READ_CONFIG0;
 
     PTP_LOG("PTP_FOL_Init: HW init done, PTP mode=%d (not activated)\r\n", (int)ptpMode);
 }
