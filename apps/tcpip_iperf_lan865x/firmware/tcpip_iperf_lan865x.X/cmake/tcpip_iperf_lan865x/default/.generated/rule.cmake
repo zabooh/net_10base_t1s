@@ -6,6 +6,32 @@ else()
     set(PACK_REPO_PATH "${PACK_REPO_PATH}" CACHE PATH "Path to the root of a pack repository.")
 endif()
 
+# Auto-detect installed SAME54_DFP version
+if(NOT DEFINED SAME54_DFP_VERSION OR SAME54_DFP_VERSION STREQUAL "")
+    file(GLOB _dfp_dirs LIST_DIRECTORIES true "${PACK_REPO_PATH}/Microchip/SAME54_DFP/*")
+    if(NOT _dfp_dirs)
+        message(FATAL_ERROR "No SAME54_DFP pack found under ${PACK_REPO_PATH}/Microchip/SAME54_DFP/\nPlease install the SAME54_DFP pack via MPLAB X Pack Manager.")
+    endif()
+    list(SORT _dfp_dirs COMPARE NATURAL ORDER DESCENDING)
+    list(GET _dfp_dirs 0 _dfp_latest)
+    get_filename_component(SAME54_DFP_VERSION "${_dfp_latest}" NAME)
+    set(SAME54_DFP_VERSION "${SAME54_DFP_VERSION}" CACHE STRING "Installed SAME54_DFP version (auto-detected).")
+endif()
+message(STATUS "Using SAME54_DFP: ${SAME54_DFP_VERSION}")
+
+# Auto-detect installed CMSIS version
+if(NOT DEFINED CMSIS_VERSION OR CMSIS_VERSION STREQUAL "")
+    file(GLOB _cmsis_dirs LIST_DIRECTORIES true "${PACK_REPO_PATH}/ARM/CMSIS/*")
+    if(NOT _cmsis_dirs)
+        message(FATAL_ERROR "No CMSIS pack found under ${PACK_REPO_PATH}/ARM/CMSIS/\nPlease install the CMSIS pack via MPLAB X Pack Manager.")
+    endif()
+    list(SORT _cmsis_dirs COMPARE NATURAL ORDER DESCENDING)
+    list(GET _cmsis_dirs 0 _cmsis_latest)
+    get_filename_component(CMSIS_VERSION "${_cmsis_latest}" NAME)
+    set(CMSIS_VERSION "${CMSIS_VERSION}" CACHE STRING "Installed CMSIS version (auto-detected).")
+endif()
+message(STATUS "Using CMSIS: ${CMSIS_VERSION}")
+
 function(tcpip_iperf_lan865x_default_default_XC32_assemble_rule target)
     set(options
         "-g"
@@ -13,7 +39,7 @@ function(tcpip_iperf_lan865x_default_default_XC32_assemble_rule target)
         "-mprocessor=ATSAME54P20A"
         "-Wa,--defsym=__MPLAB_BUILD=1${MP_EXTRA_AS_POST},--defsym=__MPLAB_DEBUG=1,--defsym=__DEBUG=1"
         "-g,-I${CMAKE_CURRENT_SOURCE_DIR}/../../.."
-        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/3.11.261")
+        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/${SAME54_DFP_VERSION}")
     list(REMOVE_ITEM options "")
     target_compile_options(${target} PRIVATE "${options}")
     target_compile_definitions(${target} PRIVATE "__DEBUG=1")
@@ -26,7 +52,7 @@ function(tcpip_iperf_lan865x_default_default_XC32_assembleWithPreprocess_rule ta
         "-g"
         "${MP_EXTRA_AS_PRE}"
         "${DEBUGGER_NAME_AS_MACRO}"
-        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/3.11.261"
+        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/${SAME54_DFP_VERSION}"
         "-mprocessor=ATSAME54P20A"
         "-Wa,--defsym=__MPLAB_BUILD=1${MP_EXTRA_AS_POST},--defsym=__MPLAB_DEBUG=1,--defsym=__DEBUG=1,-I${CMAKE_CURRENT_SOURCE_DIR}/../../..")
     list(REMOVE_ITEM options "")
@@ -49,7 +75,7 @@ function(tcpip_iperf_lan865x_default_default_XC32_compile_rule target)
         "-O2"
         "-Werror"
         "-Wall"
-        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/3.11.261")
+        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/${SAME54_DFP_VERSION}")
     list(REMOVE_ITEM options "")
     target_compile_options(${target} PRIVATE "${options}")
     target_compile_definitions(${target}
@@ -69,7 +95,7 @@ function(tcpip_iperf_lan865x_default_default_XC32_compile_rule target)
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/third_party/wolfssl"
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/third_party/wolfssl/wolfssl"
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../.."
-        PRIVATE "${PACK_REPO_PATH}/ARM/CMSIS/6.3.0/CMSIS/Core/Include")
+        PRIVATE "${PACK_REPO_PATH}/ARM/CMSIS/${CMSIS_VERSION}/CMSIS/Core/Include")
 endfunction()
 function(tcpip_iperf_lan865x_default_default_XC32_compile_cpp_rule target)
     set(options
@@ -84,7 +110,7 @@ function(tcpip_iperf_lan865x_default_default_XC32_compile_cpp_rule target)
         "-ffunction-sections"
         "-O1"
         "-fno-common"
-        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/3.11.261")
+        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/${SAME54_DFP_VERSION}")
     list(REMOVE_ITEM options "")
     target_compile_options(${target} PRIVATE "${options}")
     target_compile_definitions(${target}
@@ -97,12 +123,12 @@ function(tcpip_iperf_lan865x_default_default_XC32_compile_cpp_rule target)
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/packs/CMSIS"
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/packs/CMSIS/CMSIS/Core/Include"
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../.."
-        PRIVATE "${PACK_REPO_PATH}/ARM/CMSIS/6.3.0/CMSIS/Core/Include")
+        PRIVATE "${PACK_REPO_PATH}/ARM/CMSIS/${CMSIS_VERSION}/CMSIS/Core/Include")
 endfunction()
 function(tcpip_iperf_lan865x_default_dependentObject_rule target)
     set(options
         "-mprocessor=ATSAME54P20A"
-        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/3.11.261")
+        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/${SAME54_DFP_VERSION}")
     list(REMOVE_ITEM options "")
     target_compile_options(${target} PRIVATE "${options}")
 endfunction()
@@ -116,7 +142,7 @@ function(tcpip_iperf_lan865x_default_link_rule target)
         "-O2"
         "-mno-device-startup-code"
         "-Wl,--defsym=__MPLAB_BUILD=1${MP_EXTRA_LD_POST},--script=${tcpip_iperf_lan865x_default_LINKER_SCRIPT},--defsym=__MPLAB_DEBUG=1,--defsym=__DEBUG=1,--defsym=_min_heap_size=44960,--gc-sections,-L${CMAKE_CURRENT_SOURCE_DIR}/../../..,-Map=mem.map,--memorysummary,memoryfile.xml"
-        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/3.11.261")
+        "-mdfp=${PACK_REPO_PATH}/Microchip/SAME54_DFP/${SAME54_DFP_VERSION}")
     list(REMOVE_ITEM options "")
     target_link_options(${target} PRIVATE "${options}")
     target_compile_definitions(${target} PRIVATE "XPRJ_default=default")
