@@ -61,6 +61,24 @@ Adapted from noIP-SAM-E54-Curiosity-PTP-Follower/ptp_task.h for Harmony TCP/IP b
 #define EG0CTL              (0x000A0226u)
 #define PPSCTL              (0x000A0239u)
 
+/* OA registers for Delay_Req TX timestamp capture (t3 hardware) */
+#define FOL_OA_CONFIG0      (0x00000004u)   /* Open Alliance CONFIG0 register (FTSE)  */
+#define FOL_OA_STATUS0      (0x00000008u)   /* Open Alliance STATUS0 register         */
+#define FOL_OA_TTSCAH       (0x00000010u)   /* TX Timestamp Capture A: seconds        */
+#define FOL_OA_TTSCAL       (0x00000011u)   /* TX Timestamp Capture A: nanoseconds    */
+#define FOL_STS0_TTSCAA     (0x0100u)       /* STATUS0 bit 8: Capture A available     */
+
+/* TX-Match registers — same MMS4 block as GM, used to trigger TTSCA on Delay_Req TX */
+#define FOL_OA_TXMCTL       (0x00040040u)   /* TX-Match detector control              */
+#define FOL_OA_TXMPATH      (0x00040041u)   /* TX-Match pattern: high byte            */
+#define FOL_OA_TXMPATL      (0x00040042u)   /* TX-Match pattern: low bytes            */
+#define FOL_OA_TXMMSKH      (0x00040043u)   /* TX-Match mask: high                    */
+#define FOL_OA_TXMMSKL      (0x00040044u)   /* TX-Match mask: low                     */
+#define FOL_OA_TXMLOC       (0x00040045u)   /* TX-Match capture byte offset           */
+
+/* Pattern value for TXMPATL: EtherType low byte (0xF7) + Delay_Req tsmt (0x01)       */
+#define FOL_TXMPATL_DELAY_REQ  (((uint32_t)(PTP_ETHER_TYPE_L) << 8u) | (uint32_t)0x01u)
+
 #define SEVINTEN            (0x000A023Au)
 #define SEVINTEN_PPSDONE_Pos 30u
 #define SEVINTEN_PPSDONE_Msk (1u << SEVINTEN_PPSDONE_Pos)
@@ -291,6 +309,13 @@ void PTP_FOL_GetCalibratedClockInc(uint32_t *pTI, uint32_t *pTISUBN);
  * Usage: ptp_mode follower v
  */
 void PTP_FOL_SetVerbose(bool verbose);
+
+/**
+ * Enable or disable PTP protocol trace output.
+ * When enabled, prints structured [TRACE] lines for every Delay_Req/Resp event.
+ * Usage: ptp_trace [on|off]
+ */
+void PTP_FOL_SetTrace(bool enable);
 
 /**
  * Provide the follower with its own source MAC address so it can build

@@ -24,6 +24,7 @@ Key differences vs. the noIP version:
 #include "ptp_ts_ipc.h"
 #include "config/default/driver/lan865x/drv_lan865x.h"
 #include "config/default/system/console/sys_console.h"
+#include "config/default/system/time/sys_time.h"
 
 #define PTP_LOG SYS_CONSOLE_PRINT
 
@@ -81,6 +82,7 @@ static uint8_t  fol_delay_req_buf[FOL_DELAY_REQ_BUF_SIZE];
 static uint8_t  fol_src_mac[6]           = {0u};
 static uint16_t fol_delay_req_seq_id     = 0u;
 static bool     fol_delay_req_pending    = false;  /* awaiting Delay_Resp */
+static uint32_t fol_delay_req_sent_tick  = 0u;     /* SYS_TIME tick when Delay_Req was sent */
 static volatile bool fol_tx_busy         = false;
 
 /* t3: follower Delay_Req send time (ns, from software clock) */
@@ -91,6 +93,48 @@ static int64_t  fol_t4_ns               = 0;
 /* Mean path delay and corrected offset (both in ns) */
 static int64_t  fol_mean_path_delay     = 0;
 static bool     fol_delay_valid         = false;  /* at least one Delay_Resp received */
+
+/* -------------------------------------------------------------------------
+ * Delay_Req TX hardware timestamp capture (t3) — mirrors GM TTSCA read
+ * ---------------------------------------------------------------------- */
+typedef enum {
+    FOL_TTSCA_IDLE,
+    FOL_TTSCA_CONFIG0_READ,       /* one-shot: read CONFIG0 to preserve other bits */
+    FOL_TTSCA_CONFIG0_WAIT_READ,  /* one-shot: wait for read cb                    */
+    FOL_TTSCA_CONFIG0_WAIT_WRITE, /* one-shot: wait for write cb (FTSE set)        */
+    FOL_TTSCA_WRITE_TXMPATL, /* per-frame: write TXMPATL=0xF701 (Delay_Req pattern) */
+    FOL_TTSCA_WAIT_TXMPATL,  /* per-frame: wait for TXMPATL write cb               */
+    FOL_TTSCA_WRITE_TXMCTL,  /* per-frame: write TXMCTL=0x0002 to arm TX-Match     */
+    FOL_TTSCA_WAIT_TXMCTL,   /* per-frame: wait for TXMCTL write cb; then send     */
+    FOL_TTSCA_WAIT_TX_CB,    /* wait for TX-done callback (fol_tx_busy=false)      */
+    FOL_TTSCA_READ_STATUS0,  /* issue ReadRegister(FOL_OA_STATUS0)                 */
+    FOL_TTSCA_WAIT_STATUS0,  /* wait cb; check TTSCAA; retry up to N times         */
+    FOL_TTSCA_WAIT_H,        /* DRV_LAN865X_ReadRegister(FOL_OA_TTSCAH) issued     */
+    FOL_TTSCA_WAIT_L,        /* DRV_LAN865X_ReadRegister(FOL_OA_TTSCAL) issued     */
+    FOL_TTSCA_WAIT_CLR       /* W1C STATUS0 write issued                           */
+} fol_ttsca_state_t;
+
+static fol_ttsca_state_t    fol_ttsca_state     = FOL_TTSCA_IDLE;
+static volatile bool        fol_ttsca_op_done   = false;
+static volatile uint32_t    fol_ttsca_op_val    = 0u;
+static uint32_t             fol_ttsca_status0   = 0u;   /* STATUS0 snapshot for W1C */
+static uint32_t             fol_ttsca_t3_sec    = 0u;   /* intermediate seconds     */
+static uint32_t             fol_ttsca_retry     = 0u;   /* STATUS0 retry counter    */
+static uint64_t             fol_t3_hw_ns        = 0u;   /* HW-captured t3           */
+static bool                 fol_t3_hw_valid     = false; /* set when capture is done */
+static bool                 fol_config0_set     = false; /* true after CONFIG0 FTSE armed */
+
+/* Deferred Delay_Resp: when Delay_Resp arrives before TTSCA capture completes,
+ * save t1/t2/t4 and finalize the calculation once TTSCA reaches IDLE. */
+static bool    fol_delay_resp_deferred = false;
+static int64_t fol_deferred_t1         = 0;
+static int64_t fol_deferred_t2         = 0;
+static int64_t fol_deferred_t4         = 0;
+
+#define FOL_TTSCA_MAX_RETRIES   50u  /* max STATUS0 re-reads waiting for TTSCAA */
+
+/* Forward declaration — defined after fol_ttsca_service() */
+static void complete_delay_calc(int64_t t1, int64_t t2, int64_t t3, bool hw, int64_t t4);
 
 /* -------------------------------------------------------------------------
  * Globals (mirror of ptp_task.c)
@@ -113,6 +157,7 @@ static uint8_t  ptpSynced         = 0;
 static uint8_t  syncStatus        = UNINIT;
 static uint8_t  prevSyncStatus    = UNINIT;
 static bool     ptp_fol_verbose   = false;
+static bool     ptp_trace_enabled = false;  /* activated by ptp_trace CLI command */
 static uint32_t runs              = 0;
 static uint64_t diffLocal         = 0;
 static uint64_t diffRemote        = 0;
@@ -160,6 +205,273 @@ static void fol_reg_write_callback(void *reserved1, bool success, uint32_t addr,
     }
 }
 
+/* -------------------------------------------------------------------------
+ * Delay_Req TX timestamp (t3) capture via LAN865x TTSCA register pair
+ * ---------------------------------------------------------------------- */
+/* Forward declaration — defined after sendDelayReq */
+static void fol_tx_callback(void *pInst, const uint8_t *pTx, uint16_t len,
+                             void *pTag, void *pGlobalTag);
+
+static void fol_ttsca_op_cb(void *r1, bool ok, uint32_t addr,
+                             uint32_t value, void *tag, void *r2)
+{
+    (void)r1; (void)ok; (void)addr; (void)tag; (void)r2;
+    fol_ttsca_op_val  = value;
+    fol_ttsca_op_done = true;
+}
+
+static void fol_ttsca_service(void)
+{
+    switch (fol_ttsca_state) {
+        case FOL_TTSCA_IDLE:
+            break;
+
+        /* ---- One-shot CONFIG0 RMW: set FTSE (bit 7) + bit 6 to enable TX TS capture ---- */
+        case FOL_TTSCA_CONFIG0_READ:
+            fol_ttsca_op_done = false;
+            if (TCPIP_MAC_RES_OK != DRV_LAN865X_ReadRegister(0u, FOL_OA_CONFIG0,
+                                                              true,
+                                                              fol_ttsca_op_cb, NULL)) {
+                PTP_LOG("[FOL] TTSCA: ReadRegister(CONFIG0) failed\r\n");
+                fol_tx_busy     = false;
+                fol_ttsca_state = FOL_TTSCA_IDLE;
+                break;
+            }
+            fol_ttsca_state = FOL_TTSCA_CONFIG0_WAIT_READ;
+            break;
+
+        case FOL_TTSCA_CONFIG0_WAIT_READ:
+            if (!fol_ttsca_op_done) { break; }
+            {
+                /* Set bits 7 (FTSE) and 6 — same as GM_STATE_RMW_CONFIG0_WAIT_READ */
+                uint32_t v = fol_ttsca_op_val | 0x000000C0u;
+                fol_ttsca_op_done = false;
+                if (TCPIP_MAC_RES_OK != DRV_LAN865X_WriteRegister(0u, FOL_OA_CONFIG0, v,
+                                                                   true,
+                                                                   fol_ttsca_op_cb, NULL)) {
+                    PTP_LOG("[FOL] TTSCA: WriteRegister(CONFIG0) failed\r\n");
+                    fol_tx_busy     = false;
+                    fol_ttsca_state = FOL_TTSCA_IDLE;
+                    break;
+                }
+                fol_ttsca_state = FOL_TTSCA_CONFIG0_WAIT_WRITE;
+            }
+            break;
+
+        case FOL_TTSCA_CONFIG0_WAIT_WRITE:
+            if (!fol_ttsca_op_done) { break; }
+            fol_config0_set   = true;
+            fol_ttsca_op_done = false;
+            fol_ttsca_state   = FOL_TTSCA_WRITE_TXMPATL;
+            break;
+
+        /* ---- Per-frame: write TXMPATL=0xF701 (Delay_Req pattern — overrides driver's 0xF710 for Sync) ---- */
+        case FOL_TTSCA_WRITE_TXMPATL:
+            fol_ttsca_op_done = false;
+            if (TCPIP_MAC_RES_OK != DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMPATL,
+                                                               FOL_TXMPATL_DELAY_REQ,
+                                                               true,
+                                                               fol_ttsca_op_cb, NULL)) {
+                PTP_LOG("[FOL] TTSCA: WriteRegister(TXMPATL) failed\r\n");
+                fol_tx_busy     = false;
+                fol_ttsca_state = FOL_TTSCA_IDLE;
+                break;
+            }
+            fol_ttsca_state = FOL_TTSCA_WAIT_TXMPATL;
+            break;
+
+        case FOL_TTSCA_WAIT_TXMPATL:
+            if (!fol_ttsca_op_done) { break; }
+            /* TXMPATL=0xF701 confirmed — now arm TX-Match-Detector */
+            fol_ttsca_op_done = false;
+            fol_ttsca_state   = FOL_TTSCA_WRITE_TXMCTL;
+            break;
+
+        /* ---- Arm TX-Match-Detector before Delay_Req TX (same as GM Sync path) ---- */
+        case FOL_TTSCA_WRITE_TXMCTL:
+            fol_ttsca_op_done = false;
+            if (TCPIP_MAC_RES_OK != DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMCTL, 0x0002u,
+                                                               true,
+                                                               fol_ttsca_op_cb, NULL)) {
+                PTP_LOG("[FOL] TTSCA: WriteRegister(TXMCTL) failed\r\n");
+                fol_tx_busy     = false;
+                fol_ttsca_state = FOL_TTSCA_IDLE;
+                break;
+            }
+            fol_ttsca_state = FOL_TTSCA_WAIT_TXMCTL;
+            break;
+
+        case FOL_TTSCA_WAIT_TXMCTL:
+            if (!fol_ttsca_op_done) { break; }
+            /* TXMCTL armed — capture SW t3 as close to TX as possible, then send */
+            fol_t3_ns = (int64_t)PTP_CLOCK_GetTime_ns();
+            if (!DRV_LAN865X_SendRawEthFrame(0u, fol_delay_req_buf,
+                                             FOL_DELAY_REQ_BUF_SIZE,
+                                             0x01u, /* tsc=1: TTSCA capture */
+                                             fol_tx_callback, NULL)) {
+                fol_tx_busy     = false;
+                PTP_LOG("[FOL] Delay_Req send failed\r\n");
+                fol_ttsca_state = FOL_TTSCA_IDLE;
+                break;
+            }
+            if (ptp_trace_enabled) {
+                PTP_LOG("[TRACE] DELAY_REQ_SENT seq=%u t3_sw=%lld\r\n",
+                        (unsigned)fol_delay_req_seq_id, (long long)fol_t3_ns);
+            }
+            fol_delay_req_pending   = true;
+            fol_delay_req_sent_tick = SYS_TIME_CounterGet();
+            fol_delay_req_seq_id++;
+            fol_ttsca_state = FOL_TTSCA_WAIT_TX_CB;
+            break;
+
+        /* ---- Wait for TX-done callback, then explicitly read STATUS0 (mirrors GM) ---- */
+        case FOL_TTSCA_WAIT_TX_CB:
+            /* fol_tx_callback() sets fol_tx_busy=false when SPI TX is confirmed */
+            if (fol_tx_busy) { break; }
+            /* TX complete — now explicitly read STATUS0 for TTSCAA, same as GM */
+            fol_ttsca_retry   = 0u;
+            fol_ttsca_state   = FOL_TTSCA_READ_STATUS0;
+            break;
+
+        case FOL_TTSCA_READ_STATUS0:
+        {
+            /* The TC6 library's _OnStatus0 handler may have already read and W1C-cleared
+             * STATUS0 (preserving TTSCAA in drvTsCaptureStatus0) via the EXST path.
+             * Check the callback-captured value first — avoids reading 0 from hardware
+             * (mirrors GM_STATE_READ_STATUS0). */
+            uint32_t cbCapture = DRV_LAN865X_GetAndClearTsCapture(0u);
+            if (0u != cbCapture) {
+                fol_ttsca_status0 = cbCapture;
+                fol_ttsca_op_done = false;
+                if (TCPIP_MAC_RES_OK != DRV_LAN865X_ReadRegister(0u, FOL_OA_TTSCAH,
+                                                                  true,
+                                                                  fol_ttsca_op_cb, NULL)) {
+                    PTP_LOG("[FOL] TTSCA: ReadRegister(TTSCAH) failed\r\n");
+                    fol_ttsca_state = FOL_TTSCA_IDLE;
+                    break;
+                }
+                fol_ttsca_state = FOL_TTSCA_WAIT_H;
+                break;
+            }
+            /* CB not yet available — issue explicit STATUS0 SPI read */
+            fol_ttsca_op_done = false;
+            if (TCPIP_MAC_RES_OK != DRV_LAN865X_ReadRegister(0u, FOL_OA_STATUS0,
+                                                              true,
+                                                              fol_ttsca_op_cb, NULL)) {
+                PTP_LOG("[FOL] TTSCA: ReadRegister(STATUS0) failed\r\n");
+                fol_ttsca_state = FOL_TTSCA_IDLE;
+                break;
+            }
+            fol_ttsca_state = FOL_TTSCA_WAIT_STATUS0;
+            break;
+        }
+
+        case FOL_TTSCA_WAIT_STATUS0:
+        {
+            /* During the SPI round-trip the TC6 EXST handler may have captured
+             * TTSCAA and W1C-cleared STATUS0.  Check the CB path first
+             * (mirrors GM_STATE_WAIT_STATUS0). */
+            uint32_t cbCapture = DRV_LAN865X_GetAndClearTsCapture(0u);
+            if (0u != cbCapture) {
+                fol_ttsca_status0 = cbCapture;
+                fol_ttsca_op_done = false;
+                if (TCPIP_MAC_RES_OK != DRV_LAN865X_ReadRegister(0u, FOL_OA_TTSCAH,
+                                                                  true,
+                                                                  fol_ttsca_op_cb, NULL)) {
+                    PTP_LOG("[FOL] TTSCA: ReadRegister(TTSCAH) failed\r\n");
+                    fol_ttsca_state = FOL_TTSCA_IDLE;
+                    break;
+                }
+                fol_ttsca_state = FOL_TTSCA_WAIT_H;
+                break;
+            }
+            if (!fol_ttsca_op_done) { break; }
+            if (0u == (fol_ttsca_op_val & (uint32_t)FOL_STS0_TTSCAA)) {
+                /* TTSCAA not yet set — retry up to FOL_TTSCA_MAX_RETRIES times */
+                if (++fol_ttsca_retry > FOL_TTSCA_MAX_RETRIES) {
+                    PTP_LOG("[FOL] t3 HW capture timeout STATUS0=0x%08X — SW fallback\r\n",
+                            (unsigned int)fol_ttsca_op_val);
+                    fol_ttsca_state = FOL_TTSCA_IDLE;
+                    /* fol_t3_hw_valid remains false — finalize deferred calc with SW t3 */
+                    if (fol_delay_resp_deferred) {
+                        fol_delay_resp_deferred = false;
+                        PTP_LOG("[FOL] t3 HW deferred timeout — deferred calc with SW t3\r\n");
+                        complete_delay_calc(fol_deferred_t1, fol_deferred_t2,
+                                            fol_t3_ns, false, fol_deferred_t4);
+                    }
+                    break;
+                }
+                fol_ttsca_state = FOL_TTSCA_READ_STATUS0; /* re-read STATUS0 */
+                break;
+            }
+            /* TTSCAA is set via direct read — save STATUS0 for later W1C and read timestamps */
+            fol_ttsca_status0 = fol_ttsca_op_val;
+            fol_ttsca_op_done = false;
+            if (TCPIP_MAC_RES_OK != DRV_LAN865X_ReadRegister(0u, FOL_OA_TTSCAH,
+                                                              true,
+                                                              fol_ttsca_op_cb,
+                                                              NULL)) {
+                PTP_LOG("[FOL] TTSCA: ReadRegister(TTSCAH) failed\r\n");
+                fol_ttsca_state = FOL_TTSCA_IDLE;
+                break;
+            }
+            fol_ttsca_state = FOL_TTSCA_WAIT_H;
+            break;
+        }
+
+        case FOL_TTSCA_WAIT_H:
+            if (!fol_ttsca_op_done) { break; }
+            fol_ttsca_t3_sec  = fol_ttsca_op_val;
+            fol_ttsca_op_done = false;
+            if (TCPIP_MAC_RES_OK != DRV_LAN865X_ReadRegister(0u, FOL_OA_TTSCAL,
+                                                              true,
+                                                              fol_ttsca_op_cb,
+                                                              NULL)) {
+                PTP_LOG("[FOL] TTSCA: ReadRegister(TTSCAL) failed\r\n");
+                fol_ttsca_state = FOL_TTSCA_IDLE;
+                break;
+            }
+            fol_ttsca_state = FOL_TTSCA_WAIT_L;
+            break;
+
+        case FOL_TTSCA_WAIT_L:
+            if (!fol_ttsca_op_done) { break; }
+            fol_t3_hw_ns    = (uint64_t)fol_ttsca_t3_sec * 1000000000ULL
+                            + (uint64_t)fol_ttsca_op_val;
+            fol_t3_hw_valid = true;
+            if (ptp_trace_enabled) {
+                PTP_LOG("[TRACE] T3_HW sec=%u ns=%u total=%llu\r\n",
+                        (unsigned int)fol_ttsca_t3_sec,
+                        (unsigned int)fol_ttsca_op_val,
+                        (unsigned long long)fol_t3_hw_ns);
+            }
+            /* W1C: clear the TTSCAA bit in STATUS0 */
+            fol_ttsca_op_done = false;
+            if (TCPIP_MAC_RES_OK != DRV_LAN865X_WriteRegister(0u, FOL_OA_STATUS0,
+                                                               fol_ttsca_status0,
+                                                               true,
+                                                               fol_ttsca_op_cb,
+                                                               NULL)) {
+                /* W1C failure is non-critical; t3 is already captured */
+                fol_ttsca_state = FOL_TTSCA_IDLE;
+                break;
+            }
+            fol_ttsca_state = FOL_TTSCA_WAIT_CLR;
+            break;
+
+        case FOL_TTSCA_WAIT_CLR:
+            if (!fol_ttsca_op_done) { break; }
+            fol_ttsca_state = FOL_TTSCA_IDLE;
+            /* If processDelayResp was deferred while waiting for T3_HW, finalize now */
+            if (fol_delay_resp_deferred) {
+                fol_delay_resp_deferred = false;
+                complete_delay_calc(fol_deferred_t1, fol_deferred_t2,
+                                    (int64_t)fol_t3_hw_ns, true, fol_deferred_t4);
+            }
+            break;
+    }
+}
+
 #define FOL_REG_TIMEOUT_MS 100u
 
 void PTP_FOL_Service(void)
@@ -167,6 +479,8 @@ void PTP_FOL_Service(void)
     if (ptpMode != PTP_SLAVE) {
         return;
     }
+
+    fol_ttsca_service();
 
     switch (fol_reg_state) {
         case FOL_REG_IDLE:
@@ -353,15 +667,30 @@ static void fol_tx_callback(void *pInst, const uint8_t *pTx, uint16_t len,
  * (t2-t1) term used for delay calculation matches the same Sync cycle. */
 static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
 {
-    if (fol_tx_busy || fol_delay_req_pending) {
-        return;  /* previous Delay_Req still outstanding */
+    /* Timeout: if a Delay_Req has been outstanding for > 500 ms without a
+     * Delay_Resp, reset the pending flag so we can try again. */
+    if (fol_delay_req_pending) {
+        uint32_t elapsed = SYS_TIME_CounterGet() - fol_delay_req_sent_tick;
+        if (elapsed >= SYS_TIME_MSToCount(500u)) {
+            PTP_LOG("[FOL] Delay_Req timeout — retrying\r\n");
+            fol_delay_req_pending = false;
+        } else {
+            return;  /* still waiting for Delay_Resp */
+        }
+    }
+    if (fol_tx_busy || fol_ttsca_state != FOL_TTSCA_IDLE) {
+        return;  /* TX path or TTSCA capture still busy */
     }
 
     /* Build Ethernet header */
-    /* Destination: PTP L2 multicast 01:1B:19:00:00:00 (primary multicast) */
-    fol_delay_req_buf[0] = 0x01u; fol_delay_req_buf[1] = 0x1Bu;
-    fol_delay_req_buf[2] = 0x19u; fol_delay_req_buf[3] = 0x00u;
-    fol_delay_req_buf[4] = 0x00u; fol_delay_req_buf[5] = 0x00u;
+    /* Destination: broadcast FF:FF:FF:FF:FF:FF.
+     * The LAN865x MAC address filter is not configured for PTP multicast
+     * (01:1B:19:00:00:00), so multicast Delay_Req frames are silently
+     * dropped at the GM's hardware RX filter.  Using broadcast ensures
+     * all nodes on the T1S bus receive the frame. */
+    fol_delay_req_buf[0] = 0xFFu; fol_delay_req_buf[1] = 0xFFu;
+    fol_delay_req_buf[2] = 0xFFu; fol_delay_req_buf[3] = 0xFFu;
+    fol_delay_req_buf[4] = 0xFFu; fol_delay_req_buf[5] = 0xFFu;
     /* Source MAC */
     fol_delay_req_buf[6]  = fol_src_mac[0]; fol_delay_req_buf[7]  = fol_src_mac[1];
     fol_delay_req_buf[8]  = fol_src_mac[2]; fol_delay_req_buf[9]  = fol_src_mac[3];
@@ -391,41 +720,70 @@ static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
     msg->header.logMessageInterval = 0x7Fu;
     /* originTimestamp = 0 (as per IEEE 1588 §11.3.2) */
 
-    /* Record t3 from software clock before sending */
-    fol_t3_ns = (int64_t)PTP_CLOCK_GetTime_ns();
+    /* SW t3 pre-init; refreshed to actual send time in FOL_TTSCA_WAIT_TXMCTL */
+    fol_t3_ns       = (int64_t)PTP_CLOCK_GetTime_ns();
+    fol_t3_hw_valid = false;
 
-    /* Save t1 and t2 so processDelayResp() can compute delay for this cycle */
     /* Store in global TS_SYNC which already holds these values. */
     (void)t1_ns; (void)t2_ns;  /* delay calculation uses TS_SYNC directly   */
 
-    fol_tx_busy = true;
-    if (!DRV_LAN865X_SendRawEthFrame(0u, fol_delay_req_buf,
-                                     FOL_DELAY_REQ_BUF_SIZE,
-                                     0u,  /* no TX-Match timestamp needed  */
-                                     fol_tx_callback, NULL)) {
-        fol_tx_busy = false;
-        PTP_LOG("[FOL] Delay_Req send failed\r\n");
-        return;
-    }
-
-    fol_delay_req_pending = true;
-    PTP_LOG("[FOL] Delay_Req sent (seq=%u)\r\n", (unsigned)fol_delay_req_seq_id);
-    fol_delay_req_seq_id++;
+    /* Mark TX busy now to block re-entry; actual send happens in state machine.
+     * On first invocation (fol_config0_set==false), do CONFIG0 RMW first to set
+     * FTSE (bit 7) which enables LAN865x TX timestamp capture. */
+    fol_tx_busy       = true;
+    fol_ttsca_op_done = false;
+    /* Always write TXMPATL=0xF701 callback-confirmed per Delay_Req (driver _InitMemMap
+     * sets TXMPATL=0xF710 for Sync; fire-and-forget is not reliable). Skip the
+     * one-shot CONFIG0 RMW only when it has already run. */
+    fol_ttsca_state   = fol_config0_set ? FOL_TTSCA_WRITE_TXMPATL
+                                        : FOL_TTSCA_CONFIG0_READ;
 }
 
 /* Parse a received Delay_Resp and update the mean path delay. */
+/* Finalize a Delay_Req/Resp calculation.  Called either directly from
+ * processDelayResp (when t3_hw already valid or TTSCA already idle) or
+ * deferred from fol_ttsca_service once the TTSCA state machine reaches IDLE. */
+static void complete_delay_calc(int64_t t1, int64_t t2, int64_t t3, bool hw, int64_t t4)
+{
+    int64_t forward  = t2 - t1;    /* path: GM → follower  */
+    int64_t backward = t4 - t3;    /* path: follower → GM  */
+    fol_mean_path_delay = (forward + backward) / 2;
+    fol_delay_valid     = true;
+
+    if (ptp_trace_enabled) {
+        PTP_LOG("[TRACE] DELAY_CALC t1=%lld t2=%lld t3=%lld(hw=%d) t4=%lld fwd=%lld bwd=%lld delay=%lld\r\n",
+                (long long)t1, (long long)t2,
+                (long long)t3, (int)hw, (long long)t4,
+                (long long)forward, (long long)backward,
+                (long long)fol_mean_path_delay);
+    }
+}
+
 static void processDelayResp(delayRespMsg_t *ptpPkt, uint64_t rxTimestamp)
 {
     (void)rxTimestamp;
 
     if (!fol_delay_req_pending) {
+        if (ptp_trace_enabled) {
+            PTP_LOG("[TRACE] DELAY_RESP_UNSOLICITED seq=%u\r\n",
+                    (unsigned)htons(ptpPkt->header.sequenceID));
+        }
         return;  /* unsolicited Delay_Resp — ignore */
+    }
+
+    if (ptp_trace_enabled) {
+        PTP_LOG("[TRACE] DELAY_RESP_RECEIVED seq=%u\r\n",
+                (unsigned)htons(ptpPkt->header.sequenceID));
     }
 
     /* Verify that the Delay_Resp is addressed to us (requestingPortIdentity) */
     if (memcmp(ptpPkt->requestingPortIdentity.clockIdentity,
                ((delayReqMsg_t *)&fol_delay_req_buf[14])->header.sourcePortIdentity.clockIdentity,
                sizeof(clockIdentity_t)) != 0) {
+        if (ptp_trace_enabled) {
+            PTP_LOG("[TRACE] DELAY_RESP_WRONG_CLOCK seq=%u\r\n",
+                    (unsigned)htons(ptpPkt->header.sequenceID));
+        }
         PTP_LOG("[FOL] Delay_Resp for different clock — ignored\r\n");
         return;
     }
@@ -439,17 +797,28 @@ static void processDelayResp(delayRespMsg_t *ptpPkt, uint64_t rxTimestamp)
     int64_t t1_ns = (int64_t)tsToInternal(&TS_SYNC.origin);
     int64_t t2_ns = (int64_t)tsToInternal(&TS_SYNC.receipt);
 
-    /* IEEE 1588 §11.3 mean path delay:
-     *   delay = ((t2 - t1) + (t4 - t3)) / 2                           */
-    int64_t forward  = t2_ns - t1_ns;          /* path: GM → follower  */
-    int64_t backward = fol_t4_ns - fol_t3_ns;  /* path: follower → GM  */
-    fol_mean_path_delay = (forward + backward) / 2;
-    fol_delay_valid     = true;
-    fol_delay_req_pending = false;
+    /* If the TTSCA capture is still in progress, defer the calculation.
+     * The state machine will call complete_delay_calc() once it reaches IDLE
+     * (either with a valid T3_HW or with the SW fallback on timeout).
+     * Block any new Delay_Req by keeping the TTSCA cycle running; unblock
+     * sendDelayReq by clearing fol_delay_req_pending so the timeout guard
+     * does not wrongly retransmit while we wait. */
+    if (fol_ttsca_state != FOL_TTSCA_IDLE) {
+        fol_delay_resp_deferred = true;
+        fol_deferred_t1         = t1_ns;
+        fol_deferred_t2         = t2_ns;
+        fol_deferred_t4         = fol_t4_ns;
+        fol_delay_req_pending   = false;  /* prevent false-timeout retransmit */
+        return;
+    }
 
-    PTP_LOG("[FOL] Delay_Resp: t3=%lld t4=%lld delay=%lld ns\r\n",
-            (long long)fol_t3_ns, (long long)fol_t4_ns,
-            (long long)fol_mean_path_delay);
+    /* TTSCA already idle — use whichever t3 is available */
+    int64_t t3_used = fol_t3_hw_valid ? (int64_t)fol_t3_hw_ns : fol_t3_ns;
+    if (!fol_t3_hw_valid) {
+        PTP_LOG("[FOL] t3 HW not ready — SW fallback used\r\n");
+    }
+    fol_delay_req_pending = false;
+    complete_delay_calc(t1_ns, t2_ns, t3_used, fol_t3_hw_valid, fol_t4_ns);
 }
 
 /* -------------------------------------------------------------------------
@@ -470,12 +839,22 @@ static void resetSlaveNode(void)
     diffRemote          = 0;
 
     /* Reset Delay_Req / Delay_Resp state */
-    fol_delay_req_pending = false;
-    fol_delay_valid       = false;
-    fol_mean_path_delay   = 0;
-    fol_t3_ns             = 0;
-    fol_t4_ns             = 0;
-    fol_delay_req_seq_id  = 0u;
+    fol_delay_req_pending    = false;
+    fol_delay_req_sent_tick  = 0u;
+    fol_delay_valid          = false;
+    fol_mean_path_delay      = 0;
+    fol_t3_ns                = 0;
+    fol_t4_ns                = 0;
+    fol_delay_req_seq_id     = 0u;
+
+    /* Reset HW t3 capture state machine */
+    fol_t3_hw_valid        = false;
+    fol_t3_hw_ns           = 0u;
+    fol_ttsca_state        = FOL_TTSCA_IDLE;
+    fol_ttsca_op_done      = false;
+    fol_ttsca_retry        = 0u;
+    fol_tx_busy            = false;
+    fol_delay_resp_deferred = false;
 
     memset(&TS_SYNC, 0, sizeof(ptpSync_ct));
 
@@ -735,7 +1114,7 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
         prevSyncStatus = syncStatus;
     }
 
-    /* Verbose mode: overwrite same terminal line on every sync (\r, no \n) */
+    /* Verbose mode: overwrite same terminal line on every sync (\r, no \r\n) */
     if (ptp_fol_verbose) {
         uint32_t t1_sec = (uint32_t)(t1 / 1000000000ULL);
         uint32_t t1_ns  = (uint32_t)(t1 % 1000000000ULL);
@@ -771,6 +1150,11 @@ void PTP_FOL_SetVerbose(bool verbose) {
     ptp_fol_verbose = verbose;
 }
 
+void PTP_FOL_SetTrace(bool enable) {
+    ptp_trace_enabled = enable;
+    PTP_LOG("[TRACE] PTP trace %s\r\n", enable ? "enabled" : "disabled");
+}
+
 /* -------------------------------------------------------------------------
  * PTP frame dispatcher  (called internally & exposed via header)
  * ---------------------------------------------------------------------- */
@@ -804,6 +1188,28 @@ void handlePtp(uint8_t *pData, uint32_t size, uint32_t sec, uint32_t nsec)
 
 void PTP_FOL_Init(void)
 {
+    /* Reset TTSCA state (including CONFIG0 one-shot flag so FTSE is re-applied
+     * at the start of each FOL mode activation). */
+    fol_config0_set        = false;
+    fol_ttsca_state        = FOL_TTSCA_IDLE;
+    fol_ttsca_op_done      = false;
+    fol_ttsca_retry        = 0u;
+    fol_t3_hw_valid        = false;
+    fol_t3_hw_ns           = 0u;
+    fol_tx_busy            = false;
+    fol_delay_resp_deferred = false;
+
+    /* Configure TX-Match base registers for Delay_Req TX timestamp capture (t3).
+     * TXMPATL is intentionally NOT written here — it is written callback-confirmed
+     * (FOL_TTSCA_WRITE_TXMPATL) before every Delay_Req TX to guarantee 0xF701 is
+     * in effect (driver _InitMemMap sets 0xF710 for Sync; fire-and-forget is unreliable).
+     * TXMCTL is left disarmed here; armed to 0x0002 per-Delay_Req in state machine. */
+    DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMCTL,  0x00000000u,         true, NULL, NULL);
+    DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMLOC,  30u,                 true, NULL, NULL);
+    DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMPATH, PTP_ETHER_TYPE_H,    true, NULL, NULL);
+    DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMMSKH, 0x00000000u,         true, NULL, NULL);
+    DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMMSKL, 0x00000000u,         true, NULL, NULL);
+
     /* Set up PPS output (stopped; PPSCTL=0x02 = pulse-width / period preset) */
     DRV_LAN865X_WriteRegister(0u, PPSCTL,   0x00000002u,       true, NULL, NULL);
     DRV_LAN865X_WriteRegister(0u, SEVINTEN, SEVINTEN_PPSDONE_Msk, true, NULL, NULL);

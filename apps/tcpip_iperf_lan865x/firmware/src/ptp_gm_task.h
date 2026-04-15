@@ -142,6 +142,13 @@ void PTP_GM_RequestRegDump(void);
 void PTP_GM_SetVerbose(bool verbose);
 
 /**
+ * Enable or disable PTP protocol trace output on the GM side.
+ * When enabled, prints structured [TRACE] lines for every Delay_Req/Resp event.
+ * Usage: ptp_trace [on|off]
+ */
+void PTP_GM_SetTrace(bool enable);
+
+/**
  * Process a received Delay_Req frame and send a Delay_Resp back to the
  * requesting port.  Safe to call from APP_Tasks() when in GM (master) mode.
  *

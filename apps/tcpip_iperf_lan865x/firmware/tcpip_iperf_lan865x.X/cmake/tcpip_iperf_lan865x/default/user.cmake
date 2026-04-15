@@ -34,10 +34,19 @@ if(NOT EXISTS "${NORMAL_ELF}")
 endif()
 ]=])
 
-set_target_properties(tcpip_iperf_lan865x_default_image_fZZHodlt PROPERTIES
+# Resolve the generated image target name dynamically (MCC regenerates a new
+# random suffix each time, e.g. _fZZHodlt, _x_a8ivgm …).
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/.generated/main.cmake" _main_cmake_lines
+     REGEX "^add_executable\\(tcpip_iperf_lan865x_default_image_")
+if(NOT _main_cmake_lines)
+    message(FATAL_ERROR "user.cmake: could not locate image target in .generated/main.cmake")
+endif()
+string(REGEX MATCH "tcpip_iperf_lan865x_default_image_[A-Za-z0-9_]+" _image_target "${_main_cmake_lines}")
+
+set_target_properties(${_image_target} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out")
 
-add_custom_command(TARGET tcpip_iperf_lan865x_default_image_fZZHodlt POST_BUILD
+add_custom_command(TARGET ${_image_target} POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E make_directory
         "${tcpip_iperf_lan865x_default_output_dir}"
     # Step 1: normalize ELF location (handles both old and new MINGW behavior)

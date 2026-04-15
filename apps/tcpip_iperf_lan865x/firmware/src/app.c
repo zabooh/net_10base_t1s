@@ -240,6 +240,18 @@ static void ptp_reset_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     SYS_CONSOLE_PRINT("PTP follower servo reset\r\n");
 }
 
+static void ptp_trace_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc < 2) {
+        SYS_CONSOLE_PRINT("Usage: ptp_trace [on|off]\r\n");
+        return;
+    }
+    bool enable = (strcmp(argv[1], "on") == 0);
+    PTP_FOL_SetTrace(enable);
+    PTP_GM_SetTrace(enable);
+    SYS_CONSOLE_PRINT("PTP trace %s\r\n", enable ? "enabled" : "disabled");
+}
+
 static void ptp_dst_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     if (argc < 2) {
         ptp_gm_dst_mode_t dst = PTP_GM_GetDstMode();
@@ -290,6 +302,7 @@ static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
     {"ptp_interval",(SYS_CMD_FNC) ptp_interval_cmd,": set GM Sync interval (ptp_interval <ms>)"},
     {"ptp_offset",  (SYS_CMD_FNC) ptp_offset_cmd,  ": show follower clock offset in ns"},
     {"ptp_reset",   (SYS_CMD_FNC) ptp_reset_cmd,   ": reset follower servo to UNINIT"},
+    {"ptp_trace",   (SYS_CMD_FNC) ptp_trace_cmd,   ": enable/disable PTP Delay trace (ptp_trace [on|off])"},
     {"ptp_dst",     (SYS_CMD_FNC) ptp_dst_cmd,     ": set/get PTP destination MAC (ptp_dst [multicast|broadcast])"},
     {"clk_set",     (SYS_CMD_FNC) clk_set_cmd,     ": set software clock to <ns>, reset drift (clk_set <ns>)"},
     {"clk_get",     (SYS_CMD_FNC) clk_get_cmd,     ": read current software clock value in ns"},

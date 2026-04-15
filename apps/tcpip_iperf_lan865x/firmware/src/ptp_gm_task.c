@@ -85,6 +85,7 @@ static uint8_t          gm_src_mac[6]       = {0u};
 static ptp_gm_dst_mode_t gm_dst_mode        = PTP_GM_DST_BROADCAST;
 static uint8_t          gm_seq_step         = 0u;      /* current step in init/deinit write sequence */
 static bool             gm_verbose          = false;
+static bool             gm_trace_enabled    = false;
 
 
 /* Frame buffers */
@@ -1034,6 +1035,11 @@ void PTP_GM_SetVerbose(bool verbose)
     gm_verbose = verbose;
 }
 
+void PTP_GM_SetTrace(bool enable)
+{
+    gm_trace_enabled = enable;
+}
+
 void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
 {
     if (len < (uint16_t)(sizeof(ethHeader_t) + sizeof(delayReqMsg_t))) {
@@ -1049,6 +1055,25 @@ void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
     /* t4: time the GM received the Delay_Req (from RTSA hardware timestamp) */
     uint32_t t4_sec  = (uint32_t)((rxTimestamp >> 32u) & 0xFFFFFFFFu);
     uint32_t t4_nsec = (uint32_t)( rxTimestamp         & 0xFFFFFFFFu);
+
+    if (gm_trace_enabled) {
+        SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_REQ_RECEIVED seq=%u t4=%lu.%09lu\r\n",
+                          (unsigned)htons(hdr->sequenceID),
+                          (unsigned long)t4_sec, (unsigned long)t4_nsec);
+    }
+
+    /* If there is no hardware RX timestamp (RTSA was busy with a concurrent
+     * Sync frame) t4 would be zero — a Delay_Resp with t4=0 would produce
+     * a wildly invalid delay on the follower side.  Skip this cycle. */
+    if (rxTimestamp == 0u) {
+        SYS_CONSOLE_PRINT("[PTP-GM] Delay_Req seq=%u dropped: no HW RX timestamp\r\n",
+                          (unsigned)htons(hdr->sequenceID));
+        if (gm_trace_enabled) {
+            SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_REQ_NO_TIMESTAMP seq=%u\r\n",
+                              (unsigned)htons(hdr->sequenceID));
+        }
+        return;
+    }
 
     /* Requestor source MAC (bytes 6-11 of the received Ethernet frame) */
     const uint8_t *req_mac = pData + 6u;
@@ -1097,12 +1122,24 @@ void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
                                    0u, gm_tx_cb, NULL)) {
             gm_tx_busy = false;
             SYS_CONSOLE_PRINT("[PTP-GM] Delay_Resp send failed\r\n");
+            if (gm_trace_enabled) {
+                SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_RESP_SEND_FAILED seq=%u\r\n",
+                                  (unsigned)htons(hdr->sequenceID));
+            }
         } else {
             SYS_CONSOLE_PRINT("[PTP-GM] Delay_Resp sent (seq=%u t4=%lu.%09lu)\r\n",
                               (unsigned)htons(hdr->sequenceID),
                               (unsigned long)t4_sec, (unsigned long)t4_nsec);
+            if (gm_trace_enabled) {
+                SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_RESP_SENT seq=%u\r\n",
+                                  (unsigned)htons(hdr->sequenceID));
+            }
         }
     } else {
         SYS_CONSOLE_PRINT("[PTP-GM] Delay_Resp skipped (TX busy)\r\n");
+        if (gm_trace_enabled) {
+            SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_RESP_SKIPPED_TX_BUSY seq=%u\r\n",
+                              (unsigned)htons(hdr->sequenceID));
+        }
     }
 }

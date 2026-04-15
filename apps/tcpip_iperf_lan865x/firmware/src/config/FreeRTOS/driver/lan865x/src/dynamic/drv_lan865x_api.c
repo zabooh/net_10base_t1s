@@ -39,11 +39,13 @@ Microchip or any third party.
 
 *******************************************************************************/
 #include <stdarg.h>
+#include <string.h>
 #include "configuration.h"
 #include "definitions.h"
 #include "drv_lan865x_local.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "tc6/tc6.h"
+#include "../../../../../../ptp_ts_ipc.h"
 
 /******************************************************************************
 *  DEFINES & MACROS
@@ -1375,6 +1377,34 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
             pDrvInst->rxStats.nRxPendBuffers++;
             macPkt->pMacLayer = macPkt->pDSeg->segLoad;
             macPkt->pNetLayer = macPkt->pMacLayer + sizeof(TCPIP_MAC_ETHERNET_HEADER);
+
+            /* --- Direct PTP frame capture (independent of PacketHandlerRegister) ---
+             * Check EtherType at bytes 12-13 of the raw Ethernet frame.
+             * If 0x88F7 (PTP): copy to g_ptp_raw_rx for APP_Tasks to process.
+             * The macPkt still goes to rxWaitingForPickupPackets normally;
+             * pktEth0Handler will acknowledge it when the stack delivers it. */
+            if (len >= 14u &&
+                macPkt->pDSeg->segLoad[12] == 0x88u &&
+                macPkt->pDSeg->segLoad[13] == 0xF7u)
+            {
+                uint16_t copyLen = (len > (uint16_t)PTP_RAW_BUF_SIZE) ?
+                                   (uint16_t)PTP_RAW_BUF_SIZE : len;
+                (void)memcpy((uint8_t *)g_ptp_raw_rx.data,
+                             macPkt->pDSeg->segLoad, copyLen);
+                g_ptp_raw_rx.length      = copyLen;
+                g_ptp_raw_rx.rxTimestamp = (rxTimestamp != NULL) ? *rxTimestamp : 0u;
+                /* Only update sysTickAtRx for frames that carry a hardware RX
+                 * timestamp (= SYNC).  FollowUp frames have rxTimestamp==NULL
+                 * and arrive ~1-4 ms after SYNC.  Overwriting sysTickAtRx with
+                 * the FollowUp tick would create a systematic offset in
+                 * PTP_CLOCK_GetTime_ns() because the anchor pair
+                 * (wallclock=t2_SYNC, tick=tick_FollowUp) would be inconsistent. */
+                if (rxTimestamp != NULL) {
+                    g_ptp_raw_rx.sysTickAtRx = SYS_TIME_Counter64Get();
+                }
+                g_ptp_raw_rx.pending     = true;
+            }
+
             if (0xFF == macPkt->pDSeg->segLoad[0]) {
                 macPkt->pktFlags = TCPIP_MAC_PKT_FLAG_BCAST;
             } else {
