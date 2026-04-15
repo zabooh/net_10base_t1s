@@ -22,6 +22,7 @@ Key differences vs. the noIP reference:
 #include "config/default/driver/lan865x/drv_lan865x.h"
 #include "config/default/system/console/sys_console.h"
 #include "config/default/library/tcpip/tcpip.h"
+#include "ptp_log.h"
 
 #define GM_NOIP_ETHERTYPE 0x88B5u
 #define GM_PTP_ETHERTYPE  ((uint16_t)(PTP_GM_PTP_ETHERTYPE & 0xFFFFu))
@@ -380,7 +381,7 @@ void PTP_GM_Init(void)
         if (calTI != 0u) {
             gm_init_vals[6] = calTISUBN; /* MAC_TISUBN */
             gm_init_vals[7] = calTI;     /* MAC_TI     */
-            SYS_CONSOLE_PRINT("[PTP-GM] Using calibrated TI=%u TISUBN=0x%08lX\r\n",
+            PTP_LOG("[PTP-GM] Using calibrated TI=%u TISUBN=0x%08lX\r\n",
                                (unsigned)calTI, (unsigned long)calTISUBN);
         } else {
             gm_init_vals[6] = 0u;
@@ -395,7 +396,7 @@ void PTP_GM_Init(void)
     gm_seq_step = 0u;
     GM_SET_STATE(GM_STATE_RMW_CONFIG0_READ);
 
-    SYS_CONSOLE_PRINT("[PTP-GM] Init started (MAC %02X:%02X:%02X:%02X:%02X:%02X)\r\n",
+    PTP_LOG("[PTP-GM] Init started (MAC %02X:%02X:%02X:%02X:%02X:%02X)\r\n",
                        gm_src_mac[0], gm_src_mac[1], gm_src_mac[2],
                        gm_src_mac[3], gm_src_mac[4], gm_src_mac[5]);
 }
@@ -415,12 +416,12 @@ void PTP_GM_Service(void)
             if (gm_reg_dump_pending) {
                 gm_reg_dump_pending = false;
                 /* Print the last-written init values for diagnostics. */
-                SYS_CONSOLE_PRINT("[PTP-GM] TX-Match reg dump (last written values):\r\n");
-                SYS_CONSOLE_PRINT("  TXMCTL  0x%08lX  TXMPATH 0x%08lX\r\n",
+                PTP_LOG("[PTP-GM] TX-Match reg dump (last written values):\r\n");
+                PTP_LOG("  TXMCTL  0x%08lX  TXMPATH 0x%08lX\r\n",
                     (unsigned long)0x00000000uL, (unsigned long)0x00000088uL);
-                SYS_CONSOLE_PRINT("  TXMPATL 0x%08lX  TXMMSKH 0x%08lX\r\n",
+                PTP_LOG("  TXMPATL 0x%08lX  TXMMSKH 0x%08lX\r\n",
                     (unsigned long)0x0000F710uL, (unsigned long)0x00000000uL);
-                SYS_CONSOLE_PRINT("  TXMMSKL 0x%08lX  TXMLOC  0x%08lX\r\n",
+                PTP_LOG("  TXMMSKL 0x%08lX  TXMLOC  0x%08lX\r\n",
                     (unsigned long)0x00000000uL, (unsigned long)0x0000001EuL);
             }
             if ((gm_tick_ms - gm_period_start) >= gm_sync_interval_ms) {
@@ -462,7 +463,7 @@ void PTP_GM_Service(void)
         case GM_STATE_WAIT_TXMCTL:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_TXMCTL cb timeout, retry\r\n");
+                    PTP_LOG("[PTP-GM] WAIT_TXMCTL cb timeout, retry\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
@@ -472,7 +473,7 @@ void PTP_GM_Service(void)
             if (gm_op_val & GM_TXMCTL_TXPMDET) {
                 /* Pattern detected: now read STATUS0 directly to check TTSCAA —
                  * same approach as the noIP reference (TC6_ptp_master_init path). */
-                SYS_CONSOLE_PRINT("[PTP-GM] TXPMDET ok, Sync #%u\r\n", (unsigned)gm_seq_id);
+                PTP_LOG("[PTP-GM] TXPMDET ok, Sync #%u\r\n", (unsigned)gm_seq_id);
                 gm_retry_cnt  = 0u;
                 gm_wait_ticks = 0u;
                 GM_SET_STATE(GM_STATE_READ_STATUS0);
@@ -480,7 +481,7 @@ void PTP_GM_Service(void)
                 /* Not detected yet: retry up to MAX_RETRIES */
                 gm_retry_cnt++;
                 if (gm_retry_cnt >= PTP_GM_MAX_RETRIES) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] TXPMDET timeout after Sync #%u\r\n",
+                    PTP_LOG("[PTP-GM] TXPMDET timeout after Sync #%u\r\n",
                                        (unsigned)gm_seq_id);
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 } else {
@@ -507,7 +508,7 @@ void PTP_GM_Service(void)
             /* Fallback: issue SPI read (handles race where CB fires after this point) */
             gm_op_done = false;
             if (!gm_read_register(GM_OA_STATUS0, true)) {
-                SYS_CONSOLE_PRINT("[PTP-GM] READ_STATUS0 failed, retry\r\n");
+                PTP_LOG("[PTP-GM] READ_STATUS0 failed, retry\r\n");
                 GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 break;
             }
@@ -530,7 +531,7 @@ void PTP_GM_Service(void)
             }
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_STATUS0 cb timeout, retry\r\n");
+                    PTP_LOG("[PTP-GM] WAIT_STATUS0 cb timeout, retry\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
@@ -538,7 +539,7 @@ void PTP_GM_Service(void)
             }
             gm_wait_ticks = 0u;
             /* gm_op_val is from direct SPI read; cbCapture was already drained above (=0 here). */
-            SYS_CONSOLE_PRINT("[PTP-GM] STATUS0=0x%08lX after Sync #%u\r\n",
+            PTP_LOG("[PTP-GM] STATUS0=0x%08lX after Sync #%u\r\n",
                                (unsigned long)gm_op_val, (unsigned)gm_seq_id);
             if (0u != (gm_op_val & (GM_STS0_TTSCAA | GM_STS0_TTSCAB | GM_STS0_TTSCAC))) {
                 gm_status0 = gm_op_val;
@@ -546,7 +547,7 @@ void PTP_GM_Service(void)
             } else {
                 gm_retry_cnt++;
                 if (gm_retry_cnt >= PTP_GM_MAX_RETRIES) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] TTSCA not set after Sync #%u\r\n",
+                    PTP_LOG("[PTP-GM] TTSCA not set after Sync #%u\r\n",
                                        (unsigned)gm_seq_id);
                     gm_retry_cnt = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
@@ -577,7 +578,7 @@ void PTP_GM_Service(void)
         case GM_STATE_WAIT_TTSCA_H:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_TTSCA_H cb timeout, retry\r\n");
+                    PTP_LOG("[PTP-GM] WAIT_TTSCA_H cb timeout, retry\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
@@ -607,7 +608,7 @@ void PTP_GM_Service(void)
         case GM_STATE_WAIT_TTSCA_L:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_TTSCA_L cb timeout, retry\r\n");
+                    PTP_LOG("[PTP-GM] WAIT_TTSCA_L cb timeout, retry\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
@@ -632,7 +633,7 @@ void PTP_GM_Service(void)
         case GM_STATE_WAIT_CLEAR:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_CLEAR cb timeout, retry\r\n");
+                    PTP_LOG("[PTP-GM] WAIT_CLEAR cb timeout, retry\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
@@ -666,7 +667,7 @@ void PTP_GM_Service(void)
                 uint32_t h = sec / 3600u;
                 uint32_t m = (sec % 3600u) / 60u;
                 uint32_t s = sec % 60u;
-                SYS_CONSOLE_PRINT("[GM] #%u  t1=%02lu:%02lu:%02lu.%09lu\r",
+                PTP_LOG("[GM] #%u  t1=%02lu:%02lu:%02lu.%09lu\r",
                                   (unsigned)gm_seq_id,
                                   (unsigned long)h, (unsigned long)m, (unsigned long)s,
                                   (unsigned long)nsec);
@@ -680,7 +681,7 @@ void PTP_GM_Service(void)
         case GM_STATE_WAIT_FOLLOWUP_TX_DONE:
             if (gm_tx_busy) {
                 if (++gm_wait_ticks >= 500u) {  /* 500 ms timeout (1 tick == 1 ms) */
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_FOLLOWUP_TX_DONE timeout after FU #%u\r\n",
+                    PTP_LOG("[PTP-GM] WAIT_FOLLOWUP_TX_DONE timeout after FU #%u\r\n",
                                       (unsigned)gm_seq_id);
                     gm_tx_busy = false;
                     gm_wait_ticks = 0u;
@@ -732,7 +733,7 @@ void PTP_GM_Service(void)
         case GM_STATE_RMW_CONFIG0_READ:
             gm_op_done = false;
             if (!gm_read_register(GM_OA_CONFIG0, true)) {
-                SYS_CONSOLE_PRINT("[PTP-GM] RMW_CONFIG0_READ failed, retry\r\n");
+                PTP_LOG("[PTP-GM] RMW_CONFIG0_READ failed, retry\r\n");
                 GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 break;
             }
@@ -743,7 +744,7 @@ void PTP_GM_Service(void)
         case GM_STATE_RMW_CONFIG0_WAIT_READ:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] RMW_CONFIG0_WAIT_READ timeout\r\n");
+                    PTP_LOG("[PTP-GM] RMW_CONFIG0_WAIT_READ timeout\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
@@ -752,11 +753,11 @@ void PTP_GM_Service(void)
             gm_wait_ticks = 0u;
             {
                 uint32_t newVal = (gm_op_val & ~GM_OA_CONFIG0_RMW_MASK) | GM_OA_CONFIG0_RMW_VALUE;
-                SYS_CONSOLE_PRINT("[PTP-GM] CONFIG0 RMW: 0x%08lX -> 0x%08lX\r\n",
+                PTP_LOG("[PTP-GM] CONFIG0 RMW: 0x%08lX -> 0x%08lX\r\n",
                                    (unsigned long)gm_op_val, (unsigned long)newVal);
                 gm_op_done = false;
                 if (!gm_write_register(GM_OA_CONFIG0, newVal, true)) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] RMW_CONFIG0 write failed, retry\r\n");
+                    PTP_LOG("[PTP-GM] RMW_CONFIG0 write failed, retry\r\n");
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                     break;
                 }
@@ -768,14 +769,14 @@ void PTP_GM_Service(void)
         case GM_STATE_RMW_CONFIG0_WAIT_WRITE:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] RMW_CONFIG0_WAIT_WRITE timeout\r\n");
+                    PTP_LOG("[PTP-GM] RMW_CONFIG0_WAIT_WRITE timeout\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
                 break;
             }
             gm_wait_ticks = 0u;
-            SYS_CONSOLE_PRINT("[PTP-GM] CONFIG0 RMW done\r\n");
+            PTP_LOG("[PTP-GM] CONFIG0 RMW done\r\n");
             GM_SET_STATE(GM_STATE_RMW_PADCTRL_READ);
             break;
 
@@ -783,7 +784,7 @@ void PTP_GM_Service(void)
         case GM_STATE_RMW_PADCTRL_READ:
             gm_op_done = false;
             if (!gm_read_register(GM_PADCTRL, true)) {
-                SYS_CONSOLE_PRINT("[PTP-GM] RMW_PADCTRL_READ failed, retry\r\n");
+                PTP_LOG("[PTP-GM] RMW_PADCTRL_READ failed, retry\r\n");
                 GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 break;
             }
@@ -794,7 +795,7 @@ void PTP_GM_Service(void)
         case GM_STATE_RMW_PADCTRL_WAIT_READ:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] RMW_PADCTRL_WAIT_READ timeout\r\n");
+                    PTP_LOG("[PTP-GM] RMW_PADCTRL_WAIT_READ timeout\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
@@ -803,11 +804,11 @@ void PTP_GM_Service(void)
             gm_wait_ticks = 0u;
             {
                 uint32_t newVal = (gm_op_val & ~GM_PADCTRL_RMW_MASK) | GM_PADCTRL_RMW_VALUE;
-                SYS_CONSOLE_PRINT("[PTP-GM] PADCTRL RMW: 0x%08lX -> 0x%08lX\r\n",
+                PTP_LOG("[PTP-GM] PADCTRL RMW: 0x%08lX -> 0x%08lX\r\n",
                                    (unsigned long)gm_op_val, (unsigned long)newVal);
                 gm_op_done = false;
                 if (!gm_write_register(GM_PADCTRL, newVal, true)) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] RMW_PADCTRL write failed, retry\r\n");
+                    PTP_LOG("[PTP-GM] RMW_PADCTRL write failed, retry\r\n");
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                     break;
                 }
@@ -819,14 +820,14 @@ void PTP_GM_Service(void)
         case GM_STATE_RMW_PADCTRL_WAIT_WRITE:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] RMW_PADCTRL_WAIT_WRITE timeout\r\n");
+                    PTP_LOG("[PTP-GM] RMW_PADCTRL_WAIT_WRITE timeout\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
                 break;
             }
             gm_wait_ticks = 0u;
-            SYS_CONSOLE_PRINT("[PTP-GM] PADCTRL RMW done — starting normal init sequence\r\n");
+            PTP_LOG("[PTP-GM] PADCTRL RMW done — starting normal init sequence\r\n");
             gm_seq_step = 0u;
             GM_SET_STATE(GM_STATE_INIT_WRITE);
             break;
@@ -839,7 +840,7 @@ void PTP_GM_Service(void)
         case GM_STATE_INIT_WRITE:
             if (!gm_write_register(gm_init_addrs[gm_seq_step],
                                    gm_init_vals[gm_seq_step], true)) {
-                SYS_CONSOLE_PRINT("[PTP-GM] INIT_WRITE failed at step %u\r\n",
+                PTP_LOG("[PTP-GM] INIT_WRITE failed at step %u\r\n",
                                   (unsigned)gm_seq_step);
                 GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 break;
@@ -851,7 +852,7 @@ void PTP_GM_Service(void)
         case GM_STATE_WAIT_INIT_WRITE:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_INIT_WRITE cb timeout at step %u\r\n",
+                    PTP_LOG("[PTP-GM] WAIT_INIT_WRITE cb timeout at step %u\r\n",
                                       (unsigned)gm_seq_step);
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
@@ -863,7 +864,7 @@ void PTP_GM_Service(void)
             if (gm_seq_step < GM_INIT_WRITE_COUNT) {
                 GM_SET_STATE(GM_STATE_INIT_WRITE);
             } else {
-                SYS_CONSOLE_PRINT("[PTP-GM] Init complete — all registers written\r\n");
+                PTP_LOG("[PTP-GM] Init complete — all registers written\r\n");
                 GM_SET_STATE(GM_STATE_WAIT_PERIOD);
             }
             break;
@@ -874,7 +875,7 @@ void PTP_GM_Service(void)
             /* TXME=1 (bit 1): arm TX-Match-Detector before Sync send.
              * TSC=1 in SPI header is also set in gm_send_raw_eth_frame(tsc=1). */
             if (!gm_write_register(GM_TXMCTL, 0x0002u, true)) {
-                SYS_CONSOLE_PRINT("[PTP-GM] WRITE_TXMCTL failed\r\n");
+                PTP_LOG("[PTP-GM] WRITE_TXMCTL failed\r\n");
                 GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 break;
             }
@@ -885,7 +886,7 @@ void PTP_GM_Service(void)
         case GM_STATE_WAIT_WRITE_TXMCTL:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_WRITE_TXMCTL cb timeout\r\n");
+                    PTP_LOG("[PTP-GM] WAIT_WRITE_TXMCTL cb timeout\r\n");
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_WAIT_PERIOD);
                 }
@@ -926,7 +927,7 @@ void PTP_GM_Service(void)
             if (gm_tx_busy) {
                 /* Frame is still being transmitted */
                 if (++gm_wait_ticks >= 500u) {  /* 500 ms timeout (1 tick == 1 ms) */
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_SYNC_TX_DONE timeout after Sync #%u\r\n",
+                    PTP_LOG("[PTP-GM] WAIT_SYNC_TX_DONE timeout after Sync #%u\r\n",
                                       (unsigned)gm_seq_id);
                     gm_tx_busy = false;
                     gm_wait_ticks = 0u;
@@ -945,7 +946,7 @@ void PTP_GM_Service(void)
             gm_op_done = false;
             if (!gm_write_register(gm_deinit_addrs[gm_seq_step],
                                    gm_deinit_vals[gm_seq_step], true)) {
-                SYS_CONSOLE_PRINT("[PTP-GM] DEINIT_WRITE failed at step %u\r\n",
+                PTP_LOG("[PTP-GM] DEINIT_WRITE failed at step %u\r\n",
                                   (unsigned)gm_seq_step);
                 GM_SET_STATE(GM_STATE_IDLE);
                 break;
@@ -957,7 +958,7 @@ void PTP_GM_Service(void)
         case GM_STATE_WAIT_DEINIT_WRITE:
             if (!gm_op_done) {
                 if (++gm_wait_ticks >= 200u) {
-                    SYS_CONSOLE_PRINT("[PTP-GM] WAIT_DEINIT_WRITE cb timeout at step %u\r\n",
+                    PTP_LOG("[PTP-GM] WAIT_DEINIT_WRITE cb timeout at step %u\r\n",
                                       (unsigned)gm_seq_step);
                     gm_wait_ticks = 0u;
                     GM_SET_STATE(GM_STATE_IDLE);
@@ -969,7 +970,7 @@ void PTP_GM_Service(void)
             if (gm_seq_step < GM_DEINIT_WRITE_COUNT) {
                 GM_SET_STATE(GM_STATE_DEINIT_WRITE);
             } else {
-                SYS_CONSOLE_PRINT("[PTP-GM] Deinit complete — TX-Match/TSU/PPS disarmed\r\n");
+                PTP_LOG("[PTP-GM] Deinit complete — TX-Match/TSU/PPS disarmed\r\n");
                 GM_SET_STATE(GM_STATE_IDLE);
             }
             break;
@@ -998,7 +999,7 @@ void PTP_GM_Deinit(void)
     gm_seq_step     = 0u;
     GM_SET_STATE(GM_STATE_DEINIT_WRITE);
 
-    SYS_CONSOLE_PRINT("[PTP-GM] Deinit: starting async disarm sequence\r\n");
+    PTP_LOG("[PTP-GM] Deinit: starting async disarm sequence\r\n");
 }
 
 void PTP_GM_GetStatus(uint32_t *pSyncCount, uint32_t *pState)
@@ -1057,7 +1058,7 @@ void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
     uint32_t t4_nsec = (uint32_t)( rxTimestamp         & 0xFFFFFFFFu);
 
     if (gm_trace_enabled) {
-        SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_REQ_RECEIVED seq=%u t4=%lu.%09lu\r\n",
+        PTP_LOG("[TRACE] GM_DELAY_REQ_RECEIVED seq=%u t4=%lu.%09lu\r\n",
                           (unsigned)htons(hdr->sequenceID),
                           (unsigned long)t4_sec, (unsigned long)t4_nsec);
     }
@@ -1066,10 +1067,10 @@ void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
      * Sync frame) t4 would be zero — a Delay_Resp with t4=0 would produce
      * a wildly invalid delay on the follower side.  Skip this cycle. */
     if (rxTimestamp == 0u) {
-        SYS_CONSOLE_PRINT("[PTP-GM] Delay_Req seq=%u dropped: no HW RX timestamp\r\n",
+        PTP_LOG("[PTP-GM] Delay_Req seq=%u dropped: no HW RX timestamp\r\n",
                           (unsigned)htons(hdr->sequenceID));
         if (gm_trace_enabled) {
-            SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_REQ_NO_TIMESTAMP seq=%u\r\n",
+            PTP_LOG("[TRACE] GM_DELAY_REQ_NO_TIMESTAMP seq=%u\r\n",
                               (unsigned)htons(hdr->sequenceID));
         }
         return;
@@ -1121,24 +1122,26 @@ void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
         if (!gm_send_raw_eth_frame(gm_delay_resp_buf, GM_DELAY_RESP_BUF_SIZE,
                                    0u, gm_tx_cb, NULL)) {
             gm_tx_busy = false;
-            SYS_CONSOLE_PRINT("[PTP-GM] Delay_Resp send failed\r\n");
+            PTP_LOG("[PTP-GM] Delay_Resp send failed\r\n");
             if (gm_trace_enabled) {
-                SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_RESP_SEND_FAILED seq=%u\r\n",
+                PTP_LOG("[TRACE] GM_DELAY_RESP_SEND_FAILED seq=%u\r\n",
                                   (unsigned)htons(hdr->sequenceID));
             }
         } else {
-            SYS_CONSOLE_PRINT("[PTP-GM] Delay_Resp sent (seq=%u t4=%lu.%09lu)\r\n",
-                              (unsigned)htons(hdr->sequenceID),
-                              (unsigned long)t4_sec, (unsigned long)t4_nsec);
             if (gm_trace_enabled) {
-                SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_RESP_SENT seq=%u\r\n",
+                PTP_LOG("[PTP-GM] Delay_Resp sent (seq=%u t4=%lu.%09lu)\r\n",
+                                  (unsigned)htons(hdr->sequenceID),
+                                  (unsigned long)t4_sec, (unsigned long)t4_nsec);
+            }
+            if (gm_trace_enabled) {
+                PTP_LOG("[TRACE] GM_DELAY_RESP_SENT seq=%u\r\n",
                                   (unsigned)htons(hdr->sequenceID));
             }
         }
     } else {
-        SYS_CONSOLE_PRINT("[PTP-GM] Delay_Resp skipped (TX busy)\r\n");
+        PTP_LOG("[PTP-GM] Delay_Resp skipped (TX busy)\r\n");
         if (gm_trace_enabled) {
-            SYS_CONSOLE_PRINT("[TRACE] GM_DELAY_RESP_SKIPPED_TX_BUSY seq=%u\r\n",
+            PTP_LOG("[TRACE] GM_DELAY_RESP_SKIPPED_TX_BUSY seq=%u\r\n",
                               (unsigned)htons(hdr->sequenceID));
         }
     }

@@ -23,10 +23,8 @@ Key differences vs. the noIP version:
 #include "ptp_clock.h"
 #include "ptp_ts_ipc.h"
 #include "config/default/driver/lan865x/drv_lan865x.h"
-#include "config/default/system/console/sys_console.h"
 #include "config/default/system/time/sys_time.h"
-
-#define PTP_LOG SYS_CONSOLE_PRINT
+#include "ptp_log.h"
 
 /* -------------------------------------------------------------------------
  * State machine for sequential register writes
@@ -672,7 +670,9 @@ static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
     if (fol_delay_req_pending) {
         uint32_t elapsed = SYS_TIME_CounterGet() - fol_delay_req_sent_tick;
         if (elapsed >= SYS_TIME_MSToCount(500u)) {
-            PTP_LOG("[FOL] Delay_Req timeout — retrying\r\n");
+            if (ptp_trace_enabled) {
+                PTP_LOG("[FOL] Delay_Req timeout — retrying\r\n");
+            }
             fol_delay_req_pending = false;
         } else {
             return;  /* still waiting for Delay_Resp */
@@ -906,8 +906,10 @@ static void processSync(syncMsg_t *ptpPkt)
             syncReceived = 1;
         } else {
             syncReceived = 0;
-            PTP_LOG("Sync seqId mismatch. Is: %u - %d\r\n",
-                    (unsigned int)seqId, (int)ptp_sync_sequenceId);
+            if (ptp_trace_enabled) {
+                PTP_LOG("Sync seqId mismatch. Is: %u - %d\r\n",
+                        (unsigned int)seqId, (int)ptp_sync_sequenceId);
+            }
             ptp_sync_sequenceId = -1;
         }
     }
@@ -930,8 +932,10 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
         }
     } else {
         ptp_sync_sequenceId = ((int)seqId + 1) % (int)UINT16_MAX;
-        PTP_LOG("FollowUp seqId out of sync. Is: %u - %d\r\n",
-                (unsigned int)seqId, (int)ptp_sync_sequenceId);
+        if (ptp_trace_enabled) {
+            PTP_LOG("FollowUp seqId out of sync. Is: %u - %d\r\n",
+                    (unsigned int)seqId, (int)ptp_sync_sequenceId);
+        }
         return;
     }
 
@@ -959,6 +963,14 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
     /* Convert to internal ns representation */
     uint64_t t1 = tsToInternal(&TS_SYNC.origin);
     uint64_t t2 = tsToInternal(&TS_SYNC.receipt);
+
+    /* Discard this Sync if the local receive timestamp is not yet available.
+     * This happens on the very first Sync after a reset when the MAC RX
+     * timestamp has not been captured yet.  Using t2=0 would produce a
+     * multi-second offset spike that corrupts the rateRatio filter. */
+    if (t2 == 0u) {
+        return;
+    }
 
     /* Update software PTP clock anchor: t2 is the RTSA wallclock, sysTickAtRx
      * was captured atomically alongside it in TC6_CB_OnRxEthernetPacket(). */
@@ -993,7 +1005,9 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
                                                  &rateRatiolpfState);
                 PTP_CLOCK_SetDriftPPB((int32_t)((rateRatioFIR - 1.0) * 1e9));
             } else {
-                PTP_LOG("Filtered rateRatio outlier\r\n");
+                if (ptp_trace_enabled) {
+                    PTP_LOG("Filtered rateRatio outlier\r\n");
+                }
             }
         }
         runs++;

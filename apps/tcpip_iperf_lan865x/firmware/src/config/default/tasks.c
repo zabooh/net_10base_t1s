@@ -53,6 +53,7 @@
 #include "configuration.h"
 #include "definitions.h"
 #include "sys_tasks.h"
+#include "ptp_log.h"
 
 
 
@@ -92,6 +93,7 @@ SYS_CMD_Tasks();
 
     /* Maintain the application's state machine. */
         /* Call Application task APP. */
+    ptp_log_flush();
     APP_Tasks();
 
 
