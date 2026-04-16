@@ -1136,12 +1136,10 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
 
     /* Log state transitions once per change so the test script can detect them */
     if (syncStatus != prevSyncStatus) {
-        if (ptp_trace_enabled) {
-            if (syncStatus == COARSE) {
-                PTP_LOG("\r\nPTP COARSE  offset=%d\r\n", (int)offset);
-            } else if (syncStatus == FINE) {
-                PTP_LOG("\r\nPTP FINE    offset=%d\r\n", (int)offset);
-            }
+        if (syncStatus == COARSE) {
+            PTP_LOG("\r\nPTP COARSE  offset=%d\r\n", (int)offset);
+        } else if (syncStatus == FINE) {
+            PTP_LOG("\r\nPTP FINE    offset=%d\r\n", (int)offset);
         }
         prevSyncStatus = syncStatus;
     }

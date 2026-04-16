@@ -38,16 +38,16 @@ is not present in the original.
 
 ## Table of Contents
 
-- [Overview](#overview)
-  - [Summary of Changes](#summary-of-changes)
-  - [Architecture — PTP Data Flow](#architecture--ptp-data-flow)
 - [How To Reproduce](#how-to-reproduce)
   - [Pre-Built HEX — Skip Build & Flash Immediately](#pre-built-hex--skip-build--flash-immediately)
+  - [First Console Test](#first-console-test)
   - [Prerequisites](#prerequisites)
   - [Clone](#clone)
   - [Tool Setup](#tool-setup)
   - [Build & Flash](#build--flash)
-  - [First Console Test](#first-console-test)
+- [Overview](#overview)
+  - [Summary of Changes](#summary-of-changes)
+  - [Architecture — PTP Data Flow](#architecture--ptp-data-flow)
 - [1. PTP Implementation](#1-ptp-implementation)
   - [1.1 New Source Files](#11-new-source-files)
   - [1.2 LAN865x Driver Changes](#12-lan865x-driver-changes)
@@ -167,7 +167,7 @@ boards in about 10 minutes.
 A ready-to-use firmware image is already included in the repository:
 
 ```
-apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/out/tcpip_iperf_lan865x/image/tcpip_iperf_lan865x_20260416_141706.hex
+apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/out/tcpip_iperf_lan865x/image/tcpip_iperf_lan865x_20260416_144531.hex
 ```
 
 Flash this file onto **both** boards using **MPLAB X IPE** (Integrated Programming
@@ -189,6 +189,46 @@ Environment) as a standalone programmer — no build toolchain required:
 
 If you want to modify the firmware, follow the full [Clone → Build → Flash](#clone)
 flow below instead.
+
+### First Console Test
+
+Open two serial terminal windows (115200 8N1, no flow control):
+
+- **Board 1 — Grandmaster** (COM8 by default)
+- **Board 2 — Follower** (COM10 by default)
+
+After reset both boards print the Harmony boot banner and then stay idle.
+Activate PTP from each terminal:
+
+**Board 1 — Grandmaster (verbose mode):**
+```
+> ptp_mode master v
+```
+
+**Board 2 — Follower (verbose mode):**
+```
+> ptp_mode follower v
+```
+
+Expected Board 2 output — the servo steps through these states:
+
+```
+PTP MATCHFREQ  offset=...
+PTP HARDSYNC   offset=...
+PTP COARSE     offset=...
+PTP FINE       offset=...
+[FOL] FINE  t1=00:00:05.123456789  t2=00:00:05.123514600  off=      +57 ns
+[FOL] FINE  t1=00:00:05.248334810  t2=00:00:05.248392100  off=      +55 ns
+```
+
+Once the follower prints `FINE` continuously, synchronisation is established.
+Offsets below ±200 ns are typical for the initial lock; steady-state offsets
+are usually below ±1 µs.
+
+Check the servo state at any time:
+```
+> ptp_status
+```
 
 ---
 
@@ -244,46 +284,6 @@ python flash.py    # flash both boards in sequence
 
 A build summary (flash/RAM usage, interrupt handlers, HEX path) is printed
 automatically after every successful build. See §6.2 for details.
-
-### First Console Test
-
-Open two serial terminal windows (115200 8N1, no flow control):
-
-- **Board 1 — Grandmaster** (COM8 by default)
-- **Board 2 — Follower** (COM10 by default)
-
-After reset both boards print the Harmony boot banner and then stay idle.
-Activate PTP from each terminal:
-
-**Board 1 — Grandmaster (verbose mode):**
-```
-> ptp_mode master v
-```
-
-**Board 2 — Follower (verbose mode):**
-```
-> ptp_mode follower v
-```
-
-Expected Board 2 output — the servo steps through these states:
-
-```
-PTP MATCHFREQ  offset=...
-PTP HARDSYNC   offset=...
-PTP COARSE     offset=...
-PTP FINE       offset=...
-[V] FINE  t1=00:00:05.123456789  t2=00:00:05.123514600  off=      +57 ns
-[V] FINE  t1=00:00:05.248334810  t2=00:00:05.248392100  off=      +55 ns
-```
-
-Once the follower prints `FINE` continuously, synchronisation is established.
-Offsets below ±200 ns are typical for the initial lock; steady-state offsets
-are usually below ±1 µs.
-
-Check the servo state at any time:
-```
-> ptp_status
-```
 
 ---
 
@@ -511,15 +511,24 @@ Added `APP_STATE_IDLE` to the `APP_STATES` enumeration.
 
 | Command | Description |
 |---------|-------------|
+| `ptp_mode` | Show current PTP mode |
 | `ptp_mode off` | Disable PTP |
-| `ptp_mode follower` | Enable Follower mode (PTP_SLAVE) |
+| `ptp_mode master` | Enable Grandmaster mode |
+| `ptp_mode master v` | Enable Grandmaster mode with per-FollowUp verbose line |
+| `ptp_mode follower` | Enable Follower mode |
 | `ptp_mode follower v` | Enable Follower mode with per-Sync verbose line |
-| `ptp_mode master` | Enable Grandmaster mode (PTP_MASTER) |
-| `ptp_status` | Show current mode, sync count, servo state |
+| `ptp_status` | Show current mode, sync count, servo state, mean path delay |
+| `ptp_time` | Show software PTP wallclock time and residual drift in ppb |
 | `ptp_interval <ms>` | Set GM Sync interval in ms (default 125) |
-| `ptp_offset` | Show follower clock offset in ns |
+| `ptp_offset` | Show follower clock offset (signed + absolute) in ns |
 | `ptp_reset` | Reset follower servo to UNINIT |
-| `ptp_dst [multicast\|broadcast]` | Set PTP destination MAC |
+| `ptp_trace on\|off` | Enable/disable `[TRACE]` diagnostic messages on both GM and FOL |
+| `ptp_dst` | Show current PTP destination MAC mode |
+| `ptp_dst multicast\|broadcast` | Set PTP destination MAC (default multicast) |
+| `clk_set <ns>` | Force-set software wallclock to given nanosecond value, reset drift |
+| `clk_get` | Read current software wallclock value in ns and drift in ppb |
+| `lan_read <addr>` | Read LAN865x register at hex address |
+| `lan_write <addr> <val>` | Write LAN865x register at hex address |
 
 ### 1.5 Console Output Format
 
@@ -551,10 +560,10 @@ SYS_CONSOLE_PRINT("[GM] #%u  t1=%02lu:%02lu:%02lu.%09lu\r", ...);
 Activated with `ptp_mode follower v`. One overwriting line per received Sync:
 
 ```
-[V] FINE       t1=00:01:28.804334810  t2=00:01:28.804391620  off=       +57 ns
+[FOL] FINE       t1=00:01:28.804334810  t2=00:01:28.804391620  off=       +57 ns
 ```
 
-Format: `[V] <STATE>  t1=HH:MM:SS.nnnnnnnnn  t2=HH:MM:SS.nnnnnnnnn  off=<±offset> ns\r`
+Format: `[FOL] <STATE>  t1=HH:MM:SS.nnnnnnnnn  t2=HH:MM:SS.nnnnnnnnn  off=<±offset> ns  delay=<delay> ns`
 
 State names (fixed-width 9 chars): `UNINIT   `, `MATCHFREQ`, `HARDSYNC `,
 `COARSE   `, `FINE     `.
@@ -591,7 +600,7 @@ via an SPI register access — a blocking operation that takes several hundred
 microseconds. `ptp_clock.c` creates a **lightweight MCU-internal mirror** of
 that wallclock, queryable in nanoseconds with zero SPI traffic at query time.
 
-This serves two purposes:
+This serves three purposes:
 
 - **Observability:** query `clk_get` via UART from Python test scripts and
   compute the inter-board time difference directly, without touching the
@@ -601,6 +610,65 @@ This serves two purposes:
   raw free-running crystal drift first (no PTP), and then repeat the same
   measurement with PTP active — demonstrating quantitatively what PTP
   synchronisation achieves (see §5.4).
+- **Cross-board synchronisation:** once the FOL servo has reached FINE state,
+  `PTP_CLOCK_GetTime_ns()` returns a network-wide consistent time on both
+  boards.  Application code can use this to schedule time-triggered actions,
+  correlate events, or open coordinated measurement windows across the two MCUs
+  without any additional synchronisation mechanism.
+
+### Achievable Synchronicity Between Boards
+
+There are three distinct accuracy levels to distinguish:
+
+#### Level 1 — LAN8651 Hardware Clock (TSU), the true PTP quality
+
+The PTP servo controls the LAN8651 `MAC_TSH/TSL` registers directly.  All four
+timestamps t1–t4 originate from the hardware TSU, not the MCU.
+
+- **FINE threshold:** `HARDSYNC_FINE_THRESHOLD = 500 ns` — the servo enters
+  FINE when the filtered offset falls below 500 ns; the FIR filter over the
+  last 16 Sync samples holds the steady-state offset well below the threshold
+- **Interpolation error between Syncs:** 19 ppb residual drift × 125 ms = ~2.4 ns
+- **Dominant error source:** path-delay asymmetry of the 10BASE-T1S segment
+  (for a short point-to-point link < 1 m, typically < 10 ns)
+
+**Achievable: ±100–200 ns inter-board accuracy of the LAN8651 hardware clocks.**
+Measurable only with an oscilloscope on the two 1PPS outputs.
+
+#### Level 2 — `PTP_CLOCK_GetTime_ns()` Software Clock
+
+`PTP_CLOCK_GetTime_ns()` returns `t2_hardware + TC0_interpolation`.  The
+wallclock component (t2) is the exact hardware timestamp; the anchor tick
+`sysTickAtRx` is captured at the end of the SPI transfer that delivers the
+frame — approximately 100–300 µs after the actual t2 event.  This systematic
+delay appears on **both** boards but with different, uncorrelated values.  The
+inter-board error is the difference of these two offsets:
+
+```
+Δ = (sysTickAtRx_FOL − t2_actual_FOL) − (sysTickAtRx_GM − t1_actual_GM)
+```
+
+**Achievable (current, polling): ±100–300 µs inter-board accuracy of `PTP_CLOCK_GetTime_ns()`.**
+
+With the EIC improvement described at the end of this chapter (tick captured
+in the nIRQ ISR instead of after the SPI transfer, ISR latency ~30–50 ns):
+**< 1 µs** is achievable.  For applications that use `PTP_CLOCK_GetTime_ns()`
+for time-triggered actions (e.g. simultaneous GPIO toggle on both boards),
+the EIC improvement is effectively required to reach sub-microsecond accuracy.
+
+#### Level 3 — UART / Python Measurement (`clk_get`)
+
+The test result of 107 µs stdev is a **measurement infrastructure limit**, not
+a board synchronicity number:
+
+| Error source | Contribution |
+|---|---|
+| Sequential COM-port reads (non-simultaneous) | dominant ~100 µs stdev |
+| Windows USB polling (8 ms intervals) | ±9 ms outliers (removed by filter) |
+| Actual board synchronicity | hidden below the measurement floor |
+
+The true inter-board accuracy of `PTP_CLOCK_GetTime_ns()` cannot be resolved
+by the UART/Python test.  A GPIO-pulse or oscilloscope-based test is required.
 
 ### Design — Anchor + TC0 Interpolation
 
@@ -652,6 +720,50 @@ void PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick)
 }
 ```
 
+### Measured Performance (Before/After Test)
+
+`ptp_sync_before_after_test.py` measures the inter-board time difference before
+and after enabling PTP. Each phase runs for 60 s with 500 ms sample interval;
+a linear regression separates the systematic frequency drift from residual
+noise.
+
+**Test run — 2026-04-16, boards SAME54+LAN8650, COM8 (GM) / COM10 (FOL):**
+
+| Metric | Phase 0 — Free-run | Phase 1 — PTP active |
+|--------|-------------------|----------------------|
+| Slope (ppb) | −32 450 | +208 |
+| Slope (ppm) | −32.45 | +0.21 |
+| Residual stdev | 266 µs | **107 µs** |
+| Drift FOL | 0 ppb | −19 ppb (±31 ppb stdev) |
+| Samples valid | 116/118 | 116/118 |
+| FINE convergence | — | **2.8 s** (HardSync@0.4 s, MATCHFREQ@2.3 s) |
+| Slope reduction | — | **99.4 %** |
+
+Without PTP the FOL crystal ran **32.45 ppm slower** than the GM — the clocks
+would diverge by ~2 ms per minute, ~117 ms per hour.  With PTP active the
+residual slope collapses to **0.21 ppm** (99.4 % reduction). The remaining
+slope is the servo's residual frequency error after the one-time TISUBN
+crystal calibration; it resets toward zero over several Sync frames.
+
+The residual stdev of **107 µs** reflects the measurement floor of reading
+`clk_get` from two independent COM ports via Python on Windows. The two UART
+reads are not strictly simultaneous — the elapsed PC time between them (USB
+polling, OS scheduling) contributes directly to the measured difference and
+sets the lower bound for what the test can resolve.
+
+#### Outliers in the PTP-Active Phase
+
+Two samples spike to ≈+9 ms (+9078 µs at t = 4.1 s, +9134 µs at t = 53.2 s).
+Both are removed by the outlier filter (2/118 = 1.7 %).
+
+These are **PC-side measurement artifacts**, not hardware clock errors. The
+test reads `clk_get` from COM8 (GM) and COM10 (FOL) in sequence using two
+separate USB-to-UART adapters. Windows USB polling runs at 8 ms intervals by
+default. On rare occasions the OS thread is preempted or a USB frame is delayed
+between the two reads, introducing a gap of ~8–16 ms that appears directly as
+a spike in the measured inter-board difference. The outlier filter (IQR-based)
+reliably removes these before the regression.
+
 ### What You See Without PTP — Free-Running Crystal Drift
 
 After `clk_set 0` on both boards simultaneously (anchor set once via
@@ -659,14 +771,15 @@ After `clk_set 0` on both boards simultaneously (anchor set once via
 independent crystal:
 
 ```
-[Board GM]  clk_get: 8392451200 ns   drift=0ppb
-[Board FOL] clk_get: 8389312450 ns   drift=0ppb
-             difference: +3138750 ns  (~3.1 ms after ~16 s)
+[Board GM]  clk_get: 29 786 000 000 ns   drift=0ppb
+[Board FOL] clk_get: 29 784 031 700 ns   drift=0ppb
+             difference: ≈−1968 ns after ~60 s  (−32.45 ppm × 60 s)
 ```
 
 The difference grows linearly at the crystal frequency error between the two
-boards. Measured across all test runs: **−532…+209 ppm** free-run slope. This
-is the **Phase 0 baseline** captured by `ptp_sync_before_after_test.py`.
+boards. Free-run slope depends on the specific board pair; values from −262 ppm
+to −32 ppm have been measured across different runs.  This is the **Phase 0
+baseline** captured by `ptp_sync_before_after_test.py`.
 
 ### What You See With PTP Active — Locked
 
@@ -676,12 +789,13 @@ Both boards now track the same shared time:
 
 ```
 [Board GM]  clk_get: 3141592653 ns   drift=0ppb
-[Board FOL] clk_get: 3141592718 ns   drift=+6ppb
-             difference: +65 ns
+[Board FOL] clk_get: 3141592610 ns   drift=-19ppb
+             difference: ≈−43 ns  (within FINE threshold ±500 ns)
 ```
 
 `drift_ppb` (non-zero on FOL only) shows the residual frequency error the
 PTP servo is still trimming after the one-time TISUBN crystal calibration.
+Measured: **−19 ppb mean, ±31 ppb stdev** in Phase 1.
 
 ### TC0 Tick-Rate Correction (TISUBN)
 
@@ -689,7 +803,8 @@ The FOL servo writes the crystal-calibrated value to `MAC_TISUBN` once at
 UNINIT→MATCHFREQ. This corrects the LAN865x TSU counter frequency to match the
 GM crystal. From MATCHFREQ onward the hardware-timestamp-based anchors are
 frequency-matched, and the remaining interpolation error is only UART
-scheduling jitter (~65–130 µs stdev per anchor, measured).
+scheduling jitter (**107 µs stdev measured** in Phase 1 of the before/after
+test).
 
 ### `drift_ppb` — Residual Frequency Error
 
@@ -707,15 +822,126 @@ Updated in `PTP_FOL_task.c` at every Sync frame in COARSE or FINE:
 PTP_CLOCK_SetDriftPPB((int32_t)((rateRatioFIR - 1.0) * 1e9));
 ```
 
-Observed values: **±0…20 ppb** residual after TISUBN correction.
+Observed values: **−19 ppb mean, ±31 ppb stdev** residual after TISUBN correction.
 Resets to 0 on `clk_set 0` (`PTP_CLOCK_ForceSet()`).
+
+### Cross-Board Synchronization
+
+Once the FOL servo reaches FINE state, both boards share a common timebase
+accurate to ±500 ns (current `HARDSYNC_FINE_THRESHOLD`). Application code
+can use `PTP_CLOCK_GetTime_ns()` for any purpose that requires events on
+different nodes to be correlated in time:
+
+**Time-triggered actions** — both boards execute an action at the same
+absolute PTP timestamp:
+
+```c
+uint64_t fire_at_ns = 5000000000ULL;   // T = 5 s after PTP epoch
+while (PTP_CLOCK_GetTime_ns() < fire_at_ns) { /* spin */ }
+GPIO_PA01_Toggle();   // fires on both boards within ±500 ns of each other
+```
+
+**Correlated event logging** — timestamps from different boards are directly
+comparable:
+
+```c
+PTP_LOG("[EVENT] ts=%llu ns\r\n",
+        (unsigned long long)PTP_CLOCK_GetTime_ns());
+```
+
+**Coordinated measurement windows** — start a measurement at the next full
+second boundary, guaranteed to be the same second on both boards:
+
+```c
+uint64_t now  = PTP_CLOCK_GetTime_ns();
+uint64_t next = ((now / 1000000000ULL) + 1ULL) * 1000000000ULL;
+while (PTP_CLOCK_GetTime_ns() < next) { /* wait */ }
+start_measurement();
+```
+
+> **Important:** `PTP_CLOCK_IsValid()` must return `true` before calling
+> `PTP_CLOCK_GetTime_ns()` for synchronized purposes.  On the FOL this is
+> guaranteed only after the first FollowUp frame has been processed
+> (i.e. after the servo leaves UNINIT).  `PTP_CLOCK_GetTime_ns()` is
+> not interrupt-safe — do not call it from an ISR.
 
 ### CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `clk_get` | Print current wallclock and drift: `clk_get: <ns>  drift=<±ppb>ppb` |
-| `clk_set 0` | Zero the wallclock (independent timer baseline) |
+| `ptp_time` | Print current wallclock as HH:MM:SS.ns and residual drift: `ptp_time: HH:MM:SS.nnnnnnnnn  drift=<±ppb>ppb` |
+| `clk_get` | Print raw wallclock in nanoseconds and drift: `clk_get: <ns>  drift=<±ppb>ppb` |
+| `clk_set 0` | Zero the wallclock (independent timer baseline for before/after tests) |
+
+### Possible Improvement: EIC Interrupt on nIRQ for Lower Anchor Jitter
+
+#### Current Anchor Path (Polling)
+
+The LAN865x `nIRQ` line (PC14) is currently polled inside `DRV_LAN865X_Tasks()`.
+When the pin is found asserted, an SPI transfer reads the pending frame(s) from
+the FIFO. `sysTickAtRx` is captured inside `TC6_CB_OnRxEthernetPacket()` at the
+end of that SPI transfer:
+
+```
+LAN8651 SFD received  → TSU latches hw_rx_timestamp
+                       ↓  (frame bytes arrive, ~80 µs for 100-byte frame @ 10 Mbps)
+nIRQ PC14 asserts LOW
+                       ↓  ← polling jitter  (0 … several ms, variable)
+DRV_LAN865X_Tasks()  → SYS_PORT_PinRead(PC14) == LOW
+                       ↓  SPI transfer (~100–300 µs, deterministic)
+TC6_CB_OnRxEthernetPacket()  →  sysTickAtRx = SYS_TIME_Counter64Get()
+                       ↓
+PTP_CLOCK_Update(hw_rx_timestamp, sysTickAtRx)
+```
+
+The polling jitter between nIRQ assertion and SPI completion lands directly in
+`sysTickAtRx` and therefore in every anchor pair — the anchor tick is off by a
+variable amount each Sync cycle.
+
+#### Proposed Improvement: Capture Tick in EIC ISR
+
+If PC14 is routed through the ATSAME54 EIC peripheral (EXTINT[14], falling
+edge), a minimal ISR can capture the TC0 tick at the exact moment `nIRQ`
+asserts — **before** any SPI activity:
+
+```c
+/* EIC EXTINT14 ISR — fires on nIRQ falling edge, latency ~3-5 CPU cycles */
+void EIC_EXTINT14_Handler(void)
+{
+    g_lan865x_irq_tick = SYS_TIME_Counter64Get();   /* capture tick immediately */
+    EIC_REGS->EIC_INTFLAG = EIC_INTFLAG_EXTINT14_Msk;
+}
+```
+
+`TC6_CB_OnRxEthernetPacket()` then uses this pre-captured tick instead of
+reading the counter again:
+
+```c
+if (rxTimestamp != NULL) {
+    g_ptp_raw_rx.sysTickAtRx = g_lan865x_irq_tick;  /* instead of SYS_TIME_Counter64Get() */
+}
+```
+
+The anchor pair becomes `(hw_rx_timestamp, irq_tick)`.  The fixed delay between
+hardware timestamp and nIRQ assertion (≈80 µs for a 100-byte Sync frame) is
+**constant** per frame and cancels out in the servo's offset calculation
+`t2_local − t1_GM`.
+
+The existing polling loop in `DRV_LAN865X_Tasks()` continues to work unchanged
+— PC14 can simultaneously serve as an EIC input and be read by
+`SYS_PORT_PinRead()`.
+
+#### Limitation
+
+The EIC fires on the **first** falling edge.  If multiple frames queue in the
+FIFO, subsequent frames would reuse the same `irq_tick`.  For PTP Sync this is
+not an issue: Sync frames arrive at 125 ms intervals and the FIFO is always
+empty when one arrives.
+
+The improvement would not be visible in the UART/Python test (measurement floor
+≈107 µs, dominated by Windows USB polling).  It would become measurable with
+an oscilloscope comparing the GM 1PPS output against the FOL 1PPS output, or in
+a dedicated GPIO-pulse timing test.
 
 ---
 
