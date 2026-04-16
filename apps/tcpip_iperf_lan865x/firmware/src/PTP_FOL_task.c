@@ -937,8 +937,10 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
             ptp_sync_sequenceId = (ptp_sync_sequenceId + 1) % (int)UINT16_MAX;
             syncReceived = 0;
         } else {
-            PTP_LOG("FollowUp seqId mismatch. Is: %u - %d\r\n",
-                    (unsigned int)seqId, (int)ptp_sync_sequenceId);
+            if (ptp_trace_enabled) {
+                PTP_LOG("FollowUp seqId mismatch. Is: %u - %d\r\n",
+                        (unsigned int)seqId, (int)ptp_sync_sequenceId);
+            }
             ptp_sync_sequenceId = -1;
             memset(&TS_SYNC.receipt,      0, sizeof(ptpTimeStamp_t));
             memset(&TS_SYNC.receipt_prev, 0, sizeof(ptpTimeStamp_t));
@@ -1134,10 +1136,12 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
 
     /* Log state transitions once per change so the test script can detect them */
     if (syncStatus != prevSyncStatus) {
-        if (syncStatus == COARSE) {
-            PTP_LOG("\r\nPTP COARSE  offset=%d\r\n", (int)offset);
-        } else if (syncStatus == FINE) {
-            PTP_LOG("\r\nPTP FINE    offset=%d\r\n", (int)offset);
+        if (ptp_trace_enabled) {
+            if (syncStatus == COARSE) {
+                PTP_LOG("\r\nPTP COARSE  offset=%d\r\n", (int)offset);
+            } else if (syncStatus == FINE) {
+                PTP_LOG("\r\nPTP FINE    offset=%d\r\n", (int)offset);
+            }
         }
         prevSyncStatus = syncStatus;
     }
@@ -1156,7 +1160,7 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
         uint32_t t2_s   = t2_sec % 60u;
         static const char *stateNames[] = {"UNINIT   ", "MATCHFREQ", "HARDSYNC ", "COARSE   ", "FINE     "};
         uint8_t si = (syncStatus < 5u) ? syncStatus : 4u;
-        PTP_LOG("[V] %s  t1=%02lu:%02lu:%02lu.%09lu  t2=%02lu:%02lu:%02lu.%09lu  off=%+10d ns  delay=%lld ns\r",
+        PTP_LOG("[FOL] %s  t1=%02lu:%02lu:%02lu.%09lu  t2=%02lu:%02lu:%02lu.%09lu  off=%+10d ns  delay=%lld ns\r\n",
                 stateNames[si],
                 (unsigned long)t1_h, (unsigned long)t1_m, (unsigned long)t1_s, (unsigned long)t1_ns,
                 (unsigned long)t2_h, (unsigned long)t2_m, (unsigned long)t2_s, (unsigned long)t2_ns,

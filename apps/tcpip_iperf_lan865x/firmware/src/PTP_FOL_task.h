@@ -102,7 +102,7 @@ Adapted from noIP-SAM-E54-Curiosity-PTP-Follower/ptp_task.h for Harmony TCP/IP b
 #define HARDSYNC_RESET_THRESHOLD    0x3FFFFFFFu
 #define HARDSYNC_THRESHOLD          0xFFFFFF
 #define HARDSYNC_COARSE_THRESHOLD   300
-#define HARDSYNC_FINE_THRESHOLD     150
+#define HARDSYNC_FINE_THRESHOLD     500
 
 typedef enum
 {

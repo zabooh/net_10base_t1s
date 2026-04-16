@@ -668,7 +668,7 @@ void PTP_GM_Service(void)
                 uint32_t h = sec / 3600u;
                 uint32_t m = (sec % 3600u) / 60u;
                 uint32_t s = sec % 60u;
-                PTP_LOG("[GM] #%u  t1=%02lu:%02lu:%02lu.%09lu\r",
+                PTP_LOG("[GM] #%u  t1=%02lu:%02lu:%02lu.%09lu\r\n",
                                   (unsigned)gm_seq_id,
                                   (unsigned long)h, (unsigned long)m, (unsigned long)s,
                                   (unsigned long)nsec);
@@ -1068,9 +1068,9 @@ void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
      * Sync frame) t4 would be zero — a Delay_Resp with t4=0 would produce
      * a wildly invalid delay on the follower side.  Skip this cycle. */
     if (rxTimestamp == 0u) {
-        PTP_LOG("[PTP-GM] Delay_Req seq=%u dropped: no HW RX timestamp\r\n",
-                          (unsigned)htons(hdr->sequenceID));
         if (gm_trace_enabled) {
+            PTP_LOG("[PTP-GM] Delay_Req seq=%u dropped: no HW RX timestamp\r\n",
+                              (unsigned)htons(hdr->sequenceID));
             PTP_LOG("[TRACE] GM_DELAY_REQ_NO_TIMESTAMP seq=%u\r\n",
                               (unsigned)htons(hdr->sequenceID));
         }
