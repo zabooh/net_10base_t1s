@@ -42,6 +42,7 @@ is not present in the original.
   - [Summary of Changes](#summary-of-changes)
   - [Architecture — PTP Data Flow](#architecture--ptp-data-flow)
 - [How To Reproduce](#how-to-reproduce)
+  - [Pre-Built HEX — Skip Build & Flash Immediately](#pre-built-hex--skip-build--flash-immediately)
   - [Prerequisites](#prerequisites)
   - [Clone](#clone)
   - [Tool Setup](#tool-setup)
@@ -160,6 +161,36 @@ TC6_CB_OnRxEthernetPacket() → TCP/IP stack → pktEth0Handler() [app.c]
 
 The following steps take you from a fresh `git clone` to live PTP output on two
 boards in about 10 minutes.
+
+### Pre-Built HEX — Skip Build & Flash Immediately
+
+A ready-to-use firmware image is already included in the repository:
+
+```
+apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/out/tcpip_iperf_lan865x/image/tcpip_iperf_lan865x_20260416_141706.hex
+```
+
+Flash this file onto **both** boards using **MPLAB X IPE** (Integrated Programming
+Environment) as a standalone programmer — no build toolchain required:
+
+1. Open **MPLAB X IPE** (Start → Microchip → MPLAB X IPE vX.XX).
+2. **Device:** select `ATSAME54P20A`.
+3. **Tool:** select the EDBG/debugger of the first board from the drop-down
+   (connect the board via the USB debugger port beforehand).
+4. **Hex File:** click *Browse* and navigate to the `.hex` path above.
+5. Click **Connect**, then **Program**.  
+   IPE erases, programs, and verifies in one step. Wait for *"Programming/Verify
+   complete"*.
+6. Repeat steps 3–5 for the second board (select its EDBG from the Tool drop-down).
+
+> Both boards run identical firmware. The role (Grandmaster / Follower) is
+> assigned at runtime via the `ptp_mode master` / `ptp_mode follower` CLI
+> command — no separate images are needed.
+
+If you want to modify the firmware, follow the full [Clone → Build → Flash](#clone)
+flow below instead.
+
+---
 
 ### Prerequisites
 
