@@ -168,7 +168,7 @@ static uint32_t gm_init_vals[GM_INIT_WRITE_COUNT] = {
     0x0000u,
     30u,
     (GM_PTP_ETHERTYPE >> 8u) & 0xFFu,
-    (((uint32_t)(GM_PTP_ETHERTYPE & 0xFFu)) << 8u) | 0x10u,
+    (((uint32_t)(GM_PTP_ETHERTYPE & 0xFFu)) << 8u) | 0x00u,  /* tsmt=0x00: transportSpecific=0, messageType=Sync — must match build_sync() */
     0x00u,
     0x00u,
     0x00000000u, /* MAC_TISUBN: filled dynamically in PTP_GM_Init() */
@@ -273,6 +273,7 @@ static void build_sync(void)
     msg->header.tsmt             = 0x00u;          /* transportSpecific=0, messageType=Sync */
     msg->header.version          = 0x02u;          /* PTPv2 */
     msg->header.messageLength    = htons(0x002Cu); /* 44 bytes */
+    msg->header.flags[0]         = 0x02u;          /* twoStepFlag — IEEE 1588 §7.3.9 */
     fill_clock_identity((uint8_t *)msg->header.sourcePortIdentity.clockIdentity);
     msg->header.sourcePortIdentity.portNumber = htons(1u);
     msg->header.sequenceID       = htons(gm_seq_id);
@@ -284,7 +285,7 @@ static void build_sync(void)
 
 #if (PTP_GM_SYNC_BUILD_LEVEL >= 3)
     /* Legacy profile from earlier runs. */
-    msg->header.tsmt               = 0x10u;
+    msg->header.tsmt               = 0x00u;  /* transportSpecific=0, messageType=Sync (was 0x10 — wrong) */
     msg->header.flags[0]           = 0x02u;
     msg->header.flags[1]           = 0x08u;
     msg->header.logMessageInterval = 0xFDu;
@@ -298,7 +299,7 @@ static void build_followup(uint32_t sec, uint32_t nsec)
     build_eth_header(gm_followup_buf);
 
     followUpMsg_t *msg = (followUpMsg_t *)(&gm_followup_buf[14]);
-    msg->header.tsmt             = 0x18u;          /* messageType = Follow_Up */
+    msg->header.tsmt             = 0x08u;          /* transportSpecific=0, messageType=FollowUp(8) — IEEE 1588 §13.6 */
     msg->header.version          = 0x02u;
     msg->header.messageLength    = htons(0x004Cu); /* 76 bytes */
     msg->header.flags[1]         = 0x08u;
@@ -420,7 +421,7 @@ void PTP_GM_Service(void)
                 PTP_LOG("  TXMCTL  0x%08lX  TXMPATH 0x%08lX\r\n",
                     (unsigned long)0x00000000uL, (unsigned long)0x00000088uL);
                 PTP_LOG("  TXMPATL 0x%08lX  TXMMSKH 0x%08lX\r\n",
-                    (unsigned long)0x0000F710uL, (unsigned long)0x00000000uL);
+                    (unsigned long)0x0000F700uL, (unsigned long)0x00000000uL);
                 PTP_LOG("  TXMMSKL 0x%08lX  TXMLOC  0x%08lX\r\n",
                     (unsigned long)0x00000000uL, (unsigned long)0x0000001EuL);
             }

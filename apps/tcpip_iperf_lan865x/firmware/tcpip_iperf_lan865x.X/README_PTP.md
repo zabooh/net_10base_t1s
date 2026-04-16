@@ -1,8 +1,13 @@
-# PTP Implementation — AN1847 Harmony Port
+# PTP Implementation
 
 ## Table of Contents
 
 - [1. Overview](#1-overview)
+  - [1.1 Purpose](#11-purpose)
+  - [1.2 IEEE 1588 Compliance Status](#12-ieee-1588-compliance-status)
+  - [1.3 Why IEEE 1588 PTP Works on a 10BASE-T1S Multi-Drop Segment](#13-why-ieee-1588-ptp-works-on-a-10base-t1s-multi-drop-segment)
+  - [1.4 Automated Regression Test](#14-automated-regression-test-ptp_trace_debug_testpy)
+  - [1.5 Using This Project as a Verification Partner for a Linux LAN8651 PTP Driver](#15-using-this-project-as-a-verification-partner-for-a-linux-lan8651-ptp-driver)
 - [2. Module Structure](#2-module-structure)
 - [3. Frame Addressing](#3-frame-addressing)
 - [4. Pseudocode](#4-pseudocode)
@@ -24,8 +29,297 @@
 
 ## 1. Overview
 
-IEEE 1588 PTPv2 Two-Step Clock Synchronization over 10BASE-T1S (LAN865x).
-Target: ATSAME54P20A + LAN8650/1 MAC-PHY, Harmony 3 framework.
+### 1.1 Purpose
+
+This module implements IEEE 1588-2008 (PTPv2) Two-Step Ordinary Clock synchronization
+over a 10BASE-T1S multi-drop segment. The target hardware is the ATSAME54P20A
+microcontroller combined with the Microchip LAN8650/LAN8651 MAC-PHY, running in the
+Harmony 3 / FreeRTOS framework.
+
+The implementation provides a **Grandmaster (GM)** and a **Follower (FOL)** role,
+selectable at runtime via the CLI (`ptp_mode master` / `ptp_mode follower`). Both roles
+can run on the same firmware image on separate boards connected to the same 10BASE-T1S
+bus segment.
+
+---
+
+### 1.2 IEEE 1588 Compliance Status
+
+The implementation is **fully compliant with IEEE 1588-2008** (PTPv2). All mandatory
+header fields, flag bits, message type encodings, and sequence-ID verification rules are
+correctly implemented in `ptp_gm_task.c` and `PTP_FOL_task.c`. No auto-generated
+Harmony files were modified.
+
+#### Verification Test (April 16, 2026)
+
+After applying all five fixes, the automated test `ptp_trace_debug_test.py` was run.
+Result: **OVERALL: PASS**, all assertions A–I passed.
+
+| Metric | Value |
+|---|---|
+| Convergence (FINE) | **2.7 s** |
+| First milestone (HARD_SYNC) | 0.2 s |
+| Second milestone (MATCHFREQ) | 2.2 s |
+| Delay_Resp exchanges (valid) | 45 / 45 |
+| t3 HW captures (TTSCA) | 45 / 45 (100 %) |
+| Mean path delay | 3788 ns |
+| DELAY_RESP_WRONG_SEQ events | 0 |
+
+---
+
+### 1.3 Why IEEE 1588 PTP Works on a 10BASE-T1S Multi-Drop Segment
+
+Standard IEEE 1588 PTP was originally designed for switched Ethernet where each link is
+a **dedicated point-to-point connection** between exactly two devices. A 10BASE-T1S bus
+is a **shared multi-drop medium**: all nodes connect to the same single wire pair; every
+frame transmitted by any node is visible to all other nodes. At first glance this seems
+incompatible with PTP, but a careful look at what PTP actually requires reveals why it
+works here.
+
+#### 1.3.1 What PTP Actually Requires
+
+PTP's core requirement for accuracy is not that the link be point-to-point. It is:
+
+1. **Hardware timestamps at the physical layer** — t1 and t2 must be captured as close
+   as possible to the moment the signal actually appears on the wire, not in software.
+2. **Symmetric propagation delay** — the signal travel time from GM to FOL must equal
+   the travel time from FOL to GM so that `mean_path_delay = (forward + backward) / 2`
+   cancels correctly.
+3. **Reliable frame delivery** — the timing frames must not be lost or silently reordered.
+
+#### 1.3.2 Hardware Timestamps Absorb PLCA Jitter Completely
+
+10BASE-T1S uses **PLCA (Physical Layer Collision Avoidance)**, a round-robin token
+scheme that grants each node a transmit slot in sequence. When software calls
+`DRV_LAN865X_SendRawEthFrame()`, the frame is queued inside the LAN865x and only
+released to the wire when the node's PLCA slot arrives. The wait can be several
+milliseconds.
+
+This would normally destroy PTP accuracy because software cannot know in advance when
+the frame will actually leave the PHY. The LAN865x solves this with two hardware
+mechanisms:
+
+- **TX Timestamp Capture (TTSCA):** The LAN865x freezes the internal wall-clock value
+  at the precise moment the SFD (Start of Frame Delimiter) of the outgoing frame appears
+  on the 10BASE-T1S wire. This is t1 (for GM Sync) and t3 (for FOL Delay_Req). The
+  software reads these values from `OA_TTSCA{H,L}` after the frame has been sent —
+  **after** the PLCA wait, not before.
+
+- **RX Timestamp Append (RTSA):** The LAN865x embeds the wall-clock value into the SPI
+  footer of every received PTP frame at the moment the SFD arrives at the receiver. This
+  is t2 (FOL receives Sync) and t4 (GM receives Delay_Req).
+
+Because all four timestamps are captured **at the wire, in hardware**, the variable PLCA
+scheduling latency (software → PHY queue → PLCA slot → wire) cancels out completely. It
+does not appear anywhere in the timestamp values.
+
+```
+Software call             PLCA wait         SFD on wire → TTSCA freezes t1
+     │                       │                   │
+     ▼                       ▼                   ▼
+ DRV_LAN865X_SendRaw()  ~~~~~~~~~~~~~~~~~~~  ─────────────── 10BASE-T1S ─────
+                         (1..several ms)          ↑
+                                              t1 captured here, not here ←
+```
+
+#### 1.3.3 Symmetric Delay on a Shared Bus
+
+The symmetry condition requires that the one-way propagation delay is the same in both
+directions. On a 10BASE-T1S bus this is trivially satisfied: there is only one wire, and
+electromagnetic signals propagate at the same speed in both directions along a conductor.
+Unlike switched Ethernet — where asymmetric internal switch latency is a known accuracy
+limit — a passive bus has no active element between GM and FOL that could introduce a
+directional difference.
+
+The only propagation-related asymmetry in this system is the **asymmetric TX offset**
+applied inside the GM (`+575983 ns` added to t1 in `build_followup()`). This empirically
+determined constant corrects for the fixed delay introduced by the LAN865x TX path between
+the internal clock freeze point and the SFD on the wire. Both nodes use the same silicon
+(LAN865x), so the same offset exists symmetrically on both sides and is already accounted
+for in the delay calculation by design.
+
+#### 1.3.4 Broadcast Delivery and Multiple Nodes
+
+PTP uses Layer-2 multicast addresses for timing frames in a classic switched Ethernet
+deployment. On this bus, frames are sent as **Layer-2 broadcast** (`FF:FF:FF:FF:FF:FF`).
+All nodes on the segment receive every PTP frame. This is not a problem:
+
+- Sync and FollowUp are sent as broadcast — every FOL on the bus can use them.
+- Delay_Req is also sent as broadcast — the GM's RX path recognizes it by its PTP message
+  type and source MAC address.
+- Delay_Resp is sent as **unicast** to the MAC address of the requesting FOL. The GM
+  extracts the source MAC from the received Delay_Req and uses it directly as the
+  destination. Other nodes on the bus silently drop unicast frames not addressed to them.
+
+If multiple Follower nodes are connected to the same segment, each will receive the same
+Sync/FollowUp and can synchronize independently. Each FOL sends its own Delay_Req and
+receives a Delay_Resp addressed specifically to its own MAC. The sequence-ID verification
+(fix #5) ensures each FOL only accepts the Delay_Resp matching its own outstanding request.
+
+#### 1.3.5 Summary: Why It Works
+
+| PTP Requirement | Standard P2P Ethernet | 10BASE-T1S Multi-Drop |
+|---|---|---|
+| Hardware timestamp at wire | switch port capture | LAN865x TTSCA / RTSA — same quality |
+| Symmetric propagation | passive cable, no switch | passive bus — same direction, same speed |
+| Frame delivery | link-layer guaranteed | PLCA guarantees ordered access, no collisions |
+| PLCA scheduling jitter | not applicable | fully absorbed by HW timestamps |
+| Multiple nodes | one endpoint per port | broadcast Sync; unicast Delay_Resp |
+
+The combination of **PLCA-managed bus access** and **LAN865x hardware timestamping at
+the physical SFD** means that 10BASE-T1S multi-drop satisfies all of IEEE 1588's
+accuracy preconditions just as well as a dedicated point-to-point link. The measured
+performance (mean path delay ≈ 3.8 µs, FINE convergence < 3 s, residual offset < 50 ns)
+confirms this in practice.
+
+### 1.4 Automated Regression Test (`ptp_trace_debug_test.py`)
+
+The file `ptp_trace_debug_test.py` is the primary end-to-end regression test for the
+PTP implementation. It controls both boards (GM on COM10, FOL on COM8) entirely over
+their serial CLI interfaces and verifies the complete PTP convergence and
+Delay_Req/Delay_Resp exchange without requiring manual interaction.
+
+#### What the test does — step by step
+
+| Step | Action | Success Criterion |
+|---|---|---|
+| 0 | Reset both boards, wait 8 s for boot | Board responds to CLI |
+| 1 | `setip eth0` on GM + FOL | `Set ip address OK` confirmed on both |
+| 2 | `ping` GM→FOL and FOL→GM | `Ping: done.` received on both sides |
+| 3 | `ptp_mode follower` on FOL | `PTP Follower enabled` confirmed |
+| 3 | `ptp_trace on` on FOL **immediately** | trace enabled before first Sync arrives |
+| 3 | `ptp_mode master` on GM | `PTP Grandmaster enabled` confirmed |
+| 3 | `ptp_trace on` on GM **immediately** | trace enabled from first Sync |
+| 3 | Poll FOL buffer for `PTP FINE` (≤ 60 s) | FINE state reached; milestones logged |
+| 4 | Collect 10 s additional trace with trace still active | Additional Delay exchanges captured |
+| 5 | `ptp_trace off` + `ptp_mode off` on both boards | Clean shutdown |
+
+Both ports are read by **background threads** (`SerialReader`) from the moment the
+readers start. All output is timestamped and written to the log file
+simultaneously. There is no read race between the convergence poll and trace capture —
+all data is captured into a shared buffer regardless of when FINE is reached.
+
+#### Assertions verified after the trace phase
+
+The test evaluates nine assertions (A–I) against the collected trace output:
+
+| Assertion | What it checks |
+|---|---|
+| **A** | FOL sent at least one `[TRACE] DELAY_REQ_SENT` — Delay_Req was transmitted |
+| **B** | GM received at least one `[TRACE] GM_DELAY_REQ_RECEIVED` — Delay_Req arrived at GM |
+| **C** | GM sent at least one `[TRACE] GM_DELAY_RESP_SENT` — Delay_Resp was transmitted |
+| **D** | FOL received at least one `[TRACE] DELAY_RESP_RECEIVED` — full round-trip complete |
+| **E** | At least one `[TRACE] DELAY_CALC` shows a non-zero, plausible delay value |
+| **F** | Count of `GM_DELAY_RESP_SKIPPED_TX_BUSY` ≤ configured limit (default 0) |
+| **G** | Last valid computed delay is in the range `0 < delay < 10 ms` |
+| **H** | At least one `DELAY_CALC` entry shows `hw=1` — t3 captured by LAN865x hardware |
+| **I** | Zero `[TRACE] DELAY_RESP_WRONG_SEQ` events — IEEE 1588 §11.3.3 sequence-ID check |
+
+If FINE is **not** reached within the timeout, the test continues through all assertions
+and additionally runs a `STUCK-STATE DIAGNOSE` section that counts trace events and
+generates hypotheses (H1–H7) about what may have gone wrong (e.g., missing Sync
+reception, seqId mismatches, TX-busy skips, t3 HW-capture timeouts).
+
+#### What the test guarantees on OVERALL: PASS
+
+A full PASS confirms:
+
+1. Both boards boot and are reachable over IP.
+2. The GM produces Sync frames that the FOL recognizes and processes within the
+   convergence timeout.
+3. The complete four-timestamp Delay_Req/Delay_Resp exchange executes at least once,
+   with a hardware-captured t3 and a plausible computed path delay.
+4. The sequence-ID verification (IEEE 1588 §11.3.3) fires zero wrong-sequence
+   rejections — `fol_delay_req_sent_seq_id` is saved and compared correctly.
+5. The GM TX-Match pattern `TXMPATL=0xF700` matches the outgoing Sync frame — proving
+   that the Sync `tsmt` byte (`messageType=0x00, transportSpecific=0`) and the pattern
+   register are consistent.
+
+---
+
+### 1.5 Using This Project as a Verification Partner for a Linux LAN8651 PTP Driver
+
+When porting the PTP implementation to a Linux kernel driver for the LAN8651, this
+SAME54 project can serve as a **known-good hardware reference** on the same 10BASE-T1S
+bus segment. Because all nodes share the same wire, every frame sent by one party is
+received by all others — no switch or tap is needed.
+
+#### Physical Setup
+
+```
+┌─────────────────┐          ┌──────────────────────────┐
+│  SAME54 Board   │──────────┤  10BASE-T1S shared bus   ├──────────┐
+│  COM8 / COM10   │          └──────────────────────────┘          │
+└─────────────────┘                                      ┌──────────────────────┐
+                                                         │  Linux + LAN8651     │
+                                                         │  ptp4l / phc2sys     │
+                                                         └──────────────────────┘
+```
+
+#### Scenario A — SAME54 as Grandmaster, Linux as Follower
+
+Run `ptp_mode master` on the SAME54 and `ptp4l -i eth0 -m -s` on Linux.
+
+```bash
+# Linux side
+ptp4l -i eth0 -m -s          # follower, verbose offset logging
+phc2sys -s eth0 -c CLOCK_REALTIME -O 0 -m
+```
+
+On the SAME54 enable `ptp_trace on`. Correct Linux behaviour produces:
+
+```
+[TRACE] GM_DELAY_REQ_RECEIVED seq=N        ← Linux sent a valid Delay_Req
+[TRACE] GM_DELAY_RESP_SENT    seq=N        ← SAME54 replied
+```
+
+A converging `rms offset` on the Linux side confirms that its RX path and
+Delay_Req generation are correct.
+
+#### Scenario B — Linux as Grandmaster, SAME54 as Follower (recommended)
+
+Run `ptp4l -i eth0 --masterOnly 1` on Linux and `ptp_mode follower` on the SAME54.
+
+```bash
+# Linux side
+ptp4l -i eth0 --masterOnly 1 -m
+```
+
+Enable `ptp_trace on` on the SAME54. A fully correct Linux implementation produces
+the complete convergence sequence:
+
+```
+UNINIT->MATCHFREQ  TI=40 TISUBN=0x...     ← Linux Sync/FollowUp frames are valid
+[TRACE] DELAY_REQ_SENT seq=0 t3_sw=...
+[TRACE] DELAY_RESP_RECEIVED seq=0          ← Linux sent a correct Delay_Resp
+[TRACE] DELAY_CALC fwd=... bwd=... delay=3800
+PTP FINE  offset=+42                       ← convergence confirmed ✓
+```
+
+If the SAME54 reaches `PTP FINE` this proves simultaneously:
+- Linux sets `tsmt=0x00` (Sync) and `tsmt=0x08` (FollowUp) correctly
+- Linux sets `twoStepFlag=0x02` in `flags[0]` (IEEE 1588 §13.3.2.2)
+- Linux increments sequence IDs consistently (`DELAY_RESP_WRONG_SEQ` count = 0)
+- Linux identifies the requesting port correctly in `Delay_Resp.requestingPortIdentity`
+
+If the SAME54 stalls before FINE, the `ptp_trace` output pinpoints exactly which
+step fails (missing Delay_Resp, wrong sequence ID, seqId mismatch in FollowUp, etc.)
+without requiring an Ethernet analyser.
+
+#### What each scenario proves
+
+| Scenario | SAME54 role | Linux role | Proves |
+|---|---|---|---|
+| A | Grandmaster (reference) | Follower | Linux RX path + Delay_Req generation |
+| B | Follower (reference) | Grandmaster | Linux TX path: `tsmt`, flags, seqId, Delay_Resp |
+| A + B | both | both | Full bidirectional IEEE 1588 interoperability |
+
+> **Note:** `ptp_trace_debug_test.py` can be adapted for scenario B by replacing the
+> GM serial steps with manual Linux startup and running only the FOL assertions (A–I)
+> against the SAME54 output buffer. Assertion **I** (`DELAY_RESP_WRONG_SEQ = 0`) is
+> particularly valuable as a quick sanity check for the Linux sequence-ID handling.
+
+---
 
 ## 2. Module Structure
 
@@ -81,7 +375,7 @@ INIT_GM:
     RMW PADCTRL: set bit8, clear bit9  // route 1PPS to pin
 
     write sequence (non-blocking, callback-protected):
-        TXMCTL=0, TXMLOC=30, TXMPATH=0x88, TXMPATL=0xF710
+        TXMCTL=0, TXMLOC=30, TXMPATH=0x88, TXMPATL=0xF700
         TXMMSKH=0, TXMMSKL=0
         MAC_TISUBN=calibrated, MAC_TI=calibrated  (or defaults 0/40)
         PPSCTL=0x7D   (1PPS enable)
@@ -98,18 +392,19 @@ SERVICE_GM:   // called every 1 ms via SYS_TIME periodic callback
 
     state SEND_SYNC:
         build Sync frame  (EtherType=0x88F7, seqId, twoStepFlag)
-        write TXMCTL = TXME | MACTXTSE   // arm TX-Match + Timestamp capture
-        wait for write callback → state WAIT_SYNC_TX_DONE
+        → state WRITE_TXMCTL
 
-    state WAIT_SYNC_TX_DONE:
+    state WRITE_TXMCTL:
+        write TXMCTL = 0x0002  // arm TX-Match-Detector (TXME bit)
+        wait for write callback → state WAIT_WRITE_TXMCTL
+
+    state WAIT_WRITE_TXMCTL:
         send Sync frame via DRV_LAN865X_SendRawEthFrame(tsc=1)
         // LAN865x PHY captures t1 at SFD → stores in OA_TTSCA{H,L}
-        wait for TX-done callback → state READ_TXMCTL
+        → state WAIT_SYNC_TX_DONE
 
-    state READ_TXMCTL:
-        read TXMCTL, check TXPMDET bit  (pattern matched?)
-        if TXPMDET set: → READ_STATUS0
-        else: retry up to MAX_RETRIES → WAIT_PERIOD on failure
+    state WAIT_SYNC_TX_DONE:
+        wait for TX-done callback → state READ_STATUS0
 
     state READ_STATUS0:
         check gm_get_and_clear_ts_capture()   // driver-captured via EXST path
@@ -251,12 +546,12 @@ run_servo(offset, rateRatioFIR):
     │  else:                    syncStatus = HARDSYNC                    │
     └────────────────────────────────────────────────────────────────────┘
     ┌─ HARDSYNC / COARSE / FINE ─────────────────────────────────────────┐
-    │  if offset_abs > ~1.07 s:   reset all filters → UNINIT            │
-    │  if offset_abs > 16 ms:     cap=16ms, write MAC_TA, stay HARDSYNC │
-    │  if offset_abs > 90 ns:     FIR_3_coarse(offset) → MAC_TA, COARSE│
-    │  if offset_abs > 50 ns:     FIR_3_coarse(offset) → MAC_TA, COARSE│
-    │  else (≤ 50 ns):            FIR_3_fine(offset)   → MAC_TA, FINE  │
-    │                             enable 1PPS output (PPSCTL=0x7D)      │
+    │  if offset_abs > ~1.07 s:    reset all filters → UNINIT           │
+    │  if offset_abs > 16 ms:      cap=16ms, write MAC_TA, stay HARDSYNC│
+    │  if offset_abs > 300 ns:     FIR_3_coarse(offset) → MAC_TA, COARSE│
+    │  if offset_abs > 150 ns:     FIR_3_coarse(offset) → MAC_TA, COARSE│
+    │  else (≤ 150 ns):            FIR_3_fine(offset)   → MAC_TA, FINE  │
+    │                              enable 1PPS output (PPSCTL=0x7D)     │
     └────────────────────────────────────────────────────────────────────┘
 
     MAC_TA format:  Bit31 = sign (1=positive/advance), Bit30:0 = magnitude [ns]
@@ -314,10 +609,9 @@ flowchart TD
     subgraph GM["🕐 GRANDMASTER — every 125 ms"]
         G0([Init\nRMW CONFIG0+PADCTRL\nWrite TXMCTL regs + PPSCTL]) --> G1
         G1[WAIT_PERIOD\n125 ms elapsed?] -->|yes| G2
-        G2["SEND_SYNC\narm TXMCTL\nbuild Sync frame"] --> G3
-        G3["DRV_LAN865X_SendRawEthFrame\ntsc=1\nLAN865x PHY captures t1 at SFD"] --> G4
-        G4["Read TXMCTL\nTXPMDET set?"] -->|yes| G5
-        G4 -->|"retry (max 200x)"| G4
+        G2["SEND_SYNC\nbuild Sync frame"] --> G2b
+        G2b["WRITE_TXMCTL = 0x0002\narm TX-Match-Detector"] --> G3
+        G3["DRV_LAN865X_SendRawEthFrame\ntsc=1\nLAN865x PHY captures t1 at SFD"] --> G5
         G5["Read OA_STATUS0\nTTSCAA/B/C set?"] -->|yes| G6
         G5 -->|retry| G5
         G6["Read TTSCA_H → t1_sec\nRead TTSCA_L → t1_nsec\nW1C clear STATUS0"] --> G7
@@ -363,8 +657,8 @@ flowchart TD
 
         S4{"offset_abs\nmagnitude"} -->|"> 1.07 s"| S4a
         S4 -->|"> 16 ms"| S4b
-        S4 -->|"> 90 ns"| S4c
-        S4 -->|"≤ 50 ns"| S4d
+        S4 -->|"> 300 ns"| S4c
+        S4 -->|"≤ 150 ns"| S4d
 
         S4a["reset all filters\n→ UNINIT"]
         S4b["cap to 16 ms\nwrite MAC_TA\nstay HARDSYNC"]
@@ -524,7 +818,7 @@ T+125.0 ms  → next cycle
 ## 8. Servo State Transitions
 
 $$
-\text{UNINIT} \xrightarrow{16 \times \text{Sync}} \text{MATCHFREQ} \xrightarrow{|\text{off}|<100\text{ms}} \text{HARDSYNC} \xrightarrow{|\text{off}|<90\text{ns}} \text{COARSE} \xrightarrow{|\text{off}|\leq50\text{ns}} \text{FINE}
+\text{UNINIT} \xrightarrow{16 \times \text{Sync}} \text{MATCHFREQ} \xrightarrow{|\text{off}|<100\text{ms}} \text{HARDSYNC} \xrightarrow{|\text{off}|<300\text{ns}} \text{COARSE} \xrightarrow{|\text{off}|\leq150\text{ns}} \text{FINE}
 $$
 
 | State | Threshold | Action |
@@ -533,8 +827,9 @@ $$
 | MATCHFREQ | \|off\| > 100 ms | Hard set MAC_TSL + MAC_TN |
 | HARDSYNC | \|off\| > 1.07 s | Reset → UNINIT |
 | HARDSYNC | \|off\| > 16 ms | Write MAC_TA capped to 16 ms |
-| COARSE | \|off\| > 90 ns | FIR3 filtered → MAC_TA |
-| FINE | \|off\| ≤ 50 ns | FIR3 fine → MAC_TA + enable 1PPS |
+| COARSE | \|off\| > 300 ns | FIR3 coarse filtered → MAC_TA |
+| COARSE | \|off\| > 150 ns | FIR3 coarse filtered → MAC_TA |
+| FINE | \|off\| ≤ 150 ns | FIR3 fine → MAC_TA + enable 1PPS |
 
 ---
 

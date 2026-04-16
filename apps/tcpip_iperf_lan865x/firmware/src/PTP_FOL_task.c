@@ -79,6 +79,7 @@ static uint8_t  fol_delay_req_buf[FOL_DELAY_REQ_BUF_SIZE];
 
 static uint8_t  fol_src_mac[6]           = {0u};
 static uint16_t fol_delay_req_seq_id     = 0u;
+static uint16_t fol_delay_req_sent_seq_id = 0u;   /* seq_id of the currently pending Delay_Req */
 static bool     fol_delay_req_pending    = false;  /* awaiting Delay_Resp */
 static uint32_t fol_delay_req_sent_tick  = 0u;     /* SYS_TIME tick when Delay_Req was sent */
 static volatile bool fol_tx_busy         = false;
@@ -263,7 +264,7 @@ static void fol_ttsca_service(void)
             fol_ttsca_state   = FOL_TTSCA_WRITE_TXMPATL;
             break;
 
-        /* ---- Per-frame: write TXMPATL=0xF701 (Delay_Req pattern — overrides driver's 0xF710 for Sync) ---- */
+        /* ---- Per-frame: write TXMPATL=0xF701 (Delay_Req pattern — overrides GM's 0xF700 for Sync) ---- */
         case FOL_TTSCA_WRITE_TXMPATL:
             fol_ttsca_op_done = false;
             if (TCPIP_MAC_RES_OK != DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMPATL,
@@ -316,8 +317,9 @@ static void fol_ttsca_service(void)
                 PTP_LOG("[TRACE] DELAY_REQ_SENT seq=%u t3_sw=%lld\r\n",
                         (unsigned)fol_delay_req_seq_id, (long long)fol_t3_ns);
             }
-            fol_delay_req_pending   = true;
-            fol_delay_req_sent_tick = SYS_TIME_CounterGet();
+            fol_delay_req_pending     = true;
+            fol_delay_req_sent_tick  = SYS_TIME_CounterGet();
+            fol_delay_req_sent_seq_id = fol_delay_req_seq_id;  /* save before increment — IEEE 1588 §11.3.3 */
             fol_delay_req_seq_id++;
             fol_ttsca_state = FOL_TTSCA_WAIT_TX_CB;
             break;
@@ -733,7 +735,7 @@ static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
     fol_tx_busy       = true;
     fol_ttsca_op_done = false;
     /* Always write TXMPATL=0xF701 callback-confirmed per Delay_Req (driver _InitMemMap
-     * sets TXMPATL=0xF710 for Sync; fire-and-forget is not reliable). Skip the
+     * sets TXMPATL=0xF700 for Sync; fire-and-forget is not reliable). Skip the
      * one-shot CONFIG0 RMW only when it has already run. */
     fol_ttsca_state   = fol_config0_set ? FOL_TTSCA_WRITE_TXMPATL
                                         : FOL_TTSCA_CONFIG0_READ;
@@ -774,6 +776,17 @@ static void processDelayResp(delayRespMsg_t *ptpPkt, uint64_t rxTimestamp)
     if (ptp_trace_enabled) {
         PTP_LOG("[TRACE] DELAY_RESP_RECEIVED seq=%u\r\n",
                 (unsigned)htons(ptpPkt->header.sequenceID));
+    }
+
+    /* Verify sequenceId matches our pending Delay_Req (IEEE 1588 §11.3.3) */
+    if (htons(ptpPkt->header.sequenceID) != fol_delay_req_sent_seq_id) {
+        if (ptp_trace_enabled) {
+            PTP_LOG("[TRACE] DELAY_RESP_WRONG_SEQ got=%u expected=%u\r\n",
+                    (unsigned)htons(ptpPkt->header.sequenceID),
+                    (unsigned)fol_delay_req_sent_seq_id);
+        }
+        PTP_LOG("[FOL] Delay_Resp seq mismatch — ignored\r\n");
+        return;
     }
 
     /* Verify that the Delay_Resp is addressed to us (requestingPortIdentity) */
@@ -845,7 +858,8 @@ static void resetSlaveNode(void)
     fol_mean_path_delay      = 0;
     fol_t3_ns                = 0;
     fol_t4_ns                = 0;
-    fol_delay_req_seq_id     = 0u;
+    fol_delay_req_seq_id      = 0u;
+    fol_delay_req_sent_seq_id = 0u;
 
     /* Reset HW t3 capture state machine */
     fol_t3_hw_valid        = false;
@@ -1216,7 +1230,7 @@ void PTP_FOL_Init(void)
     /* Configure TX-Match base registers for Delay_Req TX timestamp capture (t3).
      * TXMPATL is intentionally NOT written here — it is written callback-confirmed
      * (FOL_TTSCA_WRITE_TXMPATL) before every Delay_Req TX to guarantee 0xF701 is
-     * in effect (driver _InitMemMap sets 0xF710 for Sync; fire-and-forget is unreliable).
+     * in effect (driver _InitMemMap sets 0xF700 for Sync; fire-and-forget is unreliable).
      * TXMCTL is left disarmed here; armed to 0x0002 per-Delay_Req in state machine. */
     DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMCTL,  0x00000000u,         true, NULL, NULL);
     DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMLOC,  30u,                 true, NULL, NULL);

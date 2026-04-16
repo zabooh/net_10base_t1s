@@ -1,9 +1,19 @@
-# tcpip_iperf_lan865x — Firmware Modifications
+# LAN8651 PTP IEEE 1588-2008 (PTPv2) based on AppNote AN1847 
 
 This document describes all manual changes applied on top of the MCC-generated
 Harmony 3 project for the ATSAME54P20A + LAN865x 10BASE-T1S demo.
 The goal is to enable PTP (IEEE 1588) hardware timestamping with sub-microsecond
 synchronisation accuracy over 10BASE-T1S.
+
+### See Also
+
+For the full PTP implementation reference — state machine pseudocode, IEEE 1588-2008
+compliance verification, Mermaid flow diagrams, servo design, register reference,
+and the automated regression test — see:
+
+**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_PTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_PTP.md)**
+
+---
 
 ### Origin
 
@@ -43,9 +53,6 @@ is not present in the original.
   - [1.3 Application Changes](#13-application-changes)
   - [1.4 CLI Commands](#14-cli-commands)
   - [1.5 Console Output Format](#15-console-output-format)
-- [2. Bug Fixes](#2-bug-fixes)
-  - [2.1 TX Timestamp: DELAY\_UNLOCK\_EXT 100 ms → 5 ms](#21-tx-timestamp-delay_unlock_ext-reduced-from-100-ms-to-5-ms)
-  - [2.2 Role-Swap: Crystal Calibration Overwrite](#22-role-swap-crystal-calibration-overwrite)
 - [3. PTP Software Clock](#3-ptp-software-clock--srcptp_clockc--srcptp_clockh)
   - [Purpose](#purpose)
   - [Design — Anchor + TC0 Interpolation](#design--anchor--tc0-interpolation)
@@ -63,6 +70,7 @@ is not present in the original.
   - [5.3 Role-Swap Validation](#53-role-swap-validation--ptp_role_swap_testpy)
   - [5.4 PTP Sync Before/After](#54-ptp-sync-beforeafter--ptp_sync_before_after_testpy)
   - [5.5 PTP Reproducibility](#55-ptp-reproducibility--ptp_reproducibility_testpy)
+  - [5.6 IEEE 1588 Compliance + Convergence Regression](#56-ieee-1588-compliance--convergence-regression--ptp_trace_debug_testpy)
 - [6. Hardware & Build Setup](#6-hardware--build-setup)
   - [6.1 Hardware Configuration](#61-hardware-configuration)
   - [6.2 Build Infrastructure](#62-build-infrastructure)
@@ -105,6 +113,7 @@ is not present in the original.
 | Application integration | `app.c`, `app.h` | PTP services, packet handler, CLI |
 | **Bug fix** — TX timestamp | `drv_lan865x_api.c` | `DELAY_UNLOCK_EXT` 100 ms → 5 ms; fixes missed timestamps |
 | **Bug fix** — role-swap | `ptp_gm_task.c`, `PTP_FOL_task.c/.h` | −3.13 ms stuck offset after GM↔FOL swap |
+| **IEEE 1588 compliance fixes** | `ptp_gm_task.c`, `PTP_FOL_task.c` | 5 fixes: `twoStepFlag`, `tsmt` bytes, sequence-ID verification, TXMPATL pattern |
 | MAC randomisation | `initialization.c` | Unique MAC addresses via hardware TRNG |
 | LAN865x register CLI | `app.c` | `lan_read` / `lan_write` without a debugger |
 | Build tooling | `build.bat`, `setup_compiler.py`, `setup_flasher.py`, `setup_debug.py`, `flash.py`, `build_summary.py`, `user.cmake` | Reproducible one-command builds; `setup_debug.py` fixes a DFP tool-pack bug that prevents VS Code debugging |
@@ -307,7 +316,7 @@ The memory map was updated to enable PTP timestamp hardware:
 | Register | Address | Old Value | New Value | Comment |
 |----------|---------|-----------|-----------|---------|
 | TXMPATH | 0x00040041 | *(not present)* | 0x0088 | EtherType high byte 0x88 |
-| TXMPATL | 0x00040042 | *(not present)* | 0xF710 | EtherType low 0xF7 + PTP Sync 0x10 |
+| TXMPATL | 0x00040042 | *(not present)* | 0xF700 | EtherType low 0xF7 + PTP messageType 0x00 (Sync, transportSpecific=0) |
 | TXMMSKH | 0x00040043 | 0x00FF | 0x0000 | No masking — exact match |
 | TXMMSKL | 0x00040044 | 0xFFFF | 0x0000 | No masking |
 | TXMLOC  | 0x00040045 | 0x0000 | 0x001E | Byte offset 30 (from Microchip PTP demo) |
@@ -538,128 +547,6 @@ Called from `ptp_mode_cmd()` in `app.c`:
 ```c
 bool verbose = (argc >= 3) && (strcmp(argv[2], "v") == 0);
 PTP_FOL_SetVerbose(verbose);
-```
-
----
-
-## 2. Bug Fixes
-
-### 2.1 TX Timestamp: `DELAY_UNLOCK_EXT` Reduced from 100 ms to 5 ms
-
-**File:** `src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c`
-
-```c
-// Before:
-#define DELAY_UNLOCK_EXT  (100u)
-// After:
-#define DELAY_UNLOCK_EXT  (5u)
-```
-
-**Root cause:** The TX Timestamp Capture Available (TTSCAA) bit appears in
-STATUS0 approximately 1 ms after the EXST signal. The original 100 ms timeout
-caused missed timestamps (`TTSCMA`). Reduced to 5 ms.
-
-### 2.2 Role-Swap: Crystal Calibration Overwrite
-
-#### Background
-
-A **role-swap** describes the scenario where PTP mode is disabled on both boards
-(`ptp_mode off`) and then restarted with the Grandmaster and Follower roles
-swapped. Before this fix the new Follower never reached FINE state; its offset
-was permanently stuck at approximately **−3.13 ms**.
-
-#### Root Cause
-
-The bug was caused by two independent issues in `src/ptp_gm_task.c`:
-
-**Bug 1 — `PTP_GM_Init()` overwrote the crystal calibration (primary)**
-
-During the first PTP session the FOL servo runs its MATCHFREQ phase and measures
-the board's actual crystal frequency by fine-tuning `MAC_TI` and `MAC_TISUBN`.
-For board 1, for example, the calibrated value is `MAC_TI = 39` (nominal is 40),
-reflecting a real crystal frequency slightly below 25 MHz.
-
-When roles were swapped and the same board became the GM, `PTP_GM_Init()`
-unconditionally wrote `MAC_TI = 40` (nominal) — destroying the calibration and
-making the GM clock run approximately 2.5 % too fast. The new FOL then tried to
-correct this 2.5 % frequency error with a small PI servo whose correction range
-is far too narrow. Because the error magnitude matched the servo's maximum
-per-step correction exactly, the offset converged to a fixed point and stayed
-there forever:
-
-```
-drift per sync = (40 − 39) / 40 × 125 ms = 3.125 ms
-```
-
-This is why the stuck offset was always ≈ −3.13 ms and never changed with time.
-
-**Bug 2 — `gm_deinit_vals` set `MAC_TI = 0` (secondary)**
-
-After `ptp_mode off` the deinit sequence wrote `MAC_TI = 0`, stopping the PTP
-hardware clock entirely. This left the hardware in a broken state for subsequent
-role assignments.
-
-#### Fix
-
-**`src/PTP_FOL_task.c` / `src/PTP_FOL_task.h` — export calibrated values**
-
-New function that lets other modules read the TI/TISUBN values the FOL servo
-settled on at the end of its MATCHFREQ phase:
-
-```c
-/* PTP_FOL_task.h */
-/**
- * @brief Returns the crystal-calibrated clock increment values measured by
- *        the FOL servo during its last MATCHFREQ phase.  If the servo has not
- *        yet completed MATCHFREQ, returns nominal defaults (TI=40, TISUBN=0).
- *
- * @param pTI     Receives MAC_TI value (nanoseconds per 25 MHz tick).
- * @param pTISUBN Receives MAC_TISUBN value (sub-nanosecond fractional part).
- */
-void PTP_FOL_GetCalibratedClockInc(uint32_t *pTI, uint32_t *pTISUBN);
-```
-
-Implementation reads the existing module-level statics
-`calibratedTI_value` / `calibratedTISUBN_value`:
-
-```c
-void PTP_FOL_GetCalibratedClockInc(uint32_t *pTI, uint32_t *pTISUBN)
-{
-    if (pTI)     *pTI     = calibratedTI_value;
-    if (pTISUBN) *pTISUBN = calibratedTISUBN_value;
-}
-```
-
-**`src/ptp_gm_task.c` — use calibrated TI on init, keep clock running on deinit**
-
-*Init sequence* (`GM_INIT_WRITE_COUNT` changed 8 → 9, `gm_init_vals[]` made
-non-const):
-
-| Index | Register | Before fix | After fix |
-|-------|----------|-----------|-----------|
-| 6 | `MAC_TISUBN` | not present | filled from `PTP_FOL_GetCalibratedClockInc()` |
-| 7 | `MAC_TI` | `40` (hardcoded nominal) | filled from `PTP_FOL_GetCalibratedClockInc()` |
-| 8 | `PPSCTL` | index 7 | index 8 (shifted) |
-
-At the start of `PTP_GM_Init()`:
-
-```c
-uint32_t calTI = 40u, calTISUBN = 0u;        /* fallback: nominal */
-PTP_FOL_GetCalibratedClockInc(&calTI, &calTISUBN);
-gm_init_vals[6] = calTISUBN;
-gm_init_vals[7] = calTI;
-if (calTI != 40u || calTISUBN != 0u) {
-    SYS_CONSOLE_PRINT("[PTP-GM] Using calibrated TI=%u TISUBN=0x%08lX\r\n",
-                      (unsigned)calTI, (unsigned long)calTISUBN);
-}
-```
-
-*Deinit sequence* — `gm_deinit_vals[6]` (MAC_TI) changed `0u` → `40u`:
-
-```c
-/* was: 0u  — froze the hardware PTP clock after ptp_mode off  */
-/* now: 40u — clock keeps ticking at nominal rate after deinit */
-static const uint32_t gm_deinit_vals[] = { ..., 40u, ... };
 ```
 
 ---
@@ -1141,6 +1028,78 @@ sub-test and passes it via `--log-file` — no directory search, no ambiguity.
 **PTP stdev**: mean = 64 µs · stdev = ±7.6 µs  
 **FINE time**: 2.7 s in all 5 runs  
 **Overall: PASS (5/5)**
+
+---
+
+### 5.6 IEEE 1588 Compliance + Convergence Regression — `ptp_trace_debug_test.py`
+
+End-to-end regression test that verifies full PTP convergence and the complete
+Delay_Req/Delay_Resp exchange with hardware timestamp capture. Unlike §5.2–5.5
+(which measure offset quality over time), this test focuses on **protocol
+correctness** and is the primary verification tool after any change to the PTP
+frame-building or timestamp-capture code.
+
+#### Key design differences from the earlier test scripts
+
+- `ptp_trace on` is activated **immediately** after PTP start — before the first
+  Sync frame is even sent — so no trace event is ever missed.
+- Both serial ports are read by permanent **background threads** from the start;
+  there is no read race between convergence polling and trace capture.
+- The test does **not abort** if FINE is not reached — trace analysis and
+  assertions run regardless, followed by a detailed `STUCK-STATE DIAGNOSE`
+  section.
+- Convergence timeout is 60 s (vs. 30 s in earlier scripts).
+
+#### Usage
+
+```bat
+python ptp_trace_debug_test.py --gm-port COM10 --fol-port COM8
+python ptp_trace_debug_test.py --gm-port COM10 --fol-port COM8 ^
+    --convergence-timeout 90 --trace-time 20
+```
+
+#### Test Phases
+
+| Step | Action | Pass condition |
+|------|--------|----------------|
+| 0 | Reset both boards, wait 8 s | Boot completes |
+| 1 | `setip eth0` on GM + FOL | IP set confirmed |
+| 2 | `ping` bidirectional | `Ping: done.` on both sides |
+| 3 | `ptp_mode follower` → `ptp_trace on` (FOL, immediately) | Trace enabled before first Sync |
+| 3 | `ptp_mode master` → `ptp_trace on` (GM, immediately) | Trace enabled |
+| 3 | Poll FOL for `PTP FINE` (≤ 60 s) | FINE reached; milestones logged |
+| 4 | Collect 10 s additional trace | All Delay exchanges captured |
+| 5 | `ptp_trace off`, `ptp_mode off` | Clean shutdown |
+
+#### Assertions A–I
+
+| Assertion | What it verifies |
+|-----------|------------------|
+| **A** | FOL sent at least one `DELAY_REQ_SENT` |
+| **B** | GM received at least one `GM_DELAY_REQ_RECEIVED` |
+| **C** | GM sent at least one `GM_DELAY_RESP_SENT` |
+| **D** | FOL received at least one `DELAY_RESP_RECEIVED` |
+| **E** | At least one `DELAY_CALC` shows non-zero, plausible delay |
+| **F** | `GM_DELAY_RESP_SKIPPED_TX_BUSY` count ≤ limit (default 0) |
+| **G** | Last valid delay in range `0 < delay < 10 ms` |
+| **H** | At least one `DELAY_CALC` shows `hw=1` (t3 from LAN865x TTSCA) |
+| **I** | Zero `DELAY_RESP_WRONG_SEQ` events (IEEE 1588 §11.3.3 seq-ID check) |
+
+#### Confirmed run (2026-04-16 — after all 5 compliance fixes)
+
+```
+[PASS] Step 3: PTP Start + ptp_trace ON (immediately) + Convergence  — FINE@2.7s
+[PASS] A: FOL DELAY_REQ_SENT                  count=45
+[PASS] B: GM GM_DELAY_REQ_RECEIVED            count=45
+[PASS] C: GM GM_DELAY_RESP_SENT               count=45
+[PASS] D: FOL DELAY_RESP_RECEIVED             received=45
+[PASS] E: FOL DELAY_CALC non-zero delay       last_valid_delay=3788 ns
+[PASS] F: GM TX-busy skips <= limit           skips=0 limit=0
+[PASS] G: Delay in plausible range            3788 ns
+[PASS] H: FOL t3 HW-Capture (hw=1)           hw_captures=45/45
+[PASS] I: No DELAY_RESP_WRONG_SEQ             no WRONG_SEQ — seq-ID check correct
+OVERALL: PASS
+```
 
 ---
 
