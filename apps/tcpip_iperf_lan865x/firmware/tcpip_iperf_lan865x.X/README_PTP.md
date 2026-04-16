@@ -389,113 +389,113 @@ flowchart TD
 
 ## 6. Timestamps t1 t2 t3 t4
 
-### Entstehung auf dem Zeitstrahl
+### Origin on the Time Axis
 
 ```
-GM-Hardware                    10BASE-T1S Kabel              FOL-Hardware
+GM-Hardware                    10BASE-T1S Cable              FOL-Hardware
 (LAN865x GM)                                                 (LAN865x FOL)
 
      │                                                              │
-     │──── SYNC gesendet ─────────────────────────────────────────►│
+     │──── SYNC sent ──────────────────────────────────────────────►│
   t1 ↑                                                          t2 ↑
-(SFD Ende)                                                   (SFD Ende)
+(SFD end)                                                    (SFD end)
      │                                                              │
-     │──── FOLLOWUP (enthält t1) ─────────────────────────────────►│
+     │──── FOLLOWUP (contains t1) ────────────────────────────────►│
      │                                                              │
      │                                                          t3 ↑
      │                                                       (SW-Clock)
      │◄─── DELAY_REQ ───────────────────────────────────────────── │
   t4 ↑                                                              │
-(SFD Ende)                                                          │
+(SFD end)                                                           │
      │                                                              │
-     │──── DELAY_RESP (enthält t4) ───────────────────────────────►│
+     │──── DELAY_RESP (contains t4) ──────────────────────────────►│
      │                                                              │
 ```
 
-### t1 — GM Sendezeit des Sync
+### t1 — GM Transmit Time of Sync
 
-**Wann:** Im Moment wo das letzte Bit des SFD (Start of Frame Delimiter) den 10BASE-T1S Draht verlässt.
+**When:** At the moment the last bit of the SFD (Start of Frame Delimiter) leaves the 10BASE-T1S wire.
 
-**Wo:** Im **LAN865x des GM** — die PHY-Hardware friert automatisch den internen Wall-Clock-Wert ein. Kein Software-Einfluss.
+**Where:** In the **LAN865x of the GM** — the PHY hardware automatically freezes the internal wall-clock value. No software influence.
 
 ```c
 // ptp_gm_task.c, State READ_TTSCA_H / READ_TTSCA_L:
 gm_ts_sec  = Read(OA_TTSCAH);  // Register 0x00000010
 gm_ts_nsec = Read(OA_TTSCAL);  // Register 0x00000011
-// → wird in FollowUp.preciseOriginTimestamp eingetragen
+// → stored in FollowUp.preciseOriginTimestamp
 ```
 
-### t2 — FOL Empfangszeit des Sync
+### t2 — FOL Receive Time of Sync
 
-**Wann:** Im Moment wo der SFD des Sync-Frames beim FOL eintrifft.
+**When:** At the moment the SFD of the Sync frame arrives at the FOL.
 
-**Wo:** Im **LAN865x des FOL** — die PHY-Hardware bettet den Wall-Clock-Wert direkt in den SPI-Footer jedes empfangenen Frames ein (RTSA = Receive Timestamp Append). Kein Software-Einfluss.
+**Where:** In the **LAN865x of the FOL** — the PHY hardware embeds the wall-clock value directly into the SPI footer of each received frame (RTSA = Receive Timestamp Append). No software influence.
 
 ```c
 // drv_lan865x_api.c, TC6_CB_OnRxEthernetPacket():
-g_ptp_raw_rx.rxTimestamp = rxTimestamp;  // aus SPI-Footer
+g_ptp_raw_rx.rxTimestamp = rxTimestamp;  // from SPI footer
 
 // PTP_FOL_task.c, handlePtp() → processSync():
 TS_SYNC.receipt.secondsLsb  = rxTimestamp >> 32;
 TS_SYNC.receipt.nanoseconds = rxTimestamp & 0xFFFFFFFF;
 ```
 
-### t3 — FOL Sendezeit des Delay_Req
+### t3 — FOL Transmit Time of Delay_Req
 
-**Wann:** Im Moment wo der Delay_Req durch den LAN865x TX-Match-Mechanismus am Draht erkannt wird.
+**When:** At the moment the Delay_Req is detected on the wire by the LAN865x TX-Match mechanism.
 
-**Wo:** Primär im **LAN865x des FOL** über `TTSCA{H,L}`. Ein Software-Zeitstempel
-(`fol_t3_ns`) wird weiterhin als Fallback direkt vor dem TX gesetzt.
+**Where:** Primarily in the **LAN865x of the FOL** via `TTSCA{H,L}`. A software timestamp
+(`fol_t3_ns`) is still set as fallback directly before TX.
 
 ```c
 // PTP_FOL_task.c, FOL_TTSCA_WAIT_TXMCTL:
 fol_t3_ns = PTP_CLOCK_GetTime_ns();              // SW fallback
 DRV_LAN865X_SendRawEthFrame(..., tsc=1, ...);    // arm HW capture
 
-// später in FOL_TTSCA_WAIT_L:
+// later in FOL_TTSCA_WAIT_L:
 fol_t3_hw_ns = sec * 1e9 + nsec;
 fol_t3_hw_valid = true;
 ```
 
-> **Wichtig:** Auf 10BASE-T1S mit PLCA kann der physische TX erst einige ms nach
-> dem Software-Aufruf stattfinden. Deshalb wird die Delay-Berechnung deferred,
-> falls `Delay_Resp` vor `t3_hw` ankommt.
+> **Note:** On 10BASE-T1S with PLCA, the physical TX may occur several ms after
+> the software call. Therefore, the delay calculation is deferred if `Delay_Resp`
+> arrives before `t3_hw`.
 
-### t4 — GM Empfangszeit des Delay_Req
+### t4 — GM Receive Time of Delay_Req
 
-**Wann:** Im Moment wo der SFD des Delay_Req-Frames beim GM eintrifft.
+**When:** At the moment the SFD of the Delay_Req frame arrives at the GM.
 
-**Wo:** Im **LAN865x des GM** — ebenfalls RTSA aus dem SPI-Footer, analog zu t2.
+**Where:** In the **LAN865x of the GM** — also RTSA from the SPI footer, analogous to t2.
 
 ```c
-// ptp_gm_task.c — empfängt Delay_Req, baut Delay_Resp:
-// t4 = rxTimestamp aus SPI-Footer → DelayResp.receiveTimestamp
+// ptp_gm_task.c — receives Delay_Req, builds Delay_Resp:
+// t4 = rxTimestamp from SPI footer → DelayResp.receiveTimestamp
 
 // PTP_FOL_task.c, processDelayResp():
 fol_t4_ns = htonl(ptpPkt->receiveTimestamp.secondsLsb) * 1e9
           + htonl(ptpPkt->receiveTimestamp.nanoseconds);
 ```
 
-### Vergleichstabelle
+### Comparison Table
 
 | | t1 | t2 | t3 | t4 |
 |---|---|---|---|---|
-| **Ereignis** | SYNC verlässt GM | SYNC kommt bei FOL an | Delay_Req verlässt FOL | Delay_Req kommt bei GM an |
+| **Event** | SYNC leaves GM | SYNC arrives at FOL | Delay_Req leaves FOL | Delay_Req arrives at GM |
 | **Hardware** | LAN865x GM | LAN865x FOL | LAN865x FOL (Fallback: ATSAME54 TC0) | LAN865x GM |
-| **Mechanismus** | TX Timestamp Capture (TTSCA) | RX Timestamp Append (RTSA) | TX Timestamp Capture (TTSCA) with SW fallback | RX Timestamp Append (RTSA) |
-| **Uhr** | GM Wall Clock | FOL Wall Clock | FOL TC0 @ 60 MHz | GM Wall Clock |
-| **Genauigkeit** | < 1 ns | < 1 ns | < 1 ns (fallback: scheduler-jitter-limited) | < 1 ns |
-| **Transport** | Via FollowUp-Frame | SPI-Footer direkt | Lokal | Via Delay_Resp-Frame |
+| **Mechanism** | TX Timestamp Capture (TTSCA) | RX Timestamp Append (RTSA) | TX Timestamp Capture (TTSCA) with SW fallback | RX Timestamp Append (RTSA) |
+| **Clock** | GM Wall Clock | FOL Wall Clock | FOL TC0 @ 60 MHz | GM Wall Clock |
+| **Accuracy** | < 1 ns | < 1 ns | < 1 ns (fallback: scheduler-jitter-limited) | < 1 ns |
+| **Transport** | Via FollowUp frame | SPI footer directly | Local | Via Delay_Resp frame |
 
-### Verwendung der Timestamps
+### Usage of Timestamps
 
 $$\text{offset} = t_2 - t_1 - \text{mean\_path\_delay}$$
 
 $$\text{mean\_path\_delay} = \frac{(t_2 - t_1) + (t_4 - t_3)}{2}$$
 
-Die Offset-Genauigkeit (~40–100 ns) wird primär von **t1** und **t2** bestimmt —
-beide Hardware-seitig mit < 1 ns Auflösung erfasst. Mit aktivem TTSCA ist auch
-**t3** hardware-erfasst; der SW-Wert bleibt nur als Fallback auf Fehlerpfaden.
+Offset accuracy (~40–100 ns) is primarily determined by **t1** and **t2** —
+both captured hardware-side with < 1 ns resolution. With active TTSCA, **t3**
+is also hardware-captured; the SW value remains only as a fallback on error paths.
 
 ---
 
