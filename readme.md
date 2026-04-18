@@ -934,6 +934,39 @@ Two additional details of the implementation:
   that arrived during the service call), `s_nirq_pending` is re-armed so the
   next iteration handles it.
 
+#### Timing breakdown — from SFD on the wire to `s_nirq_tick` written
+
+For a typical PTPv2 Sync frame (~64 bytes Ethernet, 10 Mbps line rate):
+
+```
+T0         : SFD detected on MDI → TSU latches PHY-HW-Timestamp (t2, sub-ns precise)
+             │
+             │  Frame transmission on the wire:
+             │    64 B payload × 8 bits / 10 Mbps = 51 µs
+             │    + preamble + SFD (8 B)          =  6 µs
+             │    + FCS (4 B)                     =  3 µs
+             │                                    ≈ 60 µs
+             │
+T0 + 60 µs : frame complete; LAN8651 packs into internal FIFO
+             │  PHY-internal delay until nIRQ     ≈ 5–20 µs
+             │
+T0 + 80 µs : nIRQ PC14 falls
+             │  Cortex-M4 @ 120 MHz IRQ entry     ≈ 100 ns
+             │  + prologue to function body       ≈  50 ns
+             │
+T0 + 80 µs + 150 ns :  enter EIC_EXTINT_14_Handler
+             │  SYS_TIME_Counter64Get()
+             │    (SYS_INT_Disable + HW-read + Restore) ≈ 200–500 ns
+             │
+T0 + 80 µs + 500 ns :  s_nirq_tick stored
+```
+
+**Total PHY-to-MCU-tick delay ≈ 80 µs**, dominated by the wire transmission
+time. This is a **deterministic offset** per frame size — it cancels out in
+the PTP math (`offset = t2 − t1 − delay`) because both GM and FOL experience
+the same constant-per-frame delay. Only the **jitter** around the 80 µs mean
+matters, and the ISR path keeps that below ~5 µs.
+
 #### Measurement Floor
 
 The improvement reduced `sysTickAtRx` jitter from ~200 µs to <5 µs, but this
