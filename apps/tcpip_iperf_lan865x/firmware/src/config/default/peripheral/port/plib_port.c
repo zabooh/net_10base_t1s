@@ -82,7 +82,7 @@ void PORT_Initialize(void)
    /************************** GROUP 2 Initialization *************************/
    PORT_REGS->GROUP[2].PORT_DIR = 0x48000U;
    PORT_REGS->GROUP[2].PORT_OUT = 0x4c000U;
-   PORT_REGS->GROUP[2].PORT_PINCFG[14] = 0x6U;
+   PORT_REGS->GROUP[2].PORT_PINCFG[14] = 0x7U;  /* PMUXEN|INEN|PULLEN — routes PC14 to EIC EXTINT14 */
    PORT_REGS->GROUP[2].PORT_PINCFG[15] = 0x40U;
    PORT_REGS->GROUP[2].PORT_PINCFG[18] = 0x0U;
    PORT_REGS->GROUP[2].PORT_PINCFG[25] = 0x41U;

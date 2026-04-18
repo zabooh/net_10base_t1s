@@ -47,6 +47,46 @@ Microchip or any third party.
 #include "tc6/tc6.h"
 #include "../../../../../../ptp_ts_ipc.h"
 
+/* ---------------------------------------------------------------------------
+ * nIRQ change-notification interrupt (EIC EXTINT14 — PC14, active-low).
+ * The ISR captures a TC0 tick at the earliest possible moment so that
+ * sysTickAtRx is accurate to the nIRQ assertion rather than to the later
+ * SPI-callback moment (improvement from ~200 µs error to < 5 µs).
+ * ---------------------------------------------------------------------------*/
+static volatile bool     s_nirq_pending = false;
+static volatile uint64_t s_nirq_tick    = 0u;
+
+void EIC_EXTINT_14_Handler(void)
+{
+    s_nirq_tick    = SYS_TIME_Counter64Get();
+    s_nirq_pending = true;
+    EIC_REGS->EIC_INTFLAG = (1u << 14u);   /* W1C — clear EXTINT14 flag */
+}
+
+static void _InitNIrqEIC(void)
+{
+    /* Enable EIC APB-A clock */
+    MCLK_REGS->MCLK_APBAMASK |= MCLK_APBAMASK_EIC_Msk;
+
+    /* Use OSCULP32K (CKSEL=1) — no GCLK peripheral clock needed */
+    EIC_REGS->EIC_CTRLA = EIC_CTRLA_CKSEL_Msk;
+
+    /* CONFIG[1] covers EXTINT8..15.  EXTINT14 sits at bits 27:24.
+     * SENSE=0x2 (FALL) — nIRQ is active-low; trigger on falling edge. */
+    EIC_REGS->EIC_CONFIG[1] = (EIC_REGS->EIC_CONFIG[1] & ~(0xFu << 24u))
+                             | (0x2u << 24u);
+
+    /* Enable EXTINT14 interrupt */
+    EIC_REGS->EIC_INTENSET = (1u << 14u);
+
+    /* Enable EIC and wait for sync */
+    EIC_REGS->EIC_CTRLA |= EIC_CTRLA_ENABLE_Msk;
+    while ((EIC_REGS->EIC_SYNCBUSY & EIC_SYNCBUSY_ENABLE_Msk) != 0u) {}
+
+    /* Unmask in NVIC */
+    NVIC_EnableIRQ(EIC_EXTINT_14_IRQn);
+}
+
 /******************************************************************************
 *  DEFINES & MACROS
 ******************************************************************************/
@@ -228,6 +268,8 @@ SYS_MODULE_OBJ DRV_LAN865X_Initialize(SYS_MODULE_INDEX index, SYS_MODULE_INIT * 
     (void)TCPIP_Helper_ProtSglListInitialize(&pDrvInst->rxFreePackets);
     (void)TCPIP_Helper_ProtSglListInitialize(&pDrvInst->rxWaitingForPickupPackets);
 
+    _InitNIrqEIC();
+
     return (SYS_MODULE_OBJ)pDrvInst;
 }
 
@@ -360,10 +402,16 @@ void DRV_LAN865X_Tasks(SYS_MODULE_OBJ object)
                 TC6_UnlockExtendedStatus(pDrvInst->drvTc6);
             }
         }
-        if (!SYS_PORT_PinRead(pDrvInst->drvCfg.interruptPin)) {
+        if (s_nirq_pending) {
+            s_nirq_pending = false;
             _Lock(&pDrvInst->drvMutex);
             (void)TC6_Service(pDrvInst->drvTc6, false);
             _Unlock(&pDrvInst->drvMutex);
+            /* Re-arm if pin still asserted — catches a second falling edge
+             * that may have occurred during the service call. */
+            if (!SYS_PORT_PinRead(pDrvInst->drvCfg.interruptPin)) {
+                s_nirq_pending = true;
+            }
         }
     }
     if (pDrvInst->needService) {
@@ -1413,7 +1461,13 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
                  * PTP_CLOCK_GetTime_ns() because the anchor pair
                  * (wallclock=t2_SYNC, tick=tick_FollowUp) would be inconsistent. */
                 if (rxTimestamp != NULL) {
-                    g_ptp_raw_rx.sysTickAtRx = SYS_TIME_Counter64Get();
+                    /* Use the tick captured in the EIC ISR at nIRQ assertion
+                     * time rather than the current tick.  This reduces the
+                     * sysTickAtRx error from ~200 µs (poll latency + SPI time)
+                     * to < 5 µs (fixed LAN865x RX-pipeline delay after SFD). */
+                    g_ptp_raw_rx.sysTickAtRx = (s_nirq_tick != 0u)
+                                             ? s_nirq_tick
+                                             : SYS_TIME_Counter64Get();
                 }
                 g_ptp_raw_rx.pending     = true;
             }
