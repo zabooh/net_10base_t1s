@@ -81,6 +81,7 @@ static uint32_t         gm_sync_cnt         = 0u;
 static uint8_t          gm_retry_cnt        = 0u;
 static uint32_t         gm_wait_ticks       = 0u;      /* ticks spent waiting for a callback */
 static volatile bool    gm_tx_busy          = false;
+static volatile bool    gm_delay_resp_tx_busy = false;
 static uint32_t         gm_sync_interval_ms = PTP_GM_SYNC_PERIOD_MS;
 static uint8_t          gm_src_mac[6]       = {0u};
 static ptp_gm_dst_mode_t gm_dst_mode        = PTP_GM_DST_BROADCAST;
@@ -202,6 +203,13 @@ static void gm_tx_cb(void *pInst, const uint8_t *pTx,
 {
     (void)pInst; (void)pTx; (void)len; (void)pTag; (void)pGlobalTag;
     gm_tx_busy = false;
+}
+
+static void gm_delay_resp_tx_cb(void *pInst, const uint8_t *pTx,
+                                 uint16_t len, void *pTag, void *pGlobalTag)
+{
+    (void)pInst; (void)pTx; (void)len; (void)pTag; (void)pGlobalTag;
+    gm_delay_resp_tx_busy = false;
 }
 
 static bool gm_read_register(uint32_t addr, bool useCallbackProtectedMode)
@@ -364,8 +372,9 @@ void PTP_GM_Init(void)
 
     /* Reset state machine */
     gm_op_done          = false;
-    gm_tx_busy          = false;
-    gm_seq_id           = 0u;
+    gm_tx_busy              = false;
+    gm_delay_resp_tx_busy   = false;
+    gm_seq_id               = 0u;
     gm_sync_cnt         = 0u;
     gm_retry_cnt        = 0u;
     gm_wait_ticks       = 0u;
@@ -988,8 +997,9 @@ void PTP_GM_Deinit(void)
      * The actual register writes are performed sequentially in PTP_GM_Service()
      * via GM_STATE_DEINIT_WRITE / GM_STATE_WAIT_DEINIT_WRITE — each write is
      * confirmed by its callback before the next one starts. */
-    gm_tx_busy      = false;
-    gm_op_done      = false;
+    gm_tx_busy              = false;
+    gm_delay_resp_tx_busy   = false;
+    gm_op_done              = false;
     gm_op_val       = 0u;
     gm_status0      = 0u;
     gm_ts_sec       = 0u;
@@ -1116,13 +1126,14 @@ void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
     memcpy(&msg->requestingPortIdentity, &hdr->sourcePortIdentity,
            sizeof(portIdentity_t));
 
-    /* Send the Delay_Resp.  Re-use the existing gm_tx_busy + gm_tx_cb
-     * mechanism — only send if the TX path is not busy with a Sync/FollowUp. */
-    if (!gm_tx_busy) {
-        gm_tx_busy = true;
+    /* Send the Delay_Resp using its own TX-busy flag, independent of the
+     * Sync/FollowUp path, so a busy Sync/FollowUp TX no longer silently
+     * drops Delay_Resp frames (R15 fix). */
+    if (!gm_delay_resp_tx_busy) {
+        gm_delay_resp_tx_busy = true;
         if (!gm_send_raw_eth_frame(gm_delay_resp_buf, GM_DELAY_RESP_BUF_SIZE,
-                                   0u, gm_tx_cb, NULL)) {
-            gm_tx_busy = false;
+                                   0u, gm_delay_resp_tx_cb, NULL)) {
+            gm_delay_resp_tx_busy = false;
             PTP_LOG("[PTP-GM] Delay_Resp send failed\r\n");
             if (gm_trace_enabled) {
                 PTP_LOG("[TRACE] GM_DELAY_RESP_SEND_FAILED seq=%u\r\n",
