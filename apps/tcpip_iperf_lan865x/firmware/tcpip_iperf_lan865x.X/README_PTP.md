@@ -444,20 +444,58 @@ SERVICE_GM:   // called every 1 ms via SYS_TIME periodic callback
 
 ### 4.2 Driver Layer (`drv_lan865x_api.c`)
 
+Since commit `5e289c8` (R1 fix) the anchor tick is captured in the
+**EIC EXTINT14 ISR** on the falling edge of `nIRQ` — not at SPI completion
+as before. This reduces `sysTickAtRx` jitter from ~200 µs (polling) to
+<5 µs (ISR latency).
+
 ```
+EIC_EXTINT_14_Handler():                       // triggered by nIRQ falling edge
+    s_nirq_tick    = SYS_TIME_Counter64Get()   // TC0 tick at nIRQ moment
+    s_nirq_pending = true
+    EIC_REGS.EIC_INTFLAG = (1<<14)             // W1C clear
+
+DRV_LAN865X_Tasks():                           // main-loop polled
+    if s_nirq_pending:
+        s_nirq_pending = false
+        TC6_Service()                          // SPI-read pending frame(s)
+        if !pinRead(nIRQ):                     // second edge during service?
+            s_nirq_pending = true              // re-arm
+
 TC6_CB_OnRxEthernetPacket(data, length, rxTimestamp):
     if EtherType(data[12:13]) == 0x88F7:
         g_ptp_raw_rx.data         = copy(data, length)
         g_ptp_raw_rx.length       = length
         g_ptp_raw_rx.rxTimestamp  = rxTimestamp   // LAN865x RTSA hardware ns
         if rxTimestamp != NULL:
-            g_ptp_raw_rx.sysTickAtRx = SYS_TIME_Counter64Get()  // TC0 tick
+            g_ptp_raw_rx.sysTickAtRx = s_nirq_tick    // pre-captured in ISR
         g_ptp_raw_rx.pending = true
     pass frame to TCPIP stack
 ```
 
 > **Note:** `rxTimestamp` is non-NULL only for Sync frames (RTSA bit set in SPI footer).
 > FollowUp frames have `rxTimestamp=NULL`; the IPC struct keeps the previous SYNC ts.
+
+#### Timing — from SFD on the wire to `s_nirq_tick` written
+
+For a typical PTPv2 Sync frame (~64 bytes Ethernet, 10 Mbps line):
+
+| Stage | Duration | Cumulative |
+|-------|----------|------------|
+| SFD detected on MDI → TSU latches PHY-HW-Timestamp (t2) | 0 | **T0** |
+| Wire transmission of 64 B frame @ 10 Mbps | ~60 µs | T0+60µs |
+| PHY-internal FIFO / notify delay | 5–20 µs | T0+~80µs |
+| `nIRQ` PC14 falls | — | **T0+~80µs** |
+| Cortex-M4 @ 120 MHz IRQ entry latency (~12 cycles) | 100 ns | |
+| Function prologue to handler body | ~50 ns | |
+| `SYS_TIME_Counter64Get()` (IRQ-disable + HW-read + restore) | 200–500 ns | |
+| `s_nirq_tick` stored | — | **T0+80µs+~500ns** |
+
+The ~80 µs between PHY-HW-Timestamp (`t2`) and MCU-TC0-tick (`sysTickAtRx`)
+is a **deterministic offset per frame size**. Because it's constant-per-frame
+on both boards, it **cancels out** in the servo's `offset = t2 − t1 − delay`
+math. Only the **jitter around the mean** matters, and the ISR path keeps
+that below ~5 µs (vs. ~200 µs with the old polling approach).
 
 ---
 
