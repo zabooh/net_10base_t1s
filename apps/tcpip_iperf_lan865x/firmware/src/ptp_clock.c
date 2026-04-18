@@ -7,7 +7,13 @@
  * Tick → nanoseconds: ticks * 1e9 / 60e6 = ticks * 50 / 3 (exact integer ratio).
  * Division is avoided by the decomposition: (t/3)*50 + ((t%3)*50)/3
  *
- * Drift IIR: α = 1/8 → settles in ~8 sync intervals (~1 s at 125 ms period).
+ * Continuous rate correction (enabled since the EIC EXTINT14 ISR anchor
+ * capture reduced sysTickAtRx jitter from ~200 µs to <5 µs):
+ *   At each PTP_CLOCK_Update() the ratio of (new_anchor_wc − prev_anchor_wc)
+ *   to (new_anchor_tick − prev_anchor_tick) gives the current TC0 rate in
+ *   GM ns-per-tick.  The deviation from the nominal 50/3 ns/tick is stored
+ *   as a signed ppb correction and applied inside PTP_CLOCK_GetTime_ns().
+ *   An IIR filter (α = 1/32) smooths out per-sample noise.
  */
 
 #include "ptp_clock.h"
@@ -16,27 +22,69 @@
 /* TC0 frequency after GCLK0/2 prescaler (60 MHz) */
 #define PTP_CLOCK_TC_FREQ_HZ  60000000ULL
 
+/* IIR smoothing window for the ppb rate estimate.
+ * α = 1/N, half-life ≈ 0.7 × N samples.
+ * N = 32 → half-life ~22 samples ≈ 2.75 s at 125 ms Sync interval.
+ * Per-sample noise from 5 µs sysTickAtRx jitter over a 125 ms interval is
+ * ~40 ppm; √N averaging brings it to ~7 ppm within one time-constant. */
+#define DRIFT_IIR_N  32
+
+/* Sanity window for the per-sample instantaneous ppb estimate.
+ * Typical crystal tolerance is ±20-50 ppm; a ±200 ppm gate rejects extreme
+ * outliers (e.g. during PTP state transitions) while allowing normal
+ * crystal variation. */
+#define DRIFT_SANITY_PPB_ABS  200000
+
+/* Minimum elapsed-tick gap required before computing a rate estimate.
+ * 10 ms = 600,000 TC0 ticks → per-sample noise ~50 ppm from 5 µs jitter,
+ * still useful once filtered.  Shorter gaps produce too much noise. */
+#define DRIFT_MIN_GAP_TICKS   600000u
+
 /* -------------------------------------------------------------------------
  * Module state
  * ---------------------------------------------------------------------- */
 
 static uint64_t s_anchor_wc_ns = 0u;
 static uint64_t s_anchor_tick  = 0u;
-static int32_t  s_drift_ppb    = 0;
+static int32_t  s_drift_ppb    = 0;      /* filtered TC0 rate offset (signed ppb) */
 static bool     s_valid        = false;
+static bool     s_drift_valid  = false;  /* becomes true after 1st rate sample */
 
 /* -------------------------------------------------------------------------
  * Internal helpers
  * ---------------------------------------------------------------------- */
 
 /*
- * Convert TC0 tick count to nanoseconds.
- * 1e9 / 60e6 = 50/3 exactly, so no rounding error at 60 MHz.
- * Uses only 64-bit arithmetic — no __uint128_t required.
+ * Convert TC0 tick count to nanoseconds at nominal 60 MHz rate.
+ * 1e9 / 60e6 = 50/3 exactly, so no rounding error.
  */
 static uint64_t ticks_to_ns(uint64_t ticks)
 {
     return (ticks / 3ULL) * 50ULL + ((ticks % 3ULL) * 50ULL) / 3ULL;
+}
+
+/*
+ * Convert TC0 tick count to nanoseconds with ppb rate correction.
+ * Positive drift_ppb means TC0 runs FASTER than nominal (more ticks per
+ * real GM nanosecond), so each tick represents LESS ns than 50/3 —
+ * subtract the adjustment.  Negative ppb adds it.
+ *   corrected = base − base × drift_ppb / 1e9
+ */
+static uint64_t ticks_to_ns_corrected(uint64_t ticks, int32_t drift_ppb)
+{
+    uint64_t base = ticks_to_ns(ticks);
+    if (drift_ppb == 0) {
+        return base;
+    }
+    uint64_t abs_ppb = (uint64_t)((drift_ppb < 0) ? -drift_ppb : drift_ppb);
+    /* adjustment magnitude = base × |ppb| / 1e9; base < 2^54 and |ppb| ≤ 2e5
+     * keeps the product below 2^64 comfortably. */
+    uint64_t adj = (base * abs_ppb) / 1000000000ULL;
+    if (drift_ppb > 0) {
+        return (base > adj) ? (base - adj) : 0u;
+    } else {
+        return base + adj;
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -45,11 +93,35 @@ static uint64_t ticks_to_ns(uint64_t ticks)
 
 void PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick)
 {
-    /* Drift correction disabled: the jitter in sys_tick capture between
-     * consecutive anchor updates dominates the measurement and produces
-     * spurious +1M ppb readings.  For the typical 0-500 ms interpolation
-     * window the uncorrected crystal error is < 10 µs (21 ppm × 500 ms),
-     * which is acceptable.  s_drift_ppb is kept at 0 permanently. */
+    /* Measure instantaneous TC0 rate vs GM by comparing the delta of both
+     * since the previous anchor.  Feed through IIR to suppress per-sample
+     * noise, then store as the ppb correction used in GetTime_ns(). */
+    if (s_valid) {
+        uint64_t dwc_ns = wallclock_ns - s_anchor_wc_ns;
+        uint64_t dtick  = sys_tick - s_anchor_tick;
+
+        if (dtick >= (uint64_t)DRIFT_MIN_GAP_TICKS && dwc_ns > 0u) {
+            uint64_t expected_ns = ticks_to_ns(dtick);
+            int64_t  residual_ns = (int64_t)dwc_ns - (int64_t)expected_ns;
+            /* Instantaneous ppb: residual × 1e9 / expected.
+             * Positive residual means TC0 underestimates time → TC0 is slow
+             * → drift_ppb must be NEGATIVE so corrected = base + adj (more ns). */
+            int64_t inst_ppb = -(residual_ns * 1000000000LL) / (int64_t)expected_ns;
+
+            if (inst_ppb > -DRIFT_SANITY_PPB_ABS && inst_ppb < DRIFT_SANITY_PPB_ABS) {
+                if (s_drift_valid) {
+                    /* s_drift_ppb = ((N-1)*old + inst) / N   (IIR) */
+                    int64_t blended = ((int64_t)s_drift_ppb * (DRIFT_IIR_N - 1)
+                                       + inst_ppb) / DRIFT_IIR_N;
+                    s_drift_ppb = (int32_t)blended;
+                } else {
+                    s_drift_ppb   = (int32_t)inst_ppb;
+                    s_drift_valid = true;
+                }
+            }
+            /* Out-of-range sample: silently skip, keep previous estimate. */
+        }
+    }
     s_anchor_wc_ns = wallclock_ns;
     s_anchor_tick  = sys_tick;
     s_valid        = true;
@@ -64,19 +136,25 @@ uint64_t PTP_CLOCK_GetTime_ns(void)
 
     uint64_t now_tick   = SYS_TIME_Counter64Get();
     uint64_t delta_tick = now_tick - s_anchor_tick;
-    uint64_t delta_ns   = ticks_to_ns(delta_tick);
+    uint64_t delta_ns   = s_drift_valid
+                        ? ticks_to_ns_corrected(delta_tick, s_drift_ppb)
+                        : ticks_to_ns(delta_tick);
 
     return s_anchor_wc_ns + delta_ns;
 }
 
 int32_t PTP_CLOCK_GetDriftPPB(void)
 {
-    return s_drift_ppb;
+    return s_drift_valid ? s_drift_ppb : 0;
 }
 
 void PTP_CLOCK_SetDriftPPB(int32_t drift_ppb)
 {
-    s_drift_ppb = drift_ppb;
+    /* Kept for backward compatibility with callers that pushed a rate
+     * estimate from the FOL servo.  Overwrites the IIR state; the next
+     * PTP_CLOCK_Update() will resume filtering from this new seed. */
+    s_drift_ppb   = drift_ppb;
+    s_drift_valid = true;
 }
 
 bool PTP_CLOCK_IsValid(void)
@@ -91,5 +169,6 @@ void PTP_CLOCK_ForceSet(uint64_t wallclock_ns)
     s_anchor_wc_ns = wallclock_ns;
     s_anchor_tick  = tick;
     s_drift_ppb    = 0;
+    s_drift_valid  = false;   /* re-learn rate after a manual set */
     s_valid        = true;
 }

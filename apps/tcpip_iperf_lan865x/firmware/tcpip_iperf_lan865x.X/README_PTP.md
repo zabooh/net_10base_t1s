@@ -24,6 +24,8 @@
 - [9. Key Registers](#9-key-registers-lan86501)
 - [10. Logging and Trace](#10-logging-and-trace)
 - [11. Measured Performance](#11-measured-performance)
+- [12. PTP_CLOCK Accuracy When Used From Application Code](#12-ptp_clock-accuracy-when-used-from-application-code)
+- [13. See Also — Software NTP Companion](#13-see-also--software-ntp-companion)
 
 ---
 
@@ -917,3 +919,69 @@ Trace-only examples:
 | Crystal error (FOL vs GM) | about +5.4 ppm before MATCHFREQ correction |
 
 *Measured: `ptp_offset_test.py`, `ptp_delay_test.py` — hardware t3 enabled, Build Apr 15 2026*
+
+These numbers describe the **inter-board clock alignment at the moment the
+hardware stamps the SFD on the wire**. They are *not* the accuracy you get when
+your application code reads `PTP_CLOCK_GetTime_ns()` and uses the value for
+something — that adds ISR / task / stack latency on top. See §12.
+
+---
+
+## 12. PTP_CLOCK Accuracy When Used From Application Code
+
+The ~50 ns figure in §11 is the accuracy exploitable by the hardware alone, at
+the precise moment of TTSCA / RTSA latching. Application code that reads
+`PTP_CLOCK_GetTime_ns()` and uses the result sees a different — layered —
+accuracy, because the read happens some distance away from the event of interest.
+
+### 12.1 Three layers of error
+
+| Layer | Source | Typical magnitude |
+|---|---|---|
+| 1. Clock value itself | HW-PTP FINE anchor error + drift-corrected TC0 interpolation | ~100 ns – 1 µs |
+| 2. Call-site latency | ISR dispatch, FreeRTOS scheduling, stack processing between event and `GetTime_ns()` call | 200 ns (ISR) – several ms (task under load) |
+| 3. Cross-board SW stamping | Forward/reverse path asymmetry in SPI + TCP/IP stack when two boards stamp the *same* external event | ~25 µs (measured, see README_NTP §7) |
+
+### 12.2 Practical guidance
+
+| Intent | Achievable with SW only | Needs HW capture? |
+|---|---|---|
+| Profile a local code block (duration on one MCU) | **~30–100 ns** | no |
+| Timestamp an external signal on one MCU from ISR | **~200 ns – 1 µs** | no (if ISR latency is acceptable) |
+| Timestamp one external signal on **two** MCUs, compare | **~25 µs** (stack asymmetry floor) | **yes**, if sub-µs required |
+| Trigger coordinated action on two MCUs at the same absolute instant | limited by whichever side has worse jitter | **yes** for sub-µs — use PWM/TC compare anchored to PTP_CLOCK |
+
+### 12.3 When you need sub-µs cross-board
+
+The recipe is the same as PTP itself:
+
+- Capture the event in hardware (LAN865x TTSCA/RTSA for PTP frames; SAME54 EIC
+  or TC capture input for a GPIO event).
+- Convert the captured tick to wall-clock time via the PTP_CLOCK anchor
+  (`s_anchor_wc_ns + ticks_to_ns_corrected(capture_tick - s_anchor_tick, drift)`).
+- Do **not** route the event through a task or interrupt handler that reads
+  `GetTime_ns()` — that re-introduces Layer 2 jitter.
+
+The `PTP_CLOCK` itself is not the bottleneck.
+
+---
+
+## 13. See Also — Software NTP Companion
+
+The **SW-NTP** module (`src/sw_ntp.c` / `src/sw_ntp_offset_trace.c`) is a
+measurement-only software NTP client/server running on top of the same
+`PTP_CLOCK`. It exists to quantify the practical accuracy floor of a
+pure-software sync protocol on this platform and to demonstrate — by direct
+comparison with HW-PTP running concurrently — how much of the sync quality
+actually comes from the hardware timestamping chain.
+
+Among its findings (full results in `README_NTP.md` §7 and §8):
+
+- SW-NTP on free-running crystals: **~850 µs residual jitter**, slope gives
+  the ±165 ppm crystal mismatch of the specific board pair.
+- SW-NTP on HW-PTP-disciplined `PTP_CLOCK`: **~25 µs residual jitter**,
+  slope collapses to ~0.09 ppm. A **37× reduction** in short-term jitter on
+  top of the expected ~1800× slope reduction — HW-PTP makes the clock not just
+  more accurate but also inherently steadier.
+
+Full documentation: [README_NTP.md](README_NTP.md).

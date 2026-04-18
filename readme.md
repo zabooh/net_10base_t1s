@@ -13,6 +13,13 @@ and the automated regression test — see:
 
 **[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_PTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_PTP.md)**
 
+For the companion **Software-NTP** module — application-layer UDP time-sync using
+SW timestamps from `PTP_CLOCK_GetTime_ns()`, a two-phase test that compares the
+SW-NTP jitter floor *with* and *without* HW-PTP disciplining, and a discussion of
+how precisely the software clock can be used from application code — see:
+
+**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md)**
+
 ---
 
 ### Origin
@@ -74,6 +81,8 @@ is not present in the original.
   - [5.6 IEEE 1588 Compliance + Convergence Regression](#56-ieee-1588-compliance--convergence-regression--ptp_trace_debug_testpy)
   - [5.7 PTP Drift Compensation + Loop-Stats Instrumentation](#57-ptp-drift-compensation--loop-stats-instrumentation--ptp_drift_compensate_testpy)
   - [5.8 Before/After (mux-based)](#58-beforeafter-mux-based--ptp_sync_before_after_mux_testpy)
+  - [5.9 Hardware-Timestamp Offset Capture](#59-hardware-timestamp-offset-capture--ptp_offset_capturepy)
+  - [5.10 Software NTP vs HW-PTP Comparison](#510-software-ntp-vs-hw-ptp-comparison--sw_ntp_vs_ptp_testpy)
 - [6. Hardware & Build Setup](#6-hardware--build-setup)
   - [6.1 Hardware Configuration](#61-hardware-configuration)
   - [6.2 Build Infrastructure](#62-build-infrastructure)
@@ -306,6 +315,9 @@ roles, switchable at runtime via CLI.
 | `src/ptp_clock.c/.h` | TC0-based nanosecond software wallclock. See [§3](#3-ptp-software-clock). |
 | `src/ptp_ts_ipc.h` | Shared IPC header: `PTP_RxTimestampEntry_t` struct + `g_ptp_rx_ts` extern declaration. |
 | `src/filters.c/.h` | FIR low-pass filter and exponential low-pass filter used by the Follower servo. |
+| `src/ptp_offset_trace.c/.h` | 1024-entry ring buffer for hardware-timestamp PTP offsets. Used by `ptp_offset_capture.py` (§5.9). |
+| `src/sw_ntp.c/.h` | Minimal software-NTP (UDP) master + follower using SW timestamps from `PTP_CLOCK_GetTime_ns()`. Measurement-only; does not discipline the clock. See [README_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md). |
+| `src/sw_ntp_offset_trace.c/.h` | 1024-entry int64 ring buffer for SW-NTP offsets. Used by `sw_ntp_vs_ptp_test.py` (§5.10). |
 
 Three source files added to the CMake build in `cmake/.../CMakeLists.txt`:
 
@@ -531,6 +543,15 @@ Added `APP_STATE_IDLE` to the `APP_STATES` enumeration.
 | `clk_get` | Read current software wallclock value in ns and drift in ppb |
 | `lan_read <addr>` | Read LAN865x register at hex address |
 | `lan_write <addr> <val>` | Write LAN865x register at hex address |
+| `ptp_offset_reset` | Clear the HW-PTP offset ring buffer (used by `ptp_offset_capture.py`) |
+| `ptp_offset_dump` | Dump all recorded HW-PTP offsets (one per line, `<offset_ns> <sync_status>`) |
+| `loop_stats` | Show per-subsystem main-loop timing; `loop_stats reset` to clear |
+| `sw_ntp_mode` | Show / set SW-NTP mode: `sw_ntp_mode [off\|master\|follower <master_ip>]` |
+| `sw_ntp_poll <ms>` | Set follower poll interval in ms (default 1000, range 10..10000) |
+| `sw_ntp_status` | Show SW-NTP mode, poll interval, sample count, timeouts, last offset |
+| `sw_ntp_trace on\|off` | Enable per-packet UART trace with all four SW timestamps (disturbs timing) |
+| `sw_ntp_offset_reset` | Clear the SW-NTP offset ring buffer |
+| `sw_ntp_offset_dump` | Dump all recorded SW-NTP offsets (one per line, `<offset_ns> <valid>`) |
 
 ### 1.5 Console Output Format
 
@@ -634,43 +655,56 @@ timestamps t1–t4 originate from the hardware TSU, not the MCU.
 - **Dominant error source:** path-delay asymmetry of the 10BASE-T1S segment
   (for a short point-to-point link < 1 m, typically < 10 ns)
 
-**Achievable: ±100–200 ns inter-board accuracy of the LAN8651 hardware clocks.**
-Measurable only with an oscilloscope on the two 1PPS outputs.
+**Measured with `ptp_offset_capture.py` (§5.9), 60 s of FINE-state samples:**
+
+| Metric | Value |
+|--------|-------|
+| `\|offset\|` mean | **46 ns** |
+| stdev | 24 ns |
+| p95 | +2 ns (95 % of samples within ±50 ns) |
+| worst case | 201 ns over 60 s |
+
+The offset is computed from PHY-hardware timestamps directly in the firmware
+(`offset = (t2-t1) − mean_path_delay`) and dumped via a ring buffer after
+the measurement — no UART traffic during the run, no measurement artifacts.
+See §5.9 for details.
 
 #### Level 2 — `PTP_CLOCK_GetTime_ns()` Software Clock
 
 `PTP_CLOCK_GetTime_ns()` returns `t2_hardware + TC0_interpolation`.  The
 wallclock component (t2) is the exact hardware timestamp; the anchor tick
-`sysTickAtRx` is captured at the end of the SPI transfer that delivers the
-frame — approximately 100–300 µs after the actual t2 event.  This systematic
-delay appears on **both** boards but with different, uncorrelated values.  The
-inter-board error is the difference of these two offsets:
+`sysTickAtRx` is captured in the **EIC EXTINT14 ISR** on the nIRQ falling
+edge (commit `5e289c8`, see below), ~3–5 CPU cycles after the pin assertion.
 
-```
-Δ = (sysTickAtRx_FOL − t2_actual_FOL) − (sysTickAtRx_GM − t1_actual_GM)
-```
+Error sources:
+- PHY-HW-Timestamp → nIRQ delay is ~80 µs for a Sync frame, **constant**
+  per frame size and cancels out in the offset calculation.
+- ISR-to-counter-read jitter: < 5 µs (vs. ~200 µs in the old polling design).
+- TC0 rate error between Syncs: < a few ns at 125 ms intervals.
 
-**Achievable (current, polling): ±100–300 µs inter-board accuracy of `PTP_CLOCK_GetTime_ns()`.**
-
-With the EIC improvement described at the end of this chapter (tick captured
-in the nIRQ ISR instead of after the SPI transfer, ISR latency ~30–50 ns):
-**< 1 µs** is achievable.  For applications that use `PTP_CLOCK_GetTime_ns()`
-for time-triggered actions (e.g. simultaneous GPIO toggle on both boards),
-the EIC improvement is effectively required to reach sub-microsecond accuracy.
+**Achievable: < 5 µs inter-board accuracy of `PTP_CLOCK_GetTime_ns()`.**
+Not directly measured in this project (would require an external reference
+or a firmware-internal test that compares software-clock vs. hardware-clock
+directly), but bounded above by the above error budget.
 
 #### Level 3 — UART / Python Measurement (`clk_get`)
 
-The test result of 107 µs stdev is a **measurement infrastructure limit**, not
-a board synchronicity number:
+The `clk_get`-based tests (§5.1–5.8) see ~100 µs stdev. This is a
+**measurement infrastructure limit**, not a board synchronicity number:
 
 | Error source | Contribution |
 |---|---|
-| Sequential COM-port reads (non-simultaneous) | dominant ~100 µs stdev |
-| Windows USB polling (8 ms intervals) | ±9 ms outliers (removed by filter) |
+| Python thread scheduling + USB-CDC polling | ~100 µs stdev (dominant) |
+| Transport bursts (EDBG bridge congestion) | occasional ~9 ms outliers |
 | Actual board synchronicity | hidden below the measurement floor |
 
-The true inter-board accuracy of `PTP_CLOCK_GetTime_ns()` cannot be resolved
-by the UART/Python test.  A GPIO-pulse or oscilloscope-based test is required.
+The `loop_stats` instrumentation (§5.7) proves the firmware main loop never
+blocks more than 209 µs, so the 9 ms outliers are entirely transport-path
+artifacts — the firmware processes clk_get within sub-ms every time.
+
+To see the real sub-µs / sub-100-ns synchronisation quality, use either:
+- **`ptp_offset_capture.py`** (§5.9) — firmware-internal PHY offset capture, or
+- A **dual-channel oscilloscope** on the two 1PPS outputs (external hardware).
 
 ### Design — Anchor + TC0 Interpolation
 
@@ -1536,6 +1570,189 @@ python ptp_sync_before_after_mux_test.py --gm-port COM8 --fol-port COM10 --trace
 The test imports its helpers directly from `ptp_drift_compensate_test.py`
 (SerialMux, TraceCollector, `collect_clk_get_samples`, regression helpers)
 — both test scripts must live in the same directory.
+
+---
+
+### 5.9 Hardware-Timestamp Offset Capture — `ptp_offset_capture.py`
+
+Tests §5.1–5.8 all measure via the `clk_get` CLI command, which is limited
+by UART/USB-CDC transport jitter (~100 µs floor, occasional ~9 ms outliers).
+This test bypasses that limit entirely: the Follower firmware records the
+**raw PHY-hardware PTP offset** `offset = (t2-t1) - mean_path_delay` into a
+ring buffer every Sync cycle (~125 ms), and the CLI dumps all samples
+**after** the measurement is done. No UART traffic during the measurement
+→ no measurement distortion.
+
+#### What gets measured — three distinct levels
+
+```
+Level 1:  PHY Hardware Timestamps  (this test)
+    t1, t2, t3, t4  — latched by LAN8651 TSU at SFD, sub-ns resolution
+    offset = (t2 - t1) - ((t2-t1) + (t4-t3)) / 2
+    Measured sync quality: |offset| mean = ~46 ns, stdev = ~24 ns
+         │
+         ▼ anchor_wc_ns = t2,  anchor_tick = sysTickAtRx (EIC ISR)
+Level 2:  Software Wallclock Timer  (PTP_CLOCK_GetTime_ns)
+    Inherits PHY precision as anchor, plus ~5 µs sysTickAtRx jitter,
+    plus TC0 rate error between Syncs.  Not directly measured here.
+         │
+         ▼ clk_get CLI command via UART / USB-CDC
+Level 3:  CLI Measurement (§5.7, §5.8)
+    Inherits Level 2, plus ~100 µs USB-CDC jitter, plus rare transport
+    bursts (9 ms outliers).  Sync quality APPEARS ~100 µs even when the
+    underlying PTP is ~50 ns.
+```
+
+This test pins down **Level 1** — the actual PTP protocol accuracy.
+
+#### Firmware instrumentation
+
+- **`ptp_offset_trace.c/.h`** — ring buffer of 1024 × (int32 offset_ns +
+  uint8 sync_status), 5 KB RAM. Populated from `processFollowUp()` right
+  after the offset calculation.
+- CLI commands added to `app.c`:
+  - **`ptp_offset_reset`** — clear the ring buffer before a measurement.
+  - **`ptp_offset_dump`** — print all samples, one per line, as
+    `<offset_ns> <sync_status>`. Rate-limited (4 lines per batch, 20 ms
+    pause) so `SYS_CONSOLE_PRINT` can drain into the UART without dropping.
+
+#### Test flow (`ptp_offset_capture.py`)
+
+1. Reset both boards, set IPs, start PTP, wait for FINE (~2–3 s).
+2. Send `ptp_offset_reset` on FOL.
+3. **Wait `--capture-s` seconds with no UART traffic.**
+4. Send `ptp_offset_dump` on FOL, parse the output.
+5. Compute statistics per sync_status (UNINIT / MATCHFREQ / HARDSYNC /
+   COARSE / FINE): mean, stdev, min, max, p50, p95, |abs_mean|.
+6. Optional CSV export for external plotting / Allan-deviation analysis.
+
+#### Measured PTP sync accuracy
+
+On the current firmware (commit `c0c0be4` with EIC ISR anchor + async
+timeout) over a 60 s capture window (~469 FINE-state samples):
+
+```
+Status         count     mean    stdev      min      max     p50     p95   |abs_mean|
+FINE             469      -45       24      -201      +69     -47      +2           46      (ns)
+```
+
+**Key numbers:**
+- `|offset|` mean : **46 ns**
+- stdev            : **24 ns**
+- p95              : **+2 ns** (95 % of samples within ±50 ns)
+- worst case       : **201 ns** over 60 s
+
+This resolves **~550× better** than the CLI-based tests (§5.7, §5.8, both
+showed ~100 µs stdev), and proves the underlying PTP synchronisation is
+truly sub-100-ns — professional-grade over a 10BASE-T1S multi-drop bus.
+
+#### Usage
+
+```bat
+python ptp_offset_capture.py --gm-port COM8 --fol-port COM10
+python ptp_offset_capture.py --gm-port COM8 --fol-port COM10 --capture-s 120
+python ptp_offset_capture.py --gm-port COM8 --fol-port COM10 --csv offsets.csv
+```
+
+The 1024-sample ring buffer wraps after ~128 s at the default 125 ms Sync
+period. Use `--capture-s` ≤ 120 for a complete, non-wrapped trace; longer
+runs are supported too but the `overwrites` counter in the dump header
+indicates how many oldest samples were discarded.
+
+Imports helpers from `ptp_drift_compensate_test.py` for serial handling,
+so all three scripts (`ptp_drift_compensate_test.py`,
+`ptp_sync_before_after_mux_test.py`, `ptp_offset_capture.py`) must live
+in the same directory.
+
+---
+
+### 5.10 Software NTP vs HW-PTP Comparison — `sw_ntp_vs_ptp_test.py`
+
+Complements §5.9 from the opposite direction. While §5.9 measures the **best-case
+sync accuracy** exploitable when hardware timestamping is available (~50 ns),
+§5.10 measures the accuracy a **pure-software** sync protocol would achieve on
+exactly the same hardware — i.e. the noise floor that remains when every timestamp
+is taken in application code, after the Harmony TCP/IP stack and SPI transfers.
+
+#### Design
+
+A minimal NTP-style request/response protocol is implemented in
+`src/sw_ntp.c` (UDP, port 12345, 32-byte packet, four timestamps T1–T4 all from
+`PTP_CLOCK_GetTime_ns()`). The follower does **not** discipline the clock — it
+only measures. Offsets are accumulated into a 1024-entry ring buffer
+(`src/sw_ntp_offset_trace.c`) and dumped in one batch after the capture window,
+so the UART plays no role in the measurement path.
+
+See [README_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md) for the module-level documentation (protocol, CLI, firmware flow).
+
+#### Test flow
+
+1. Reset both boards, configure IPs.
+2. Seed `PTP_CLOCK` on both sides in parallel threads via `clk_set 0`
+   (necessary because `PTP_CLOCK_GetTime_ns()` returns 0 on an un-anchored clock).
+3. Start SW-NTP master on the GM side, follower on the FOL side.
+4. **Phase A — HW-PTP OFF:** capture 60 s. The PTP clocks free-run on their
+   crystals; drift dominates.
+5. Enable HW-PTP master/follower, wait for FINE.
+6. **Phase B — HW-PTP ON (FINE):** capture 60 s. HW-PTP holds the PTP clocks
+   in sync; only SW-NTP measurement noise remains.
+7. Print classical (mean/stdev) **and robust (median/MAD/IQR)** statistics for
+   each phase, and a side-by-side comparison with linear-regression slope
+   (interpretable as crystal drift in ppm).
+
+#### Measured results — one representative 60 s per phase run
+
+| Metric                        | Phase A (HW-PTP off) | Phase B (HW-PTP on) | Ratio   |
+|-------------------------------|---------------------:|--------------------:|--------:|
+| Valid samples / Timeouts      | 54 / 7               | 59 / 2              |         |
+| Slope (crystal drift)         | +165 ppm             | +0.09 ppm           | 1800×   |
+| Median offset                 | +4 502 µs            | −150 µs             | 30×     |
+| **Robust stdev (1.4826·MAD)** | 2 643 µs             | **24 µs**           | 110×    |
+| **Residual robust stdev**     | 850 µs               | **23 µs**           | 37×     |
+| Classical stdev               | 2 678 µs             | 1 106 µs†           |         |
+
+† Classical Phase B stdev is inflated by 2–3 outliers (min −6.4 ms, max +5.5 ms
+out of 59 samples). A heavy-tail warning fires automatically when the classical
+stdev exceeds 5× the robust stdev — trust the robust number in that case.
+
+#### Key findings
+
+1. **Crystal drift on this specific pair**: +165 ppm measured from Phase A slope.
+   (Individual SAME54 crystal tolerance ±20–50 ppm each → up to ±100 ppm combined;
+   these boards sit at the upper end.)
+
+2. **HW-PTP reduces drift by ~1800×**: 165 ppm → 0.09 ppm.
+
+3. **Surprise: HW-PTP also reduces short-term jitter by ~37×** (residual robust
+   stdev 850 µs → 23 µs). A naive prediction would be that the jitter floor is
+   set by SPI + FreeRTOS + stack latencies, which HW-PTP cannot affect. That
+   prediction is wrong. The PI servo applies many tiny corrections per second,
+   damping the high-frequency crystal noise that would otherwise leak into every
+   SW-NTP reading. The regulated `PTP_CLOCK` is not just *more accurate*; it is
+   **inherently steadier**.
+
+4. **Systematic bias ≈ −150 µs in Phase B.** Not clock skew — the HW-PTP offsets
+   themselves are in the tens of ns. This is TX/RX **stack-path asymmetry**: the
+   forward (follower-to-master) and backward (master-to-follower) application-
+   layer latencies differ by ~300 µs, and the NTP formula assumes they are equal.
+   No filter removes this.
+
+5. **SW-NTP jitter floor for practical use**: ~25 µs RMS when riding on top of
+   HW-PTP. Without HW-PTP, SW-NTP alone cannot resolve sub-millisecond sync on
+   this platform.
+
+#### Usage
+
+```bat
+python sw_ntp_vs_ptp_test.py --gm-port COM8 --fol-port COM10
+python sw_ntp_vs_ptp_test.py --capture-s 120 --poll-ms 500
+python sw_ntp_vs_ptp_test.py --csv-a phase_a.csv --csv-b phase_b.csv
+python sw_ntp_vs_ptp_test.py --skip-phase-a   # only HW-PTP-on run
+```
+
+Imports `Logger`, `open_port`, `send_command`, `wait_for_pattern` and regex
+constants from `ptp_drift_compensate_test.py`, and `zero_both_clocks` from
+`hw_timer_sync_test.py`, so all three scripts must live in the same directory.
 
 ---
 

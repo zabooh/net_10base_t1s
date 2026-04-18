@@ -20,6 +20,9 @@ file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/out")
 target_sources(tcpip_iperf_lan865x_default_default_XC32_compile PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_log.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/loop_stats.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_offset_trace.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/sw_ntp.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/sw_ntp_offset_trace.c"
 )
 
 # Generate a small cmake helper that handles both MINGW behaviors at build time.

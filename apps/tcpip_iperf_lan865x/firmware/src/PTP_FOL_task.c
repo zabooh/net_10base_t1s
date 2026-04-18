@@ -25,6 +25,7 @@ Key differences vs. the noIP version:
 #include "config/default/driver/lan865x/drv_lan865x.h"
 #include "config/default/system/time/sys_time.h"
 #include "ptp_log.h"
+#include "ptp_offset_trace.h"
 
 /* -------------------------------------------------------------------------
  * State machine for sequential register writes
@@ -1053,6 +1054,17 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
      *                      = (t2-t1) - mean_path_delay               */
     if (fol_delay_valid) {
         offset -= fol_mean_path_delay;
+    }
+
+    /* Record the finalized offset value into the ring buffer for off-line
+     * statistical analysis.  Truncates to int32 (offset in FINE state is
+     * << 2^31 ns).  Runs in the same main-loop context as the CLI dump
+     * so no locking is needed. */
+    {
+        int32_t off32 = (offset > (int64_t)INT32_MAX) ? INT32_MAX :
+                        (offset < (int64_t)INT32_MIN) ? INT32_MIN :
+                                                        (int32_t)offset;
+        ptp_offset_trace_record(off32, (uint8_t)syncStatus);
     }
 
     uint8_t neg = (offset < 0) ? 0u : 1u;
