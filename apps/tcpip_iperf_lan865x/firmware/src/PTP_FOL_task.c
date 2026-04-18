@@ -934,7 +934,7 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
     uint16_t seqId = htons(ptpPkt->header.sequenceID);
     if (ptp_sync_sequenceId >= 0 && syncReceived) {
         if (ptp_sync_sequenceId == (int)seqId) {
-            ptp_sync_sequenceId = (ptp_sync_sequenceId + 1) % (int)UINT16_MAX;
+            ptp_sync_sequenceId = (ptp_sync_sequenceId + 1) & 0xFFFF;
             syncReceived = 0;
         } else {
             if (ptp_trace_enabled) {
@@ -947,7 +947,7 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
             return;
         }
     } else {
-        ptp_sync_sequenceId = ((int)seqId + 1) % (int)UINT16_MAX;
+        ptp_sync_sequenceId = ((int)seqId + 1) & 0xFFFF;
         if (ptp_trace_enabled) {
             PTP_LOG("FollowUp seqId out of sync. Is: %u - %d\r\n",
                     (unsigned int)seqId, (int)ptp_sync_sequenceId);
