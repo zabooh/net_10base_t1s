@@ -62,6 +62,24 @@ typedef enum {
 #define PTP_GM_MAX_TN_VAL       0x3B9ACA00u   /* 1 000 000 000 ns */
 #define PTP_GM_MAX_RETRIES      5u
 
+/* Empirical TX-path offset added to the GM software-clock anchor after each
+ * Sync TX.  Corrects the fixed age difference between the GM anchor-tick
+ * (captured at FollowUp TX-done, ~T0+6 ms) and the FOL anchor-tick (captured
+ * at frame RX callback, ~T0+7 ms).  Measured on ATSAME54P20A + LAN865x
+ * hardware (2026-04-09): +565000 ns base → residual +10983 ns → 575983 ns.
+ *
+ * Override at build time via CMake:
+ *   target_compile_definitions(... PRIVATE PTP_GM_ANCHOR_OFFSET_NS=<value>ULL)
+ * or in user.cmake:
+ *   add_compile_definitions(PTP_GM_ANCHOR_OFFSET_NS=575983ULL)
+ *
+ * To re-calibrate: set to 0, build, run ptp_time_test, use the reported mean
+ * bias as the new value.
+ */
+#ifndef PTP_GM_ANCHOR_OFFSET_NS
+#define PTP_GM_ANCHOR_OFFSET_NS  575983ULL
+#endif
+
 /* ---- Optional LAN865x driver access switches ----
  * Default: disabled, so ptp_gm_task.c does not actively access the LAN865x
  * driver APIs unless these macros are overridden to 1 at compile time.

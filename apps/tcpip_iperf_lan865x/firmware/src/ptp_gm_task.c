@@ -717,16 +717,9 @@ void PTP_GM_Service(void)
              * bias that empirically reduces the ptp_time diff to < ±1 ms.
              * Drift correction is disabled, so no amplification of this bias. */
             {
-                /* GM_ANCHOR_OFFSET_NS: empirical static correction for the
-                 * anchor-tick age difference between GM and FOL sides.
-                 * Measured mean bias = +556228 ns (ptp_time_test 2026-04-09).
-                 * Adding this offset advances the GM wallclock anchor so that
-                 * GetTime() on the GM side aligns with the FOL side.
-                 * 2026-04-09: +565000 → mean=+10983 ns → +575983 */
-                #define GM_ANCHOR_OFFSET_NS  575983ULL
                 uint64_t wc_ns = (uint64_t)gm_ts_sec * 1000000000ULL
                                + (uint64_t)gm_ts_nsec
-                               + GM_ANCHOR_OFFSET_NS;
+                               + PTP_GM_ANCHOR_OFFSET_NS;
                 PTP_CLOCK_Update(wc_ns, SYS_TIME_Counter64Get());
             }
             gm_seq_id++;
