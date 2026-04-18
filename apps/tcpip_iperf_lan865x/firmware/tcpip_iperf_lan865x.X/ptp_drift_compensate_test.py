@@ -502,21 +502,25 @@ def collect_clk_get_samples(mux_gm: SerialMux, mux_fol: SerialMux,
                 f"  diff={diff/1000:+9.2f} us"
                 f"  drift GM={d_gm:+d} FOL={d_fol:+d} ppb{flag}")
 
-            # Always print trace lines after the sample line
-            if trace_lines:
-                for _, lbl, txt in trace_lines:
+            # Print only REAL trace lines (skip prompt/echo noise like ">clk_get", ">").
+            real_trace = [t for t in trace_lines
+                          if t[2].strip() and not t[2].lstrip().startswith(">")]
+            if real_trace:
+                for _, lbl, txt in real_trace:
                     log.info(f"    [TRACE][{lbl}] {txt}")
 
-            # For outliers: also show a wider window from stored history
+            # For outliers: also show a wider window from stored history (real trace only)
             if is_outlier:
                 log.info(f"  *** OUTLIER at t={elapsed:.2f}s:"
                          f" |diff|={abs(diff)/1000:.1f} us > {outlier_us:.0f} us ***")
                 window = trace.get_window(t_mid,
                                           before_ns=int(2e9),
                                           after_ns=int(1e9))
-                if window:
+                window_real = [w for w in window
+                               if w[2].strip() and not w[2].lstrip().startswith(">")]
+                if window_real:
                     log.info(f"  Trace context (±2s window):")
-                    for _, lbl, txt in window:
+                    for _, lbl, txt in window_real:
                         log.info(f"    [CTX][{lbl}] {txt}")
 
         i += 1
@@ -1065,8 +1069,8 @@ def main() -> int:
     p.add_argument("--no-swap",     action="store_true")
     p.add_argument("--no-clk-set",  action="store_true")
     p.add_argument("--no-reset",    action="store_true")
-    p.add_argument("--no-trace",    action="store_true",
-                   help="disable ptp_trace on firmware; mux still used for safe clk_get")
+    p.add_argument("--trace",       action="store_true",
+                   help="enable ptp_trace on firmware (default: OFF — trace amplifies UART-induced outliers)")
     p.add_argument("--log-file",    default=None)
     p.add_argument("--verbose",     action="store_true")
     args = p.parse_args()
@@ -1094,7 +1098,7 @@ def main() -> int:
         no_swap               = args.no_swap,
         no_clk_set            = args.no_clk_set,
         no_reset              = args.no_reset,
-        no_trace              = args.no_trace,
+        no_trace              = not args.trace,
         log                   = log,
     )
     try:

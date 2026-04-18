@@ -73,6 +73,7 @@ is not present in the original.
   - [5.5 PTP Reproducibility](#55-ptp-reproducibility--ptp_reproducibility_testpy)
   - [5.6 IEEE 1588 Compliance + Convergence Regression](#56-ieee-1588-compliance--convergence-regression--ptp_trace_debug_testpy)
   - [5.7 PTP Drift Compensation + Loop-Stats Instrumentation](#57-ptp-drift-compensation--loop-stats-instrumentation--ptp_drift_compensate_testpy)
+  - [5.8 Before/After (mux-based)](#58-beforeafter-mux-based--ptp_sync_before_after_mux_testpy)
 - [6. Hardware & Build Setup](#6-hardware--build-setup)
   - [6.1 Hardware Configuration](#61-hardware-configuration)
   - [6.2 Build Infrastructure](#62-build-infrastructure)
@@ -1428,12 +1429,80 @@ transport jitter at the EDBG bridge chip, not by any PTP error.
 
 ```bat
 python ptp_drift_compensate_test.py --gm-port COM8 --fol-port COM10
-python ptp_drift_compensate_test.py --gm-port COM8 --fol-port COM10 --no-trace
+python ptp_drift_compensate_test.py --gm-port COM8 --fol-port COM10 --trace
 ```
 
-`--no-trace` keeps the `SerialMux` architecture for thread-safe `clk_get`
-polling but does **not** send `ptp_trace on` to the firmware — useful to
-isolate UART-induced outliers from the baseline rate.
+By default `ptp_trace` is **OFF** (trace amplifies UART-induced outliers —
+see §5.7 key finding). The `SerialMux` architecture is always used so
+`clk_get` polling is thread-safe. Pass `--trace` to send `ptp_trace on` to
+the firmware during the collection window when you actually need the PTP
+event stream for diagnosis.
+
+---
+
+### 5.8 Before/After (mux-based) — `ptp_sync_before_after_mux_test.py`
+
+Like §5.4 (`ptp_sync_before_after_test.py`) this test demonstrates PTP
+synchronisation in a single run by collecting paired `clk_get` samples in
+two phases and printing a before/after comparison. The difference is the
+**mux-based architecture** borrowed from §5.7:
+
+- `SerialMux` background reader thread per port (safe `clk_get` even with
+  concurrent `ptp_trace`)
+- **Parallel `clk_set 0` via thread-rendezvous** → sub-ms skew at the start
+  of each phase (instead of ~31 ms sequential skew in the older test)
+- **Prompt/echo filter** → clean `[PTP][…]` lines without `>clk_get` noise
+- **`loop_stats` query** at the end of each phase to prove the firmware
+  main-loop is never the bottleneck
+
+#### Phases
+
+| Step | Action |
+|------|--------|
+| 0 | Reset both boards, wait 8 s |
+| Phase 0 | Start mux, parallel `clk_set 0`, collect `--free-run-s` s of samples. Query `loop_stats`, stop mux. |
+| 1 | `setip eth0` on GM + FOL |
+| 2 | `ping` bidirectional |
+| 3 | `ptp_mode` master/follower, wait for FOL FINE |
+| Phase 1 | (optional `ptp_trace on`), start mux, settle, parallel `clk_set 0`, collect `--ptp-s` s. Query `loop_stats`, stop mux, `ptp_trace off`. |
+| Compare | Side-by-side table: free vs. PTP (slope ppb/ppm, residual stdev, drift_fol) + reduction %. |
+
+#### PASS criteria (Phase 1 / PTP active)
+
+| Metric | Threshold |
+|--------|-----------|
+| `\|slope\|` of `diff(t)` | 2.0 ppm |
+| residual stdev (after detrending) | 500 µs |
+| overall (comparison) | slope reduction > 50 % OR `\|slope_ptp\|` below threshold |
+
+#### Typical result
+
+```
+  Metric                             Free-run (no PTP)        PTP active
+  Slope (ppb)                                  +3900              +913
+  Slope (ppm)                                +3.9001           +0.9131
+  Residual stdev (us)                        590.049           101.059
+
+  Slope reduction by PTP : 76.6 %
+  ...
+  loop_stats: max TOTAL = 142 us over 2.7M iterations
+```
+
+Longer `--ptp-s 120` drives the IIR to full convergence and typically
+pushes the residual slope below 0.1 ppm (reduction ≥ 97 %).
+
+#### Usage
+
+```bat
+python ptp_sync_before_after_mux_test.py --gm-port COM8 --fol-port COM10
+python ptp_sync_before_after_mux_test.py --gm-port COM8 --fol-port COM10 ^
+    --free-run-s 120 --ptp-s 120
+python ptp_sync_before_after_mux_test.py --gm-port COM8 --fol-port COM10 --trace
+```
+
+The test imports its helpers directly from `ptp_drift_compensate_test.py`
+(SerialMux, TraceCollector, `collect_clk_get_samples`, regression helpers)
+— both test scripts must live in the same directory.
 
 ---
 
