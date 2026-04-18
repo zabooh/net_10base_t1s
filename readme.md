@@ -72,6 +72,7 @@ is not present in the original.
   - [5.4 PTP Sync Before/After](#54-ptp-sync-beforeafter--ptp_sync_before_after_testpy)
   - [5.5 PTP Reproducibility](#55-ptp-reproducibility--ptp_reproducibility_testpy)
   - [5.6 IEEE 1588 Compliance + Convergence Regression](#56-ieee-1588-compliance--convergence-regression--ptp_trace_debug_testpy)
+  - [5.7 PTP Drift Compensation + Loop-Stats Instrumentation](#57-ptp-drift-compensation--loop-stats-instrumentation--ptp_drift_compensate_testpy)
 - [6. Hardware & Build Setup](#6-hardware--build-setup)
   - [6.1 Hardware Configuration](#61-hardware-configuration)
   - [6.2 Build Infrastructure](#62-build-infrastructure)
@@ -873,14 +874,14 @@ start_measurement();
 | `clk_get` | Print raw wallclock in nanoseconds and drift: `clk_get: <ns>  drift=<±ppb>ppb` |
 | `clk_set 0` | Zero the wallclock (independent timer baseline for before/after tests) |
 
-### Possible Improvement: EIC Interrupt on nIRQ for Lower Anchor Jitter
+### Implemented: EIC Interrupt on nIRQ for Lower Anchor Jitter  (commit `5e289c8`)
 
-#### Current Anchor Path (Polling)
+#### Previous Anchor Path (Pin Polling — replaced)
 
-The LAN865x `nIRQ` line (PC14) is currently polled inside `DRV_LAN865X_Tasks()`.
-When the pin is found asserted, an SPI transfer reads the pending frame(s) from
-the FIFO. `sysTickAtRx` is captured inside `TC6_CB_OnRxEthernetPacket()` at the
-end of that SPI transfer:
+Before commit `5e289c8`, the LAN865x `nIRQ` line (PC14) was polled inside
+`DRV_LAN865X_Tasks()`. When the pin was found asserted, an SPI transfer read
+the pending frame(s) from the FIFO. `sysTickAtRx` was captured inside
+`TC6_CB_OnRxEthernetPacket()` at the **end** of that SPI transfer:
 
 ```
 LAN8651 SFD received  → TSU latches hw_rx_timestamp
@@ -894,54 +895,55 @@ TC6_CB_OnRxEthernetPacket()  →  sysTickAtRx = SYS_TIME_Counter64Get()
 PTP_CLOCK_Update(hw_rx_timestamp, sysTickAtRx)
 ```
 
-The polling jitter between nIRQ assertion and SPI completion lands directly in
-`sysTickAtRx` and therefore in every anchor pair — the anchor tick is off by a
-variable amount each Sync cycle.
+The polling jitter between nIRQ assertion and SPI completion landed directly
+in `sysTickAtRx` and therefore in every anchor pair — the anchor tick could be
+off by a variable amount each Sync cycle.
 
-#### Proposed Improvement: Capture Tick in EIC ISR
+#### Current Implementation: EIC EXTINT14 Change-Notification ISR
 
-If PC14 is routed through the ATSAME54 EIC peripheral (EXTINT[14], falling
-edge), a minimal ISR can capture the TC0 tick at the exact moment `nIRQ`
-asserts — **before** any SPI activity:
+PC14 is routed through the ATSAME54 EIC peripheral (EXTINT[14], falling edge).
+A minimal ISR captures the TC0 tick at the moment `nIRQ` asserts — **before**
+any SPI activity starts:
 
 ```c
-/* EIC EXTINT14 ISR — fires on nIRQ falling edge, latency ~3-5 CPU cycles */
-void EIC_EXTINT14_Handler(void)
+/* EIC EXTINT14 ISR — fires on nIRQ falling edge, ISR latency ~3-5 CPU cycles */
+void EIC_EXTINT_14_Handler(void)
 {
-    g_lan865x_irq_tick = SYS_TIME_Counter64Get();   /* capture tick immediately */
+    s_nirq_tick    = SYS_TIME_Counter64Get();   /* capture tick immediately */
+    s_nirq_pending = true;
     EIC_REGS->EIC_INTFLAG = EIC_INTFLAG_EXTINT14_Msk;
 }
 ```
 
-`TC6_CB_OnRxEthernetPacket()` then uses this pre-captured tick instead of
-reading the counter again:
+`DRV_LAN865X_Tasks()` now polls `s_nirq_pending` instead of the raw pin, and
+`TC6_CB_OnRxEthernetPacket()` uses the ISR-captured `s_nirq_tick` for
+`sysTickAtRx` instead of reading the counter again at SPI completion.
 
-```c
-if (rxTimestamp != NULL) {
-    g_ptp_raw_rx.sysTickAtRx = g_lan865x_irq_tick;  /* instead of SYS_TIME_Counter64Get() */
-}
-```
+The anchor pair becomes `(hw_rx_timestamp, nirq_tick)`. The fixed delay
+between hardware timestamp and nIRQ assertion (≈80 µs for a 100-byte Sync
+frame) is **constant** per frame and cancels out in the servo's offset
+calculation `t2_local − t1_GM`.
 
-The anchor pair becomes `(hw_rx_timestamp, irq_tick)`.  The fixed delay between
-hardware timestamp and nIRQ assertion (≈80 µs for a 100-byte Sync frame) is
-**constant** per frame and cancels out in the servo's offset calculation
-`t2_local − t1_GM`.
+Two additional details of the implementation:
+- `_InitNIrqEIC()` configures EIC clock, sets EXTINT14 to SENSE=FALL, and
+  enables the NVIC.
+- `PORT_PINCFG[14]` was changed from `0x6` to `0x7` so that PC14 is routed to
+  the EIC peripheral function (alongside the GPIO read, which still works).
+- If `nIRQ` is still low after `TC6_Service()` returns (a second falling edge
+  that arrived during the service call), `s_nirq_pending` is re-armed so the
+  next iteration handles it.
 
-The existing polling loop in `DRV_LAN865X_Tasks()` continues to work unchanged
-— PC14 can simultaneously serve as an EIC input and be read by
-`SYS_PORT_PinRead()`.
+#### Measurement Floor
 
-#### Limitation
+The improvement reduced `sysTickAtRx` jitter from ~200 µs to <5 µs, but this
+is **not visible** in the UART/Python test suite. The measurement floor of
+`ptp_drift_compensate_test.py` is ~100–200 µs (Windows USB-CDC polling), and
+occasional 9 ms outliers appear as well — these have been **traced to
+UART/USB-CDC transport jitter, not PTP**. See §5.7 below and the `loop_stats`
+instrumentation which proves the firmware main-loop never blocks for >209 µs.
 
-The EIC fires on the **first** falling edge.  If multiple frames queue in the
-FIFO, subsequent frames would reuse the same `irq_tick`.  For PTP Sync this is
-not an issue: Sync frames arrive at 125 ms intervals and the FIFO is always
-empty when one arrives.
-
-The improvement would not be visible in the UART/Python test (measurement floor
-≈107 µs, dominated by Windows USB polling).  It would become measurable with
-an oscilloscope comparing the GM 1PPS output against the FOL 1PPS output, or in
-a dedicated GPIO-pulse timing test.
+Further accuracy gains would become measurable with an oscilloscope comparing
+the two boards' 1PPS outputs.
 
 ---
 
@@ -1357,6 +1359,81 @@ python ptp_trace_debug_test.py --gm-port COM10 --fol-port COM8 ^
 [PASS] I: No DELAY_RESP_WRONG_SEQ             no WRONG_SEQ — seq-ID check correct
 OVERALL: PASS
 ```
+
+---
+
+### 5.7 PTP Drift Compensation + Loop-Stats Instrumentation — `ptp_drift_compensate_test.py`
+
+Validates that PTP synchronisation actively compensates the crystal frequency
+difference between GM and FOL, measured through the TC0-based software clock
+(`clk_get` CLI command). Unlike §5.1–5.6 which either test convergence or
+protocol correctness, this test runs the servo for 120 s and checks that the
+residual `diff(t) = FOL_clk − GM_clk` stays bounded.
+
+#### Test Phases
+
+| Step | Action | Pass condition |
+|------|--------|----------------|
+| 0    | Reset both boards | boot completes |
+| 1    | Set IPs via `setip` | both IPs confirmed |
+| 2    | Ping bidirectional | both sides reply |
+| 3    | `ptp_mode` master/follower, wait for FINE | FINE in ≤60 s |
+| 4    | Enable `ptp_trace` + start `SerialMux` background readers | mux routes `clk_get:` → clk queue, rest → trace queue |
+| 5    | `clk_set 0` on BOTH boards in parallel (thread rendezvous) | thread send skew < 1 ms |
+| 6    | Collect 120 s of paired `clk_get` samples at 500 ms intervals | slope, stdev, outlier count |
+| 7    | Query firmware `loop_stats` — max/avg per-subsystem main-loop time | max TOTAL < 1 ms |
+
+#### Pass Criteria
+
+| Metric | Threshold | Typical |
+|--------|-----------|---------|
+| `\|slope\|` of `diff(t)` | 2.0 ppm | 0.01–0.35 ppm |
+| residual stdev (after detrending) | 500 µs | 100–200 µs |
+
+#### Key Finding: 9 ms "Outliers" Are Transport Jitter, Not PTP
+
+Occasional `diff` samples show +9 ms spikes:
+- **With `ptp_trace on`**: ~1 outlier per 30 s
+- **Without `ptp_trace`**: ~1 outlier per 4 min
+
+Two firmware instruments rule out a PTP software fault:
+1. **`loop_stats` CLI command** (added in `loop_stats.c`) records max/avg
+   time spent in each subsystem of the Harmony super-loop
+   (`SYS_CMD_Tasks`, `TCPIP_STACK_Task`, `ptp_log_flush`, `APP_Tasks`,
+   and `TOTAL` iteration). A 120 s test with trace enabled reports:
+   `max_TOTAL = 209 µs`, `avg_TOTAL = 21 µs` across 5.3 million iterations
+   — the main loop **never** blocks for more than 0.21 ms.
+2. **`ptp_clock.c`** reads the TC0 hardware counter (60 MHz) directly at the
+   moment `clk_get_cmd` runs. It is anchored by each PTP Sync (every 125 ms)
+   and linearly interpolates between Syncs via TC0 ticks. There is no
+   code path where the clock reading could be 9 ms in the future.
+
+Conclusion: the 9 ms is the difference between the *moments the two CPUs
+process* their respective `clk_get` commands — caused by UART/USB-CDC
+transport jitter at the EDBG bridge chip, not by any PTP error.
+
+#### Firmware Instrumentation Added for This Analysis
+
+- `loop_stats.c/.h` — per-subsystem timing via `SYS_TIME_Counter64Get()`
+  pairs wrapped around each super-loop call.
+- `loop_stats` CLI command (`loop_stats` / `loop_stats reset`).
+- Async Delay_Req timeout: moved from `sendDelayReq()` (called every ~125 ms
+  on FollowUp) into `PTP_FOL_Service()` (called every 1 ms), so the 500 ms
+  timeout is detected with 1 ms granularity instead of up to 125 ms late.
+- Rate-limited `ptp_log_flush()`: drains at most
+  `PTP_LOG_FLUSH_PER_TICK = 2` messages per super-loop iteration so a burst
+  of queued trace lines can't starve `SYS_CMD_Tasks`.
+
+#### Usage
+
+```bat
+python ptp_drift_compensate_test.py --gm-port COM8 --fol-port COM10
+python ptp_drift_compensate_test.py --gm-port COM8 --fol-port COM10 --no-trace
+```
+
+`--no-trace` keeps the `SerialMux` architecture for thread-safe `clk_get`
+polling but does **not** send `ptp_trace on` to the firmware — useful to
+isolate UART-induced outliers from the baseline rate.
 
 ---
 

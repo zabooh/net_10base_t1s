@@ -19,6 +19,7 @@ file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/out")
 # Add custom source files that are not tracked by MCC-generated file.cmake
 target_sources(tcpip_iperf_lan865x_default_default_XC32_compile PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_log.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/loop_stats.c"
 )
 
 # Generate a small cmake helper that handles both MINGW behaviors at build time.

@@ -34,6 +34,7 @@
 #include "PTP_FOL_task.h"
 #include "ptp_gm_task.h"
 #include "ptp_clock.h"
+#include "loop_stats.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
 #include "system/command/sys_command.h"
@@ -293,6 +294,17 @@ static void clk_get_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
                       (unsigned long long)now_ns, (long)PTP_CLOCK_GetDriftPPB());
 }
 
+/* loop_stats — print per-subsystem max/avg loop time since last reset */
+static void loop_stats_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc >= 2 && strcmp(argv[1], "reset") == 0) {
+        LOOP_STATS_Reset();
+        SYS_CONSOLE_PRINT("loop_stats: reset\r\n");
+        return;
+    }
+    LOOP_STATS_Print();
+}
+
 static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
     {"lan_read",    (SYS_CMD_FNC) lan_read,        ": read LAN865X register (lan_read <addr_hex>)"},
     {"lan_write",   (SYS_CMD_FNC) lan_write,       ": write LAN865X register (lan_write <addr_hex> <value_hex>)"},
@@ -306,6 +318,7 @@ static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
     {"ptp_dst",     (SYS_CMD_FNC) ptp_dst_cmd,     ": set/get PTP destination MAC (ptp_dst [multicast|broadcast])"},
     {"clk_set",     (SYS_CMD_FNC) clk_set_cmd,     ": set software clock to <ns>, reset drift (clk_set <ns>)"},
     {"clk_get",     (SYS_CMD_FNC) clk_get_cmd,     ": read current software clock value in ns"},
+    {"loop_stats",  (SYS_CMD_FNC) loop_stats_cmd,  ": main-loop per-subsystem timing (loop_stats [reset])"},
 };
 
 static bool Command_Init(void) {

@@ -54,6 +54,7 @@
 #include "definitions.h"
 #include "sys_tasks.h"
 #include "ptp_log.h"
+#include "loop_stats.h"
 
 
 
@@ -73,32 +74,34 @@
 */
 void SYS_Tasks ( void )
 {
+    LOOP_STATS_RecordStart(LOOP_STATS_SUBSYS_TOTAL);
+
     /* Maintain system services */
-    
-
-SYS_CMD_Tasks();
-
-
+    LOOP_STATS_RecordStart(LOOP_STATS_SUBSYS_SYS_CMD);
+    SYS_CMD_Tasks();
+    LOOP_STATS_RecordEnd(LOOP_STATS_SUBSYS_SYS_CMD);
 
 
     /* Maintain Device Drivers */
-    
+
 
     /* Maintain Middleware & Other Libraries */
-    
-   TCPIP_STACK_Task(sysObj.tcpip);
-
-
+    LOOP_STATS_RecordStart(LOOP_STATS_SUBSYS_TCPIP);
+    TCPIP_STACK_Task(sysObj.tcpip);
+    LOOP_STATS_RecordEnd(LOOP_STATS_SUBSYS_TCPIP);
 
 
     /* Maintain the application's state machine. */
-        /* Call Application task APP. */
+    LOOP_STATS_RecordStart(LOOP_STATS_SUBSYS_LOG_FLUSH);
     ptp_log_flush();
+    LOOP_STATS_RecordEnd(LOOP_STATS_SUBSYS_LOG_FLUSH);
+
+    LOOP_STATS_RecordStart(LOOP_STATS_SUBSYS_APP);
     APP_Tasks();
+    LOOP_STATS_RecordEnd(LOOP_STATS_SUBSYS_APP);
 
 
-
-
+    LOOP_STATS_RecordEnd(LOOP_STATS_SUBSYS_TOTAL);
 }
 
 /*******************************************************************************

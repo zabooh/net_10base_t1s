@@ -134,6 +134,8 @@ static int64_t fol_deferred_t4         = 0;
 
 /* Forward declaration — defined after fol_ttsca_service() */
 static void complete_delay_calc(int64_t t1, int64_t t2, int64_t t3, bool hw, int64_t t4);
+/* Forward declaration — defined near sendDelayReq() */
+static void fol_delay_req_timeout_service(void);
 
 /* -------------------------------------------------------------------------
  * Globals (mirror of ptp_task.c)
@@ -480,6 +482,7 @@ void PTP_FOL_Service(void)
         return;
     }
 
+    fol_delay_req_timeout_service();
     fol_ttsca_service();
 
     switch (fol_reg_state) {
@@ -662,23 +665,34 @@ static void fol_tx_callback(void *pInst, const uint8_t *pTx, uint16_t len,
     fol_tx_busy = false;
 }
 
+/* Async timeout service: detects Delay_Req timeout at 1 ms granularity.
+ * Called from PTP_FOL_Service() so the timeout fires independently of the
+ * next Sync/FollowUp arrival — the old design piggy-backed the check on
+ * sendDelayReq() which only runs every ~125 ms, delaying retries (and
+ * delaying CLI responses when the burst of timeout handling + retry happens
+ * inside a single FollowUp processing pass). */
+static void fol_delay_req_timeout_service(void)
+{
+    if (!fol_delay_req_pending) {
+        return;
+    }
+    uint32_t elapsed = SYS_TIME_CounterGet() - fol_delay_req_sent_tick;
+    if (elapsed >= SYS_TIME_MSToCount(500u)) {
+        if (ptp_trace_enabled) {
+            PTP_LOG("[FOL] Delay_Req timeout -- retrying\r\n");
+        }
+        fol_delay_req_pending = false;
+    }
+}
+
 /* Build and send a Delay_Req frame.
  * t1, t2 are the timestamps from the latest processed FollowUp so that the
- * (t2-t1) term used for delay calculation matches the same Sync cycle. */
+ * (t2-t1) term used for delay calculation matches the same Sync cycle.
+ * Timeout handling now lives in fol_delay_req_timeout_service() (1 ms tick). */
 static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
 {
-    /* Timeout: if a Delay_Req has been outstanding for > 500 ms without a
-     * Delay_Resp, reset the pending flag so we can try again. */
     if (fol_delay_req_pending) {
-        uint32_t elapsed = SYS_TIME_CounterGet() - fol_delay_req_sent_tick;
-        if (elapsed >= SYS_TIME_MSToCount(500u)) {
-            if (ptp_trace_enabled) {
-                PTP_LOG("[FOL] Delay_Req timeout — retrying\r\n");
-            }
-            fol_delay_req_pending = false;
-        } else {
-            return;  /* still waiting for Delay_Resp */
-        }
+        return;  /* still waiting for Delay_Resp (async timeout will clear) */
     }
     if (fol_tx_busy || fol_ttsca_state != FOL_TTSCA_IDLE) {
         return;  /* TX path or TTSCA capture still busy */

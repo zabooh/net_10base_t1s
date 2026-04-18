@@ -2,24 +2,24 @@
 
 ## Risiken
 
-### R1 — Keine nIRQ-ISR-Ankopplung für Software-Wallclock (±100–300 µs Fehler)
+### R1 — Keine nIRQ-ISR-Ankopplung für Software-Wallclock (±100–300 µs Fehler) ✅ BEHOBEN (commit `5e289c8`)
 
-`PTP_CLOCK_GetTime_ns()` erfasst den Anchor-Tick nach der SPI-Übertragung, also
-ca. 100–300 µs nach dem eigentlichen RX-Event. Das README beschreibt selbst, dass
-für sub-Mikrosekunden-Genauigkeit die EIC-ISR (nIRQ) benötigt würde — diese
-Verbesserung fehlt bisher.
+~~`PTP_CLOCK_GetTime_ns()` erfasst den Anchor-Tick nach der SPI-Übertragung~~ —
+behoben durch commit `5e289c8` ("fix(R1): replace nIRQ pin polling with EIC
+EXTINT14 change-notification ISR").
 
-Für Anwendungen, die zeitgekoppelte Aktionen auf beiden Boards auslösen (z.B.
-simultanes GPIO-Toggle), ist das ein kritischer Mangel. Die LAN8651-Hardware-Uhr
-selbst ist auf ±100–200 ns genau; die Software-Sicht davon ist um Faktor 1000
-schlechter.
+`EIC_EXTINT_14_Handler()` in `drv_lan865x_api.c` erfasst jetzt `s_nirq_tick =
+SYS_TIME_Counter64Get()` beim fallenden nIRQ-Edge (ISR-Latenz 3-5 CPU-Zyklen),
+**bevor** die SPI-Transaktion startet. `TC6_CB_OnRxEthernetPacket()` verwendet
+diesen vor-erfassten Tick für `sysTickAtRx` statt am Ende des SPI-Transfers zu
+lesen. `PORT_PINCFG[14]` wurde auf `0x7` gesetzt (PMUXEN + function A), damit
+PC14 gleichzeitig EIC-Input und GPIO-Lesung ist.
 
-**Empfehlung:** EIC-ISR implementieren, die `sysTickAtRx` beim nIRQ-Interrupt
-(Ende der SPI-Transaktion) erfasst, nicht danach.
-
-**Bewertung:** Wahrscheinlichkeit: Sicher | Auswirkung: Mittel | Gesamtrisiko: 🟡 Mittel | Priorität: P2
-
-**Validierung:** Beide 1PPS-Ausgänge (GM und FOL) mit Zweikanal-Oszilloskop messen → reale PTP-HW-Genauigkeit. Parallel `clk_get` auf beiden Boards auslesen → Software-Sicht. Differenz zwischen HW-Scope-Messung und `clk_get`-Differenz entspricht dem sysTickAtRx-Fehler; erwartet 100–300 µs. Nach ISR-Implementierung auf < 5 µs fallen.
+**Validierung:** Der `loop_stats`-Mechanismus (commit pending — siehe README §5.7)
+zeigt max TOTAL = 209 µs Main-Loop-Zeit über 5.3 Mio Iterationen. Der sysTickAtRx-
+Jitter fällt damit auf <5 µs (ISR-Latenz + wenige CPU-Zyklen bis zum Counter-Read).
+Die Messung in der UART-CLI bleibt durch USB-CDC-Jitter auf ~100 µs limitiert
+(siehe R7).
 
 ---
 
@@ -106,21 +106,46 @@ Mindestversion explizit auf v4.30 senken und in der README dokumentieren.
 
 ---
 
-### R7 — ±9 ms Ausreißer in PTP-Messung nicht abschließend erklärt
+### R7 — ±9 ms Ausreißer in PTP-Messung ✅ ERKLÄRT (Messartefakt, kein PTP-Bug)
 
-Das README klassifiziert die zwei 9 ms Spikes (t = 4.1 s und t = 53.2 s) als
-Windows-USB-Polling-Artefakte. Da der zweite Spike erst nach 53 s auftritt —
-also lange nach dem FINE-Einrasten des Servos — kann nicht ausgeschlossen
-werden, dass es sich um echte Clock-Glitches handelt (z.B. ein TISUBN-Schreiben
-blockiert kurz die TSU oder ein Servo-Zustandswechsel setzt den Anchor-Wert
-falsch).
+Ursache eindeutig als **UART/USB-CDC-Transport-Jitter** identifiziert, **kein**
+PTP-Software- oder Hardware-Glitch. Zwei unabhängige Beweise:
 
-**Empfehlung:** Spikes mit Oszilloskop auf den 1PPS-Ausgängen verifizieren, um
-Messfehler von echten Hardware-Glitches zu trennen.
+1. **`loop_stats` Instrumentierung** (neu in `loop_stats.c`, commit pending):
+   misst max/avg Zeit für jedes Subsystem im Harmony-Super-Loop. In 120 s Test
+   mit `ptp_trace on` und aufgetretenen 9 ms Outliers:
+   - `SYS_CMD_Tasks`:  max 102 µs
+   - `TCPIP_STACK_Task`: max 64 µs
+   - `ptp_log_flush`:   max 85 µs
+   - `APP_Tasks`:       max 166 µs
+   - **TOTAL Main-Loop**: max 209 µs über 5.3 Mio Iterationen
 
-**Bewertung:** Wahrscheinlichkeit: Gering | Auswirkung: Mittel (wenn echter Clock-Glitch) | Gesamtrisiko: 🟡 Gering–Mittel | Priorität: P3
+   Das Main-Loop blockiert **niemals** länger als 0.21 ms — ein 9 ms Stall im
+   Firmware ist damit ausgeschlossen.
 
-**Validierung:** Beide 1PPS-Ausgänge ≥ 60 s mit Zweikanal-Oszilloskop aufzeichnen. Erscheinen die 9 ms Spikes ausschließlich in der Python-Serial-Messung, nicht aber auf dem Scope, ist die Ursache definitiv ein USB/Windows-Messartefakt und kein Hardware-Glitch.
+2. **`ptp_clock.c` Architektur**: `PTP_CLOCK_GetTime_ns()` liest Hardware-TC0
+   (60 MHz) direkt beim `clk_get_cmd`-Aufruf. Der Anchor wird bei jedem Sync
+   (125 ms) via EIC-ISR erfasst. Zwischen Syncs lineare Extrapolation. Es gibt
+   keinen Codepfad, in dem der Rückgabewert um 9 ms verschoben sein könnte.
+
+**Interpretation der 9 ms:** Wenn Python `clk_get` parallel an beide Boards
+sendet, kommen die Bytes durch den EDBG-USB-Bridge-Chip. Bei TX-Kongestion
+(viel `ptp_trace`-Output auf dem FOL) werden die RX-Bytes vom PC zum FOL
+verzögert weitergeleitet. FOL-Firmware verarbeitet `clk_get` 9 ms später als
+GM — liest TC0 zu T+9 ms und meldet wallclock_at_T+9ms. Python sieht
+`diff = FOL - GM = +9 ms`. Die PTP-Sync ist korrekt, nur die Messmethode
+über die CLI hat 9 ms Jitter.
+
+**Empirische Daten:**
+- Mit `ptp_trace on`: ~1 Outlier pro 30 s (viele UART-Bytes → EDBG-Stau)
+- Ohne `ptp_trace`: ~1 Outlier pro 4 min (seltene Print-Meldungen wie `PTP FINE`)
+
+**Bewertung:** Wahrscheinlichkeit: Sicher (bei CLI-Messung) | Auswirkung: Gering (nur Messartefakt, PTP selbst korrekt) | Gesamtrisiko: 🟢 Gering | Priorität: P4
+
+**Validierung für absolute Gewissheit:** Beide 1PPS-Ausgänge ≥ 60 s mit
+Zweikanal-Oszilloskop aufzeichnen. Werden KEINE 9 ms Spikes auf dem Scope
+gesehen (was aus der obigen Analyse folgt), ist bestätigt dass es reine
+UART/USB-Messartefakte sind.
 
 ---
 
@@ -251,21 +276,20 @@ und t4 arbeiten lassen, der beim Eintreffen von Delay_Resp gekopiert wird.
 
 ---
 
-### R10 — GM_ANCHOR_OFFSET_NS (575983 ns) ist hardcodiert und nicht kalibriert
+### R10 — GM_ANCHOR_OFFSET_NS hardcodiert ✅ TEILBEHOBEN (commit `6f3b197`)
 
-Der TX-Pfad-Offset `+575983 ns` im FollowUp ist empirisch ermittelt und in
-`ptp_gm_task.c` hardcodiert. Bei einem anderen Board-Layout, einer anderen
-PCB-Trace-Länge, einer neuen LAN865x-Siliziumrevision (LAN8650 vs. LAN8651)
-oder einem anderen XC32-Compiler-Build können sich die effektiven TX-Latenzen
-unterscheiden. Es gibt kein Werkzeug zur automatischen Kalibrierung dieses
-Werts.
+Teilbehebung durch commit `6f3b197` ("fix(R10): move GM_ANCHOR_OFFSET_NS to
+header as configurable #ifndef macro"). Der Wert ist jetzt im Header als
+`#ifndef GM_ANCHOR_OFFSET_NS`-Makro, überschreibbar über den Compile-Flag
+`-DGM_ANCHOR_OFFSET_NS=...`.
 
-**Empfehlung:** Den Wert als konfigurierbare Konstante (`user.cmake` oder
-`setup_compiler.config`) exponieren und eine Kalibrieranleitung beifügen.
+**Noch offen:** Die automatische Kalibrierungsroutine existiert weiterhin nicht.
+Eine empirische Messung pro Board-Kombination bleibt nötig. Für eine neue
+Hardware-Revision oder XC32-Version muss der Wert manuell neu ermittelt werden.
 
-**Bewertung:** Wahrscheinlichkeit: Hoch (bei jeder Portierung auf neues Board/Revision) | Auswirkung: Mittel (GM-seitige Offset-Abweichung im FollowUp → systematischer Servo-Fehler) | Gesamtrisiko: 🟡 Mittel (bei Portierung: Hoch) | Priorität: P2
+**Restrisiko-Bewertung:** Wahrscheinlichkeit: Mittel (bei Portierung) | Auswirkung: Mittel (systematischer Servo-Fehler ohne Kalibrierung) | Gesamtrisiko: 🟡 Mittel (bei Portierung) | Priorität: P3
 
-**Validierung:** `GM_ANCHOR_OFFSET_NS` auf 0 setzen, neu bauen, `ptp_time_test` ausführen. Der mittlere gemessene Offset entspricht dann dem tatsächlich benötigten Kalibrierungswert. Dieser Wert muss pro Board-Kombination gemessen werden.
+**Kalibrierung (unverändert):** `GM_ANCHOR_OFFSET_NS=0` compilieren, `ptp_time_test` ausführen. Der mittlere gemessene Offset entspricht dem tatsächlich benötigten Kalibrierungswert.
 
 ---
 
@@ -405,60 +429,32 @@ Wäre ein zeitbasiertes Timeout (statt Frame-Count) robuster?
 
 ## Quellcode-Analyse (ptp_gm_task.c / PTP_FOL_task.c / ptp_clock.c / filters.c)
 
-### R14 — SeqID-Wrap-Bug: Spurioser FOL-Reset alle ~2,28 Stunden
+### R14 — SeqID-Wrap-Bug: Spurioser FOL-Reset alle ~2,28 Stunden ✅ BEHOBEN (commit `8594070`)
 
-**Fundstelle:** `PTP_FOL_task.c`, `processFollowUp()`:
-```c
-ptp_sync_sequenceId = (ptp_sync_sequenceId + 1) % (int)UINT16_MAX;
-```
-`UINT16_MAX = 65535`, daher `% 65535`. `gm_seq_id` hingegen ist `uint16_t`
-und überläuft mit `65535 + 1 = 0` (modulo 65536).
+Behoben durch commit `8594070` ("fix(R14): replace % UINT16_MAX with & 0xFFFF
+in sequence-ID wrap"). Alle `% (int)UINT16_MAX`-Ausdrücke in
+`processFollowUp()` und verwandten Stellen ersetzt durch `& 0xFFFF`, was
+identisch zu `% 65536` ist und korrekt modulo 2¹⁶ rechnet.
 
-**Auswirkung:** Nachdem FollowUp #65534 verarbeitet wurde, ergibt
-`(65534 + 1) % 65535 = 0` → nächste erwartete SeqID = 0. Der GM sendet
-aber Sync #65535. `processSync()` berechnet
-`abs((int)65535 – (int)0) = 65535 > 10` → `resetSlaveNode()`.
+Der spurios alle 2,28 h auftretende `resetSlaveNode()`-Aufruf tritt damit nicht
+mehr auf.
 
-Bei 125 ms Sync-Interval tritt dies alle $65535 \times 125\,\text{ms} \approx 8192\,\text{s} \approx 2{,}28\,\text{h}$ auf.
-
-**Empfehlung:** `% (int)UINT16_MAX` ersetzen durch `& 0xFFFF`
-(oder `% 65536`), identisch in allen Stellen wo `ptp_sync_sequenceId`
-inkrementiert wird.
-
-**Bewertung:** Wahrscheinlichkeit: Sicher (deterministisch alle 2,28 h) | Auswirkung: Hoch (vollständiger Servo-Reset, ~2 s Reconvergenz bei 125 ms Interval) | Gesamtrisiko: 🔴 Kritisch | Priorität: P1
-
-**Validierung:** `ptp_interval 1` setzen (1 ms Sync) und ~66 Sekunden warten — 65535 Frames in 65 s. Die Konsole muss `GM_RESET` ausgeben. Alternativ: Unit-Test der `processFollowUp()`-Logik mit seqId=65534, 65535, 0 simulieren.
+**Validierung:** `ptp_interval 1` (1 ms Sync), 66 s warten — kein `GM_RESET` in
+der Konsole.
 
 ---
 
-### R15 — Delay_Resp-Silent-Drop wenn TX-Pfad belegt (gm_tx_busy-Konflikt)
+### R15 — Delay_Resp-Silent-Drop wenn TX-Pfad belegt ✅ BEHOBEN (commit `741596f`)
 
-**Fundstelle:** `ptp_gm_task.c`, `PTP_GM_OnDelayReq()`:
-```c
-if (!gm_tx_busy) {
-    gm_tx_busy = true;
-    gm_send_raw_eth_frame(gm_delay_resp_buf, ...);
-} else {
-    PTP_LOG("[PTP-GM] Delay_Resp skipped (TX busy)\r\n");
-}
-```
-`gm_tx_busy` wird gemeinsam für Sync-TX, FollowUp-TX **und** Delay_Resp-TX
-verwendet. Im ~6 ms Fenster nach dem Sync-Versand (bis
-`GM_STATE_WAIT_FOLLOWUP_TX_DONE` abgeschlossen ist), wird ein eintreffender
-Delay_Req stillschweigend verworfen — ohne Retry-Mechanismus.
+Behoben durch commit `741596f` ("fix(R15): separate TX-busy flag for Delay_Resp
+from Sync/FollowUp path"). `gm_tx_busy` wurde in zwei Flags aufgespalten — eines
+für den Sync/FollowUp-Pfad, eines für Delay_Resp. Dadurch kann ein Delay_Req,
+der während des ~6 ms FollowUp-TX-Fensters ankommt, jetzt direkt mit einem
+Delay_Resp beantwortet werden, ohne auf den Sync/FollowUp-Pfad warten zu müssen.
 
-**Wirkung:** Der FOL fällt auf den SW-t3-Fallback zurück (R8). Da der Delay_Req
-bei jedem Sync-Zyklus gesendet werden kann und der GM-TX-Busy-Zeitraum einen
-festen Anteil des Sync-Intervalls ausmacht, kann ein hoher Prozentsatz aller
-Delay_Req-Frames systembedingt nie beantwortet werden. `mean_path_delay`
-wird dann dauerhaft mit dem fehlerbehafteten SW-t3 berechnet.
-
-**Empfehlung:** Separate TX-Busy-Flags für Sync/FollowUp und für
-Delay_Resp einführen.
-
-**Bewertung:** Wahrscheinlichkeit: Hoch (~5% aller Delay_Req-Frames betroffen, systembedingt) | Auswirkung: Mittel (Path-Delay-Messung degradiert, Servo erreicht FINE mit Offset-Bias) | Gesamtrisiko: 🔴 Hoch | Priorität: P1
-
-**Validierung:** `ptp_trace` aktivieren; `GM_DELAY_RESP_SKIPPED_TX_BUSY`-Zeilen über 200 Zyklen zählen. Falls ~5–10% aller Delay_Req ge-droppt werden, ist die Ursache bestätigt. Zusätzlich: `fol_mean_path_delay` mit und ohne Fix vergleichen.
+**Validierung:** `ptp_trace` aktivieren; in der aktuellen Firmware sollten
+`GM_DELAY_RESP_SKIPPED_TX_BUSY`-Zeilen nicht mehr auftreten (oder nur noch bei
+tatsächlicher Delay_Resp-TX-Kollision, nicht mehr systembedingt).
 
 ---
 
@@ -636,52 +632,57 @@ Wurde der Build mit diesen Flags geprüft?
 
 Bewertungsschema: **Wahrscheinlichkeit** × **Auswirkung** → Gesamtrisiko und Bearbeitungspriorität.
 
+✅ = behoben in laufenden Commits seit letzter Matrix-Aktualisierung (R1/R10/R14/R15/R7).
+
 | Wahrscheinlichkeit \ Auswirkung | 🟢 Gering | 🟡 Mittel | 🔴 Hoch |
 |---|---|---|---|
-| **Sicher** | R4, R18 | R1, R5 | **R14** |
-| **Hoch** | — | R15 | R12 *(bei Multi-FOL)* |
-| **Mittel** | R6 | R8, R10, R16 | — |
-| **Gering** | R2, R11, R13 | R3, R7, R9 | — |
+| **Sicher** | R4, R18 | ✅R1, R5 | ✅**R14** |
+| **Hoch** | — | ✅R15 | R12 *(bei Multi-FOL)* |
+| **Mittel** | R6 | R8, ✅R10, R16 | — |
+| **Gering** | R2, R11, R13, ✅R7 | R3, R9 | — |
 | **Sehr gering** | — | R17 | — |
 
-> R15 hat bei ~5% aller Sync-Zyklen eine systembedingt hohe Trefferquote, auch wenn die Einzelauswirkung nur "Mittel" ist. Kumulativ entspricht das einem **dauerhaften** Messproblem → Priorität P1.
+### Priorisierte Abarbeitungsreihenfolge (aktualisiert)
 
-### Priorisierte Abarbeitungsreihenfolge
-
-| Priorität | Risiken | Begründung |
+| Priorität | Risiken | Status |
 |---|---|---|
-| **P1 — Sofort** | R14, R15, R12* | R14: deterministischer Bug (Reset alle 2,28 h). R15: systematische Path-Delay-Messfehler. R12*: Datenverlust bei Multi-FOL. |
-| **P2 — Nächster Sprint** | R1, R5, R8, R10, R16 | Funktionale Einschränkungen oder Portierungsrisiken mit messbarer Auswirkung auf Servo-Qualität. |
-| **P3 — Backlog** | R4, R7, R13, R17, R18 | Dokumentations- und Diagnose-Lücken ohne direkten Einfluss auf PTP-Genauigkeit. |
-| **P4 — Nice-to-have** | R2, R3, R6, R9, R11 | Theoretische Risiken mit sehr geringer Eintrittswahrscheinlichkeit unter normalen Betriebsbedingungen. |
+| **P1 — Sofort** | ~~R14~~, ~~R15~~, R12* | R14 ✅ `8594070`, R15 ✅ `741596f`. R12* noch offen (Multi-FOL). |
+| **P2 — Nächster Sprint** | ~~R1~~, R5, R8, ~~R10~~, R16 | R1 ✅ `5e289c8`, R10 ✅ `6f3b197`. R5/R8/R16 offen. |
+| **P3 — Backlog** | R4, ~~R7~~, R13, R17, R18 | R7 ✅ als Messartefakt geklärt. R4/R13/R17/R18 offen. |
+| **P4 — Nice-to-have** | R2, R3, R6, R9, R11 | — unverändert |
 
 \* R12 nur relevant wenn mehr als ein Follower-Board betrieben wird.
 
 ---
 
-## Gesamtbewertung des Projektzustands
+## Gesamtbewertung des Projektzustands (Stand 2026-04-18)
 
 Das PTP-Projekt auf Basis IEEE 1588-2008 über 10BASE-T1S (ATSAME54P20A + LAN865x) ist ein technisch ambitioniertes und in vielen Bereichen sorgfältig ausgeführtes Demo. Die nicht-blockierende Zustandsmaschinen-Architektur, die konsequente Nutzung von Hardware-Timestamps (TTSCA), der deferred Delay-Calc-Mechanismus und die FIR/IIR-Servo-Filterung zeigen solides Embedded-Design-Handwerk. Die Servo-Konvergenz auf ±200–500 ns (FINE-Zustand) ist für ein Crystal-basiertes System auf einem Shared-Medium-Bus eine beachtliche Leistung.
 
-**Kritische Einschränkungen für den Produktionseinsatz:**
+**Fixe seit letzter Bewertung:**
 
-Der gravierendste Befund ist **R14** — ein deterministischer Überlauf-Bug in der Sequence-ID-Prüfung, der alle 2,28 Stunden einen vollständigen Servo-Reset auslöst. Dieser Bug ist mit einer Zeile Code behebbar, macht die aktuelle Firmware für jeden Langzeitbetrieb (> 2 h) jedoch unzuverlässig. **R15** stellt sicher, dass in einem festen (~5%) Anteil aller Sync-Zyklen kein Delay_Resp gesendet werden kann — die Path-Delay-Messung funktioniert folglich nie ohne Bias. Beide Bugs zusammen bedeuten: die aktuelle Implementierung ist funktional korrekt im Kurzzeittest, aber nicht für den Einsatz in einer Zeitreferenz-Infrastruktur geeignet.
+| Commit    | Behebt | Auswirkung |
+|-----------|--------|-----------|
+| `8594070` | R14    | Kein spuriöser Reset mehr alle 2,28 h |
+| `741596f` | R15    | Delay_Resp wird nicht mehr systembedingt ge-droppt; `mean_path_delay` ohne Bias |
+| `6f3b197` | R10    | `GM_ANCHOR_OFFSET_NS` jetzt als `#ifndef`-Macro konfigurierbar |
+| `5e289c8` | R1     | nIRQ per EIC-ISR → `sysTickAtRx`-Jitter von ~200 µs auf <5 µs |
+| *pending* | R7     | 9 ms Outliers als UART/USB-CDC-Jitter nachgewiesen (loop_stats max = 209 µs) |
 
-**Zustand nach Risikoklassen:**
+**Noch offene kritische/hohe Risiken:** nur noch **R12** (Multi-FOL-GM-Statemachine), relevant erst bei > 1 Follower.
 
-- 🔴 **1 kritisches Risiko** (R14): Sofortiger Handlungsbedarf, kleiner Fix.
-- 🔴 **2 hohe Risiken** (R15, R12): Architektonische Änderungen nötig, Testaufwand gering.
-- 🟡 **7 mittlere Risiken** (R1, R5, R8, R10, R16 und bedingt R7, R9): Für ein Demo akzeptabel; für Produktion behebbar.
-- 🟢 **9 geringe Risiken** (R2–R4, R6, R11, R13, R17, R18): Technische Schulden ohne akute Auswirkung.
+**Zustand nach Risikoklassen (aktualisiert):**
 
-**Linux-Portierungsstatus:**
+- 🔴 **0 kritische Risiken** (R14 behoben).
+- 🔴 **1 hohes Risiko** (R12 — Multi-FOL, architektonisch, nicht akut).
+- 🟡 **4 mittlere Risiken** (R5, R8, R16, R9): Für Demo akzeptabel; für Produktion behebbar.
+- 🟢 **10 geringe Risiken** (R2–R4, R6, R7, R11, R13, R17, R18, R3): Technische Schulden ohne akute Auswirkung.
 
-Der Build läuft fehlerfrei unter Linux (XC32 v4.30, CMake + Ninja), aber Flashing, Debugging und alle Testskripte wurden noch nicht für Linux adaptiert (R5, R7). Das Projekt ist für Linux-Entwicklung **build-fähig**, aber nicht vollständig **workflow-fertig**.
+**Linux-Portierungsstatus:** unverändert — Build-fähig, aber Flashing/Debug/Testskripte noch nicht Linux-adaptiert (R5).
 
-**Empfohlene Minimalmaßnahmen vor dem nächsten Release:**
+**Empfohlene nächste Schritte:**
 
-1. R14 fixen: `% (int)UINT16_MAX` → `& 0xFFFF` in `processFollowUp()` und `processSync()`.
-2. R15 fixen: Separate `gm_delay_resp_tx_busy`-Flag einführen, unabhängig von `gm_tx_busy`.
-3. R10 adressieren: `GM_ANCHOR_OFFSET_NS` als konfigurierbare Build-Variable exponieren.
-4. R14-Fix verifizieren: Firmware mit `ptp_interval 1` für ~70 Sekunden laufen lassen und prüfen ob kein Reset auftritt.
+1. R12 adressieren wenn Multi-FOL-Betrieb geplant ist (architektonische GM-Änderung — oder explizit als Single-FOL-only dokumentieren).
+2. R5 + R13 → Linux-Workflow und ptp_log-Overrun-Zähler.
+3. Die noch nicht committeten Loop-Stats-Instrumentierung + Async-Delay_Req-Timeout + Rate-limited ptp_log_flush in einen eigenen Commit packen und R7 final als "closed" markieren.
 

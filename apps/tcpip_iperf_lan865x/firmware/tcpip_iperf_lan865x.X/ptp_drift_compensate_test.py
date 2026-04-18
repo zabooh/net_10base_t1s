@@ -28,21 +28,19 @@ Test phases:
   2. Compensated measurement — after an optional settle period collect N
      paired clk_get samples spaced --pause-ms ms apart.
      Fit linear regression diff(t) = intercept + slope * t.
-       slope  → residual clock rate error after PTP correction  [ns/s = ppb]
-       drift  → IIR correction value applied by firmware         [ppb]
+       slope  -> residual clock rate error after PTP correction  [ns/s = ppb]
+       drift  -> IIR correction value applied by firmware         [ppb]
+
+  ptp_trace on is sent to both boards after FINE convergence.  All debug
+  lines emitted by the firmware are captured in a background reader thread
+  and printed alongside each sample.  Outliers (|diff| > --outlier-us) are
+  flagged and the surrounding trace context is shown.
 
 PASS criterion:
     |slope_ptp| < --slope-threshold-ppm  (default 2.0 ppm)
 
-    When a baseline was collected the test also reports the achieved reduction:
-      reduction = (|slope_baseline| - |slope_ptp|) / |slope_baseline| * 100 %
-
 Usage:
     python ptp_drift_compensate_test.py --gm-port COM8 --fol-port COM10
-
-    # Collect 30 s baseline before PTP, then 120 s compensated:
-    python ptp_drift_compensate_test.py --gm-port COM8 --fol-port COM10 \\
-        --baseline-s 30 --duration-s 120
 
 Requirements:
     pip install pyserial
@@ -73,17 +71,18 @@ DEFAULT_GM_IP              = "192.168.0.30"
 DEFAULT_FOL_IP             = "192.168.0.20"
 DEFAULT_NETMASK            = "255.255.255.0"
 DEFAULT_BAUDRATE           = 115200
-DEFAULT_CMD_TIMEOUT        = 5.0     # s — single-command response wait
-DEFAULT_CONV_TIMEOUT       = 60.0    # s — PTP FINE convergence wait
-DEFAULT_BASELINE_S         = 0.0     # s — 0 = skip baseline phase
-DEFAULT_DURATION_S         = 120.0   # s — how long to collect with PTP active
-DEFAULT_PAUSE_MS           = 500     # ms — interval between clk_get pairs
-DEFAULT_SETTLE_S           = 5.0     # s — settle after FINE before collecting
-DEFAULT_SLOPE_THRESHOLD_PPM = 2.0   # ppm — PASS criterion for residual slope
-DEFAULT_RESIDUAL_THRESHOLD_US = 500.0  # µs — PASS criterion for residual stdev
+DEFAULT_CMD_TIMEOUT        = 5.0
+DEFAULT_CONV_TIMEOUT       = 60.0
+DEFAULT_BASELINE_S         = 0.0
+DEFAULT_DURATION_S         = 120.0   # 120s to capture rare 9ms outliers
+DEFAULT_PAUSE_MS           = 500
+DEFAULT_SETTLE_S           = 5.0
+DEFAULT_SLOPE_THRESHOLD_PPM   = 2.0
+DEFAULT_RESIDUAL_THRESHOLD_US = 500.0
+DEFAULT_OUTLIER_US         = 1000.0  # flag samples above this as outliers
 
-RE_IP_SET   = re.compile(r"Set ip address OK|IP address set to")
-RE_BUILD    = re.compile(r"\[APP\] Build:\s+(.+)")
+RE_IP_SET     = re.compile(r"Set ip address OK|IP address set to")
+RE_BUILD      = re.compile(r"\[APP\] Build:\s+(.+)")
 RE_PING_REPLY = re.compile(r"Ping:.*reply.*from|Reply from", re.IGNORECASE)
 RE_PING_DONE  = re.compile(r"Ping: done\.")
 RE_FOL_START  = re.compile(r"PTP Follower enabled")
@@ -110,7 +109,8 @@ class Logger:
 
     def _write(self, line: str):
         with self._lock:
-            print(line)
+            safe = line.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8")
+            print(safe, flush=True)
             if self._fh:
                 self._fh.write(line + "\n")
                 self._fh.flush()
@@ -127,7 +127,7 @@ class Logger:
 
 
 # ---------------------------------------------------------------------------
-# Serial helpers
+# Serial helpers (setup phase — used before SerialMux is active)
 # ---------------------------------------------------------------------------
 
 def open_port(port: str, baudrate: int = DEFAULT_BAUDRATE) -> serial.Serial:
@@ -190,69 +190,199 @@ def wait_for_pattern(ser: serial.Serial, pattern: re.Pattern,
 
 
 # ---------------------------------------------------------------------------
-# clk_get paired measurement (identical technique as hw_timer_sync_test.py)
+# SerialMux — background reader that separates clk_get from trace output
+# ---------------------------------------------------------------------------
+
+class SerialMux:
+    """
+    Background reader thread per serial port.
+
+    clk_get responses (lines containing "clk_get:") go into _clk_queue.
+    All other non-empty lines go into _trace_lines as (t_ns, label, line).
+
+    This allows clk_get polling and ptp_trace output to coexist on the
+    same serial port without reset_input_buffer() discarding trace lines.
+    """
+
+    def __init__(self, ser: serial.Serial, label: str, log: Logger):
+        self.ser   = ser
+        self.label = label
+        self.log   = log
+        self._buf  = ""
+        self._clk_queue:   List[str]               = []
+        self._trace_lines: List[Tuple[int, str, str]] = []  # (t_ns, label, text)
+        self._lock    = threading.Lock()
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self):
+        self._running = True
+        self._thread  = threading.Thread(target=self._reader, daemon=True,
+                                         name=f"mux-{self.label}")
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+
+    def _reader(self):
+        while self._running:
+            try:
+                chunk = self.ser.read(256)
+                if chunk:
+                    self._buf += chunk.decode("ascii", errors="replace")
+                    while "\n" in self._buf:
+                        line, self._buf = self._buf.split("\n", 1)
+                        line = line.rstrip()
+                        if not line:
+                            continue
+                        t_ns = time.perf_counter_ns()
+                        with self._lock:
+                            if "clk_get:" in line:
+                                self._clk_queue.append(line)
+                            else:
+                                self._trace_lines.append((t_ns, self.label, line))
+                else:
+                    time.sleep(0.002)
+            except Exception:
+                break
+
+    def send_clk_get(self, timeout_s: float = 1.0) -> Tuple[int, Optional[str]]:
+        """Send 'clk_get', return (t_send_ns, response_line_or_None)."""
+        with self._lock:
+            self._clk_queue.clear()
+        t_send = time.perf_counter_ns()
+        self.ser.write(b"clk_get\r\n")
+        deadline = time.perf_counter_ns() + int(timeout_s * 1e9)
+        while time.perf_counter_ns() < deadline:
+            with self._lock:
+                if self._clk_queue:
+                    return t_send, self._clk_queue.pop(0)
+            time.sleep(0.002)
+        return t_send, None
+
+    def drain_trace(self) -> List[Tuple[int, str, str]]:
+        """Return and clear all accumulated trace lines."""
+        with self._lock:
+            lines = list(self._trace_lines)
+            self._trace_lines.clear()
+        return lines
+
+    def send_and_wait(self, cmd: str, expect: str, timeout_s: float = 2.0) -> Tuple[int, bool]:
+        """Send a command, wait for a trace line containing *expect*. Thread-safe."""
+        with self._lock:
+            # Remove any stale trace lines so we don't match old output
+            self._trace_lines = [(t, l, x) for t, l, x in self._trace_lines
+                                 if expect not in x]
+        t_send = time.perf_counter_ns()
+        self.ser.write((cmd + "\r\n").encode("ascii"))
+        deadline = t_send + int(timeout_s * 1e9)
+        while time.perf_counter_ns() < deadline:
+            with self._lock:
+                for t, l, x in self._trace_lines:
+                    if expect in x:
+                        return t_send, True
+            time.sleep(0.005)
+        return t_send, False
+
+    def send_raw(self, cmd: str):
+        """Send a command string without waiting for response."""
+        self.ser.write((cmd + "\r\n").encode("ascii"))
+
+
+# ---------------------------------------------------------------------------
+# Shared trace collector (merges GM + FOL trace lines, sorted by time)
+# ---------------------------------------------------------------------------
+
+class TraceCollector:
+    """Merges trace lines from multiple SerialMux instances."""
+
+    def __init__(self, log: Logger):
+        self.log = log
+        self._muxes: List[SerialMux] = []
+        self._all_lines: List[Tuple[int, str, str]] = []  # (t_ns, label, text)
+        self._lock = threading.Lock()
+
+    def add_mux(self, mux: SerialMux):
+        self._muxes.append(mux)
+
+    def drain_all(self) -> List[Tuple[int, str, str]]:
+        """Drain all muxes, merge and sort by time."""
+        lines = []
+        for mux in self._muxes:
+            lines.extend(mux.drain_trace())
+        lines.sort(key=lambda x: x[0])
+        with self._lock:
+            self._all_lines.extend(lines)
+        return lines
+
+    def get_window(self, t_center_ns: int, before_ns: int, after_ns: int
+                   ) -> List[Tuple[int, str, str]]:
+        """Return stored trace lines within [t_center-before, t_center+after]."""
+        lo = t_center_ns - before_ns
+        hi = t_center_ns + after_ns
+        with self._lock:
+            return [(t, lbl, txt) for t, lbl, txt in self._all_lines
+                    if lo <= t <= hi]
+
+    def print_lines(self, lines: List[Tuple[int, str, str]], indent: str = "    "):
+        for t_ns, lbl, txt in lines:
+            self.log.info(f"{indent}[TRACE][{lbl}] {txt}")
+
+
+# ---------------------------------------------------------------------------
+# Measurement helpers using SerialMux
 # ---------------------------------------------------------------------------
 
 def _parse_clk_get(raw: str) -> Tuple[Optional[int], Optional[int]]:
-    """Return (wallclock_ns, drift_ppb) or (None, None)."""
     m = RE_CLK_GET.search(raw)
     if not m:
         return None, None
     return int(m.group(1)), int(m.group(2))
 
 
-def _query_board(ser: serial.Serial, result_dict: dict, key: str,
-                 timeout_s: float = 1.0):
-    """Send 'clk_get', record t_send_ns, store {raw, t_send_ns}."""
-    ser.reset_input_buffer()
-    t_send = time.perf_counter_ns()
-    ser.write(b"clk_get\r\n")
-    resp     = b""
-    deadline = time.perf_counter_ns() + int(timeout_s * 1e9)
-    while time.perf_counter_ns() < deadline:
-        chunk = ser.read(ser.in_waiting or 1)
-        resp += chunk
-        idx = resp.find(b"clk_get:")
-        if idx >= 0 and b"\n" in resp[idx:]:
-            break
-    result_dict[key] = {
-        "raw":       resp.decode(errors="replace"),
-        "t_send_ns": t_send,
-    }
+def _query_mux(mux: SerialMux, result_dict: dict, key: str,
+               timeout_s: float = 1.0):
+    """Send clk_get via mux, store {t_send_ns, t_recv_ns, line}."""
+    t_send, line = mux.send_clk_get(timeout_s)
+    result_dict[key] = {"line": line or "", "t_send_ns": t_send}
 
 
-def single_measurement(ser_gm: serial.Serial, ser_fol: serial.Serial,
-                       swap: bool = False) -> Tuple[Optional[int],
-                                                    Optional[int],
-                                                    Optional[int]]:
+def single_measurement_mux(mux_gm: SerialMux, mux_fol: SerialMux,
+                            swap: bool = False
+                            ) -> Tuple[Optional[int], Optional[int],
+                                       Optional[int], int]:
     """
-    One paired clk_get measurement (swap-symmetrised).
-    Returns (diff_ns, drift_gm_ppb, drift_fol_ppb) or (None, None, None).
-    diff_ns = (clk_fol - clk_gm) - (t_send_fol - t_send_gm)
+    One paired clk_get measurement via SerialMux.
+    Returns (diff_ns, drift_gm_ppb, drift_fol_ppb, t_mid_ns).
     """
     res: dict = {}
     if swap:
-        ta = threading.Thread(target=_query_board, args=(ser_fol, res, "fol"))
-        tb = threading.Thread(target=_query_board, args=(ser_gm,  res, "gm"))
+        ta = threading.Thread(target=_query_mux, args=(mux_fol, res, "fol"))
+        tb = threading.Thread(target=_query_mux, args=(mux_gm,  res, "gm"))
     else:
-        ta = threading.Thread(target=_query_board, args=(ser_gm,  res, "gm"))
-        tb = threading.Thread(target=_query_board, args=(ser_fol, res, "fol"))
+        ta = threading.Thread(target=_query_mux, args=(mux_gm,  res, "gm"))
+        tb = threading.Thread(target=_query_mux, args=(mux_fol, res, "fol"))
     ta.start(); tb.start()
     ta.join();  tb.join()
 
-    clk_gm,  d_gm  = _parse_clk_get(res.get("gm",  {}).get("raw", ""))
-    clk_fol, d_fol = _parse_clk_get(res.get("fol", {}).get("raw", ""))
+    clk_gm,  d_gm  = _parse_clk_get(res.get("gm",  {}).get("line", ""))
+    clk_fol, d_fol = _parse_clk_get(res.get("fol", {}).get("line", ""))
+
+    t_mid = (res.get("gm",  {}).get("t_send_ns", 0) +
+             res.get("fol", {}).get("t_send_ns", 0)) // 2
 
     if clk_gm is None or clk_fol is None:
-        return None, None, None
+        return None, None, None, t_mid
 
     send_delta = res["fol"]["t_send_ns"] - res["gm"]["t_send_ns"]
     diff_ns    = (clk_fol - clk_gm) - send_delta
-    return diff_ns, d_gm, d_fol
+    return diff_ns, d_gm, d_fol, t_mid
 
 
 # ---------------------------------------------------------------------------
-# Clock zero helpers (same as hw_timer_sync_test.py)
+# Clock zero helpers (direct serial, used before mux is active)
 # ---------------------------------------------------------------------------
 
 def _set_clock_zero(ser: serial.Serial, result_dict: dict, key: str,
@@ -292,16 +422,15 @@ def zero_both_clocks(ser_gm: serial.Serial, ser_fol: serial.Serial,
         skew_ns = res["fol"]["t_send_ns"] - res["gm"]["t_send_ns"]
         log.info(f"  [GM ] clk_set 0: {'OK' if ok_gm  else 'FAIL'}")
         log.info(f"  [FOL] clk_set 0: {'OK' if ok_fol else 'FAIL'}")
-        log.info(f"  Thread send skew: {skew_ns / 1000:.1f} µs")
+        log.info(f"  Thread send skew: {skew_ns / 1000:.1f} us")
     return ok_gm and ok_fol
 
 
 # ---------------------------------------------------------------------------
-# Sample collection helpers
+# Sample collection with trace annotation
 # ---------------------------------------------------------------------------
 
 def _linear_regression(xs: List[float], ys: List[float]):
-    """Return (slope, intercept, residuals).  slope in same units as y/x."""
     n      = len(xs)
     sum_x  = sum(xs)
     sum_y  = sum(ys)
@@ -314,24 +443,30 @@ def _linear_regression(xs: List[float], ys: List[float]):
     return slope, intercept, residuals
 
 
-def collect_clk_get_samples(ser_gm: serial.Serial, ser_fol: serial.Serial,
+def collect_clk_get_samples(mux_gm: SerialMux, mux_fol: SerialMux,
+                             trace: TraceCollector,
                              duration_s: float, pause_ms: int,
                              no_swap: bool, label: str,
+                             outlier_us: float,
                              log: Logger) -> Tuple[List[int], List[float],
                                                    List[int], List[int]]:
     """
     Collect paired clk_get samples for *duration_s* seconds.
+    Prints ptp_trace lines after each sample.
+    Outliers (|diff| > outlier_us) are flagged with surrounding trace context.
     Returns (diffs_ns, elapsed_s, drifts_gm, drifts_fol).
     """
-    samples:   List[int]   = []
-    elapsed_s: List[float] = []
-    drifts_gm: List[int]   = []
-    drifts_fol: List[int]  = []
+    samples:    List[int]   = []
+    elapsed_s:  List[float] = []
+    drifts_gm:  List[int]   = []
+    drifts_fol: List[int]   = []
     n_err   = 0
     t_start = time.perf_counter_ns()
     i       = 0
+    outlier_ns = outlier_us * 1000.0
 
-    log.info(f"  Collecting for {duration_s:.0f} s  (pause={pause_ms} ms) ...")
+    log.info(f"  Collecting for {duration_s:.0f} s  (pause={pause_ms} ms,"
+             f" outlier flag > {outlier_us:.0f} us) ...")
 
     while True:
         elapsed_now = (time.perf_counter_ns() - t_start) / 1e9
@@ -340,23 +475,49 @@ def collect_clk_get_samples(ser_gm: serial.Serial, ser_fol: serial.Serial,
 
         swap = (not no_swap) and (i % 2 == 1)
         t_before = time.perf_counter_ns()
-        diff, d_gm, d_fol = single_measurement(ser_gm, ser_fol, swap=swap)
-        t_mid = (time.perf_counter_ns() + t_before) / 2
+        diff, d_gm, d_fol, t_mid = single_measurement_mux(mux_gm, mux_fol, swap)
+
+        # Drain trace lines accumulated since last sample
+        trace_lines = trace.drain_all()
 
         if diff is None:
             n_err += 1
             log.info(f"  [{label}][{i+1:4d}] ERROR (no clk_get response)")
+            # Print any trace lines anyway
+            if trace_lines:
+                for _, lbl, txt in trace_lines:
+                    log.info(f"    [TRACE][{lbl}] {txt}")
         else:
             elapsed = (t_mid - t_start) / 1e9
             samples.append(diff)
             elapsed_s.append(elapsed)
             drifts_gm.append(d_gm)
             drifts_fol.append(d_fol)
+
+            is_outlier = abs(diff) > outlier_ns
             tag = " [swap]" if swap else "       "
+            flag = "  *** OUTLIER ***" if is_outlier else ""
             log.info(
                 f"  [{label}][{i+1:4d}]{tag}  t={elapsed:7.2f}s"
-                f"  diff={diff/1000:+9.2f} µs"
-                f"  drift GM={d_gm:+d} FOL={d_fol:+d} ppb")
+                f"  diff={diff/1000:+9.2f} us"
+                f"  drift GM={d_gm:+d} FOL={d_fol:+d} ppb{flag}")
+
+            # Always print trace lines after the sample line
+            if trace_lines:
+                for _, lbl, txt in trace_lines:
+                    log.info(f"    [TRACE][{lbl}] {txt}")
+
+            # For outliers: also show a wider window from stored history
+            if is_outlier:
+                log.info(f"  *** OUTLIER at t={elapsed:.2f}s:"
+                         f" |diff|={abs(diff)/1000:.1f} us > {outlier_us:.0f} us ***")
+                window = trace.get_window(t_mid,
+                                          before_ns=int(2e9),
+                                          after_ns=int(1e9))
+                if window:
+                    log.info(f"  Trace context (±2s window):")
+                    for _, lbl, txt in window:
+                        log.info(f"    [CTX][{lbl}] {txt}")
 
         i += 1
         remaining = duration_s - (time.perf_counter_ns() - t_start) / 1e9
@@ -372,15 +533,11 @@ def collect_clk_get_samples(ser_gm: serial.Serial, ser_fol: serial.Serial,
 def evaluate_samples(samples: List[int], elapsed_s: List[float],
                      drifts_gm: List[int], drifts_fol: List[int],
                      label: str, log: Logger) -> Optional[dict]:
-    """
-    Fit linear regression, remove 2-sigma outliers, return stats dict or None.
-    """
     log.info("")
     if len(samples) < 5:
         log.info(f"  [{label}] Too few valid samples ({len(samples)}). Aborting.")
         return None
 
-    # --- Initial regression for outlier detection ---
     slope0, intercept0, residuals0 = _linear_regression(elapsed_s, samples)
     res_mean  = statistics.mean(residuals0)
     res_stdev = statistics.stdev(residuals0)
@@ -388,36 +545,32 @@ def evaluate_samples(samples: List[int], elapsed_s: List[float],
                  if abs(r - res_mean) <= 2 * res_stdev]
     n_out = len(samples) - len(clean_idx)
 
-    cxs  = [elapsed_s[i]  for i in clean_idx]
-    cys  = [samples[i]    for i in clean_idx]
-    cdga = [drifts_gm[i]  for i in clean_idx]
+    cxs   = [elapsed_s[i]  for i in clean_idx]
+    cys   = [samples[i]    for i in clean_idx]
+    cdga  = [drifts_gm[i]  for i in clean_idx]
     cdfol = [drifts_fol[i] for i in clean_idx]
 
-    # --- Re-fit on clean data ---
     slope, intercept, residuals = _linear_regression(cxs, cys)
     res_stdev2 = statistics.stdev(residuals)
     res_sem2   = res_stdev2 / (len(residuals) ** 0.5)
 
     t_span = cxs[-1] - cxs[0] if len(cxs) > 1 else 0.0
-    mean_drift_gm  = statistics.mean(cdga)  if cdga  else 0.0
-    mean_drift_fol = statistics.mean(cdfol) if cdfol else 0.0
+    mean_drift_gm   = statistics.mean(cdga)   if cdga   else 0.0
+    mean_drift_fol  = statistics.mean(cdfol)  if cdfol  else 0.0
     stdev_drift_fol = statistics.stdev(cdfol) if len(cdfol) > 1 else 0.0
 
-    slope_ppb = slope          # ns/s = ppb
-    slope_ppm = slope / 1000.0 # ppm
-
     return {
-        "n_clean":        len(cxs),
-        "n_total":        len(samples),
-        "n_out":          n_out,
-        "t_span":         t_span,
-        "slope_ppb":      slope_ppb,
-        "slope_ppm":      slope_ppm,
-        "intercept_ns":   intercept,
-        "res_stdev_ns":   res_stdev2,
-        "res_sem_ns":     res_sem2,
-        "mean_drift_gm":  mean_drift_gm,
-        "mean_drift_fol": mean_drift_fol,
+        "n_clean":         len(cxs),
+        "n_total":         len(samples),
+        "n_out":           n_out,
+        "t_span":          t_span,
+        "slope_ppb":       slope,
+        "slope_ppm":       slope / 1000.0,
+        "intercept_ns":    intercept,
+        "res_stdev_ns":    res_stdev2,
+        "res_sem_ns":      res_sem2,
+        "mean_drift_gm":   mean_drift_gm,
+        "mean_drift_fol":  mean_drift_fol,
         "stdev_drift_fol": stdev_drift_fol,
     }
 
@@ -431,19 +584,19 @@ def print_regression_report(stats: dict, label: str, log: Logger):
     log.info("")
     log.info("  Linear regression: diff(t) = intercept + slope * t")
     log.info(f"    Intercept : {stats['intercept_ns']:+.0f} ns"
-             f"  ({stats['intercept_ns']/1000:+.1f} µs)")
+             f"  ({stats['intercept_ns']/1000:+.1f} us)")
     log.info(f"    Slope     : {stats['slope_ppb']:+.0f} ppb"
              f"  ({stats['slope_ppm']:+.4f} ppm)")
     log.info("")
     log.info("  Residuals (after subtracting linear trend)")
     log.info(f"    Stdev     : {stats['res_stdev_ns']:.0f} ns"
-             f"  ({stats['res_stdev_ns']/1000:.3f} µs)")
+             f"  ({stats['res_stdev_ns']/1000:.3f} us)")
     log.info(f"    SEM       : {stats['res_sem_ns']:.0f} ns"
-             f"  ({stats['res_sem_ns']/1000:.3f} µs)")
+             f"  ({stats['res_sem_ns']/1000:.3f} us)")
     log.info("")
     log.info(f"  Drift GM   : {stats['mean_drift_gm']:+.0f} ppb  (mean)")
     log.info(f"  Drift FOL  : {stats['mean_drift_fol']:+.0f} ppb  (mean)"
-             f"  ±{stats['stdev_drift_fol']:.0f} ppb  (stdev)")
+             f"  +/-{stats['stdev_drift_fol']:.0f} ppb  (stdev)")
     log.info("=" * 66)
 
 
@@ -459,36 +612,40 @@ class PTPDriftCompensateTest:
                  pause_ms: int, settle_s: float,
                  slope_threshold_ppm: float,
                  residual_threshold_us: float,
+                 outlier_us: float,
                  conv_timeout: float, no_swap: bool, no_clk_set: bool,
-                 no_reset: bool,
+                 no_reset: bool, no_trace: bool,
                  log: Logger):
-        self.gm_port             = gm_port
-        self.fol_port            = fol_port
-        self.gm_ip               = gm_ip
-        self.fol_ip              = fol_ip
-        self.netmask             = netmask
-        self.baseline_s          = baseline_s
-        self.duration_s          = duration_s
-        self.pause_ms            = pause_ms
-        self.settle_s            = settle_s
-        self.slope_threshold_ppm = slope_threshold_ppm
+        self.gm_port              = gm_port
+        self.fol_port             = fol_port
+        self.gm_ip                = gm_ip
+        self.fol_ip               = fol_ip
+        self.netmask              = netmask
+        self.baseline_s           = baseline_s
+        self.duration_s           = duration_s
+        self.pause_ms             = pause_ms
+        self.settle_s             = settle_s
+        self.slope_threshold_ppm  = slope_threshold_ppm
         self.residual_threshold_us = residual_threshold_us
-        self.conv_timeout        = conv_timeout
-        self.no_swap             = no_swap
-        self.no_clk_set          = no_clk_set
-        self.no_reset            = no_reset
-        self.log                 = log
+        self.outlier_us           = outlier_us
+        self.conv_timeout         = conv_timeout
+        self.no_swap              = no_swap
+        self.no_clk_set           = no_clk_set
+        self.no_reset             = no_reset
+        self.no_trace             = no_trace
+        self.log                  = log
 
         self.ser_gm:  Optional[serial.Serial] = None
         self.ser_fol: Optional[serial.Serial] = None
+        self.mux_gm:  Optional[SerialMux]     = None
+        self.mux_fol: Optional[SerialMux]     = None
+        self.trace:   Optional[TraceCollector] = None
         self.results: list = []
         self.gm_build:  str = "unknown"
         self.fol_build: str = "unknown"
 
         self._conv_thread: Optional[threading.Thread] = None
         self._conv_result: Optional[tuple] = None
-
-        # Results stored for final comparison
         self._baseline_stats: Optional[dict] = None
         self._ptp_stats:      Optional[dict] = None
 
@@ -505,10 +662,29 @@ class PTPDriftCompensateTest:
                 sys.exit(1)
 
     def disconnect(self):
+        self._stop_mux()
         for ser in (self.ser_gm, self.ser_fol):
             if ser and ser.is_open:
                 try: ser.close()
                 except Exception: pass
+
+    def _start_mux(self):
+        self.mux_gm  = SerialMux(self.ser_gm,  "GM",  self.log)
+        self.mux_fol = SerialMux(self.ser_fol,  "FOL", self.log)
+        self.trace   = TraceCollector(self.log)
+        self.trace.add_mux(self.mux_gm)
+        self.trace.add_mux(self.mux_fol)
+        self.mux_gm.start()
+        self.mux_fol.start()
+        self.log.info("  [MUX] Background trace readers started (GM + FOL)")
+
+    def _stop_mux(self):
+        if self.mux_gm:
+            self.mux_gm.stop()
+            self.mux_gm = None
+        if self.mux_fol:
+            self.mux_fol.stop()
+            self.mux_fol = None
 
     def _record(self, name: str, passed: bool, detail: str):
         self.results.append((name, passed, detail))
@@ -570,45 +746,7 @@ class PTPDriftCompensateTest:
         return passed
 
     # ------------------------------------------------------------------
-    def step_baseline(self) -> bool:
-        """Optional phase: collect clk_get samples before PTP is started."""
-        self.log.info(
-            f"\n--- Phase 0: Baseline (no PTP, {self.baseline_s:.0f} s) ---")
-        self.log.info(
-            "  Measuring raw crystal drift without any PTP correction.")
-        self.log.info(
-            "  Expected: slope ≈ crystal frequency difference (1–10 ppm)")
-
-        if not self.no_clk_set:
-            self.log.info("  Zeroing both clocks before baseline ...")
-            ok = zero_both_clocks(self.ser_gm, self.ser_fol, self.log)
-            if not ok:
-                self.log.info("  WARNING: clk_set 0 failed on one or both boards")
-
-        smpls, elps, dgm, dfol = collect_clk_get_samples(
-            self.ser_gm, self.ser_fol,
-            self.baseline_s, self.pause_ms,
-            self.no_swap, "BL", self.log)
-
-        stats = evaluate_samples(smpls, elps, dgm, dfol, "BASELINE", self.log)
-        if stats is None:
-            self._record("Phase 0: Baseline", False, "too few samples")
-            return False
-
-        print_regression_report(stats, "BASELINE — no PTP", self.log)
-        self._baseline_stats = stats
-
-        self._record(
-            "Phase 0: Baseline",
-            True,
-            f"slope={stats['slope_ppb']:+.0f}ppb ({stats['slope_ppm']:+.4f}ppm)"
-            f"  res_stdev={stats['res_stdev_ns']/1000:.0f}us"
-            f"  drift_fol={stats['mean_drift_fol']:+.0f}ppb")
-        return True
-
-    # ------------------------------------------------------------------
     def _start_conv_thread(self):
-        """Start background thread watching fol serial for PTP FINE state."""
         self._conv_result = None
         self._conv_thread = threading.Thread(
             target=self._conv_worker, daemon=True)
@@ -633,11 +771,9 @@ class PTPDriftCompensateTest:
 
     # ------------------------------------------------------------------
     def step_start_ptp(self) -> bool:
-        """Start PTP in silent mode: Board A = GM, Board B = Follower."""
         self.log.info("\n--- Step 3: Start PTP (silent mode) ---")
         passed = True
 
-        # Follower first
         self.log.info("  [FOL] ptp_mode follower  (silent)")
         resp = send_command(self.ser_fol, "ptp_mode follower",
                             self.conv_timeout, self.log)
@@ -651,7 +787,6 @@ class PTPDriftCompensateTest:
         self.ser_fol.reset_input_buffer()
         self._start_conv_thread()
 
-        # Grandmaster second
         self.log.info("  [GM ] ptp_mode master  (silent)")
         self.ser_gm.reset_input_buffer()
         self.ser_gm.write(b"ptp_mode master\r\n")
@@ -677,34 +812,125 @@ class PTPDriftCompensateTest:
         return passed
 
     # ------------------------------------------------------------------
+    def step_enable_trace(self):
+        """Send ptp_trace on to both boards (unless --no-trace), then start SerialMux readers."""
+        if self.no_trace:
+            self.log.info("\n--- Step 4: Start mux readers (ptp_trace DISABLED) ---")
+            self._start_mux()
+            return
+        self.log.info("\n--- Step 4: Enable ptp_trace + Start trace readers ---")
+        for label, ser in [("GM", self.ser_gm), ("FOL", self.ser_fol)]:
+            ser.reset_input_buffer()
+            ser.write(b"ptp_trace on\r\n")
+            time.sleep(0.2)
+            resp = ser.read(ser.in_waiting).decode("ascii", errors="replace")
+            self.log.info(f"  [{label}] ptp_trace on -> {resp.strip()!r}")
+        self._start_mux()
+
+    def step_disable_trace(self):
+        """Stop mux readers, send ptp_trace off (unless --no-trace)."""
+        self._stop_mux()
+        if self.no_trace:
+            return
+        self.log.info("\n--- Disable ptp_trace ---")
+        for label, ser in [("GM", self.ser_gm), ("FOL", self.ser_fol)]:
+            if ser and ser.is_open:
+                try:
+                    ser.write(b"ptp_trace off\r\n")
+                except Exception:
+                    pass
+                self.log.info(f"  [{label}] ptp_trace off sent")
+
+    # ------------------------------------------------------------------
     def step_ptp_collect(self) -> bool:
-        """Collect clk_get samples with PTP active and evaluate slope."""
         self.log.info(
             f"\n--- Phase 1: Compensated Measurement (PTP active, "
             f"{self.duration_s:.0f} s) ---")
         self.log.info(
             "  PTP IIR filter is now correcting the Follower TC0 tick rate.")
         self.log.info(
-            "  Expected: slope ≈ 0 ppb, drift_fol ≈ crystal offset")
+            "  Expected: slope ~= 0 ppb, drift_fol ~= crystal offset")
 
         if not self.no_clk_set:
             self.log.info(
                 f"  Settling {self.settle_s:.0f} s after FINE before zeroing clocks...")
             time.sleep(self.settle_s)
             self.log.info("  Zeroing both clocks ...")
-            ok = zero_both_clocks(self.ser_gm, self.ser_fol, self.log)
+            if self.mux_gm and self.mux_fol:
+                # Route through mux to avoid concurrent serial-read race condition.
+                # Send BOTH in parallel using threads + rendezvous barrier so the
+                # write() calls happen within a few us of each other (not sequentially
+                # like the mux's own send_and_wait would when called one after another).
+                res: dict = {}
+                ready_gm  = threading.Event()
+                ready_fol = threading.Event()
+                go        = threading.Event()
+
+                def _set_via_mux(mux, key, ready):
+                    ready.set()
+                    go.wait()
+                    t, ok = mux.send_and_wait("clk_set 0", "clk_set ok")
+                    res[key] = (t, ok)
+
+                ta = threading.Thread(target=_set_via_mux,
+                                      args=(self.mux_gm,  "gm",  ready_gm))
+                tb = threading.Thread(target=_set_via_mux,
+                                      args=(self.mux_fol, "fol", ready_fol))
+                ta.start(); tb.start()
+                ready_gm.wait(); ready_fol.wait()
+                go.set()
+                ta.join(timeout=3.0); tb.join(timeout=3.0)
+                t_gm,  ok_gm  = res.get("gm",  (0, False))
+                t_fol, ok_fol = res.get("fol", (0, False))
+                skew_us = (t_fol - t_gm) / 1000
+                self.log.info(f"  [GM ] clk_set 0: {'OK' if ok_gm  else 'FAIL'}")
+                self.log.info(f"  [FOL] clk_set 0: {'OK' if ok_fol else 'FAIL'}")
+                self.log.info(f"  Thread send skew: {skew_us:.1f} us")
+                ok = ok_gm and ok_fol
+            else:
+                ok = zero_both_clocks(self.ser_gm, self.ser_fol, self.log)
             if not ok:
                 self.log.info("  WARNING: clk_set 0 failed on one or both boards")
         else:
             if self.settle_s > 0:
-                self.log.info(
-                    f"  Settling {self.settle_s:.0f} s after FINE ...")
+                self.log.info(f"  Settling {self.settle_s:.0f} s after FINE ...")
                 time.sleep(self.settle_s)
 
+        # Drain any trace lines accumulated during settle
+        if self.trace:
+            self.trace.drain_all()
+
+        # Reset firmware loop_stats counters on both boards so the max
+        # we print at the end covers only the sampling window.
+        if self.mux_gm and self.mux_fol:
+            self.mux_gm.send_and_wait("loop_stats reset", "loop_stats: reset", timeout_s=1.0)
+            self.mux_fol.send_and_wait("loop_stats reset", "loop_stats: reset", timeout_s=1.0)
+            if self.trace:
+                self.trace.drain_all()
+
         smpls, elps, dgm, dfol = collect_clk_get_samples(
-            self.ser_gm, self.ser_fol,
+            self.mux_gm, self.mux_fol, self.trace,
             self.duration_s, self.pause_ms,
-            self.no_swap, "PTP", self.log)
+            self.no_swap, "PTP", self.outlier_us, self.log)
+
+        # Drain remaining trace lines after collection ends
+        final_trace = self.trace.drain_all() if self.trace else []
+        if final_trace:
+            self.log.info("\n  --- Remaining trace lines after collection ---")
+            for _, lbl, txt in final_trace:
+                self.log.info(f"    [TRACE][{lbl}] {txt}")
+
+        # Query per-subsystem loop timing to identify main-loop stalls.
+        if self.mux_gm and self.mux_fol:
+            self.log.info("\n  --- loop_stats (post-measurement) ---")
+            for label, mux in [("GM", self.mux_gm), ("FOL", self.mux_fol)]:
+                mux.send_and_wait("loop_stats", "TOTAL", timeout_s=2.0)
+                time.sleep(0.1)  # give trailing lines time to arrive in mux
+                lines = self.trace.drain_all() if self.trace else []
+                for _, _, txt in lines:
+                    if "loop_stats" in txt or any(k in txt for k in
+                        ("SYS_CMD", "TCPIP", "LOG_FLUSH", "APP", "TOTAL", "subsystem")):
+                        self.log.info(f"    [{label}] {txt}")
 
         stats = evaluate_samples(smpls, elps, dgm, dfol, "PTP", self.log)
         if stats is None:
@@ -714,73 +940,27 @@ class PTPDriftCompensateTest:
         print_regression_report(stats, "WITH PTP SYNC", self.log)
         self._ptp_stats = stats
 
-        threshold_ns = self.slope_threshold_ppm * 1000.0  # ppb = ns/s
+        threshold_ns    = self.slope_threshold_ppm * 1000.0
         res_threshold_ns = self.residual_threshold_us * 1000.0
         slope_passed    = abs(stats["slope_ppb"]) < threshold_ns
         residual_passed = stats["res_stdev_ns"]   < res_threshold_ns
         passed          = slope_passed and residual_passed
 
-        tag = "PASS" if slope_passed else "FAIL"
         self.log.info("")
+        tag = "PASS" if slope_passed else "FAIL"
         self.log.info(
             f"{tag}  |slope| = {abs(stats['slope_ppm']):.4f} ppm"
             f"  (threshold {self.slope_threshold_ppm} ppm)")
         tag2 = "PASS" if residual_passed else "FAIL"
         self.log.info(
-            f"{tag2}  residual stdev = {stats['res_stdev_ns']/1000:.3f} µs"
-            f"  (threshold {self.residual_threshold_us} µs)")
+            f"{tag2}  residual stdev = {stats['res_stdev_ns']/1000:.3f} us"
+            f"  (threshold {self.residual_threshold_us} us)")
 
         detail = (f"slope={stats['slope_ppb']:+.0f}ppb({stats['slope_ppm']:+.4f}ppm) "
                   f"res_stdev={stats['res_stdev_ns']/1000:.0f}us "
                   f"drift_fol={stats['mean_drift_fol']:+.0f}ppb")
         self._record("Phase 1: Compensated Measurement", passed, detail)
         return passed
-
-    # ------------------------------------------------------------------
-    def step_comparison(self):
-        """Print a side-by-side comparison if baseline was collected."""
-        if self._baseline_stats is None or self._ptp_stats is None:
-            return
-
-        bl  = self._baseline_stats
-        ptp = self._ptp_stats
-        log = self.log
-
-        log.info("\n" + "=" * 66)
-        log.info("  Drift Compensation Summary")
-        log.info("=" * 66)
-
-        reduction = 0.0
-        bl_slope_ppb = bl["slope_ppb"]
-        pt_slope_ppb = ptp["slope_ppb"]
-        if abs(bl_slope_ppb) > 0:
-            reduction = (1.0 - abs(pt_slope_ppb) / abs(bl_slope_ppb)) * 100.0
-
-        log.info(f"  Without PTP  slope : {bl_slope_ppb:+.0f} ppb"
-                 f"  ({bl['slope_ppm']:+.4f} ppm)")
-        log.info(f"  With PTP     slope : {pt_slope_ppb:+.0f} ppb"
-                 f"  ({ptp['slope_ppm']:+.4f} ppm)")
-        log.info(f"  Reduction          : {reduction:.1f} %")
-        log.info("")
-        log.info(f"  Follower drift (no PTP) : {bl['mean_drift_fol']:+.0f} ppb"
-                 f"  (expected: 0 — IIR idle)")
-        log.info(f"  Follower drift (PTP)    : {ptp['mean_drift_fol']:+.0f} ppb"
-                 f"  (IIR tracking crystal offset)")
-        log.info("")
-        log.info("  Interpretation:")
-        log.info("    The PTP IIR filter has slewed the Follower TC0 tick rate by")
-        log.info(f"    ~{abs(ptp['mean_drift_fol']):.0f} ppb to match the Grandmaster.")
-        if abs(bl_slope_ppb) > 0:
-            log.info(f"    This reduces the residual clock rate error by {reduction:.1f} %.")
-            log.info(f"    Crystal offset ({bl_slope_ppb:+.0f} ppb measured in baseline)")
-            log.info( "    is now actively compensated — diff(t) no longer drifts linearly.")
-        log.info("=" * 66)
-
-        self._record(
-            "Comparison: Drift reduction",
-            reduction > 50.0 or abs(pt_slope_ppb) < self.slope_threshold_ppm * 1000.0,
-            f"baseline={bl_slope_ppb:+.0f}ppb  ptp={pt_slope_ppb:+.0f}ppb"
-            f"  reduction={reduction:.1f}%")
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -799,7 +979,8 @@ class PTPDriftCompensateTest:
                  f"  (pause={self.pause_ms} ms)")
         log.info(f"Settle after FINE   : {self.settle_s:.0f} s")
         log.info(f"Slope threshold     : {self.slope_threshold_ppm} ppm")
-        log.info(f"Residual threshold  : {self.residual_threshold_us} µs")
+        log.info(f"Residual threshold  : {self.residual_threshold_us} us")
+        log.info(f"Outlier flag > {self.outlier_us:.0f} us")
         log.info(f"PTP conv timeout    : {self.conv_timeout:.0f} s")
         log.info(f"Swap-symmetry       : {'disabled' if self.no_swap else 'enabled'}")
         log.info(f"clk_set 0           : {'skipped' if self.no_clk_set else 'yes'}")
@@ -811,15 +992,14 @@ class PTPDriftCompensateTest:
             if not self.no_reset:
                 self.step_reset()
 
-            if not self.step_ip():     return self._report(start_time)
-            if not self.step_ping():   return self._report(start_time)
-
-            if self.baseline_s > 0:
-                self.step_baseline()
+            if not self.step_ip():   return self._report(start_time)
+            if not self.step_ping(): return self._report(start_time)
 
             if not self.step_start_ptp(): return self._report(start_time)
+
+            self.step_enable_trace()
             self.step_ptp_collect()
-            self.step_comparison()
+            self.step_disable_trace()
 
         except KeyboardInterrupt:
             log.info("\nInterrupted by user.")
@@ -837,7 +1017,7 @@ class PTPDriftCompensateTest:
         log     = self.log
         elapsed = (datetime.datetime.now() - start_time).total_seconds()
         log.info("\n" + "=" * 66)
-        log.info("  PTP Drift Compensation Test — Final Report")
+        log.info("  PTP Drift Compensation Test -- Final Report")
         log.info("=" * 66)
         passed_count = 0
         for name, passed, detail in self.results:
@@ -866,48 +1046,29 @@ def main() -> int:
         description="PTP Drift Compensation Test",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
-    p.add_argument("--gm-port",  default=DEFAULT_GM_PORT,
-                   help=f"COM port of Grandmaster (default: {DEFAULT_GM_PORT})")
-    p.add_argument("--fol-port", default=DEFAULT_FOL_PORT,
-                   help=f"COM port of Follower (default: {DEFAULT_FOL_PORT})")
-    p.add_argument("--gm-ip",   default=DEFAULT_GM_IP,
-                   help=f"IP address of GM (default: {DEFAULT_GM_IP})")
-    p.add_argument("--fol-ip",  default=DEFAULT_FOL_IP,
-                   help=f"IP address of Follower (default: {DEFAULT_FOL_IP})")
-    p.add_argument("--netmask", default=DEFAULT_NETMASK,
-                   help=f"Netmask (default: {DEFAULT_NETMASK})")
+    p.add_argument("--gm-port",  default=DEFAULT_GM_PORT)
+    p.add_argument("--fol-port", default=DEFAULT_FOL_PORT)
+    p.add_argument("--gm-ip",    default=DEFAULT_GM_IP)
+    p.add_argument("--fol-ip",   default=DEFAULT_FOL_IP)
+    p.add_argument("--netmask",  default=DEFAULT_NETMASK)
     p.add_argument("--baudrate", default=DEFAULT_BAUDRATE, type=int)
-    p.add_argument("--baseline-s", default=DEFAULT_BASELINE_S, type=float,
-                   help=f"Collect baseline WITHOUT PTP for N seconds before"
-                        f" starting PTP (0 = skip, default: {DEFAULT_BASELINE_S})")
+    p.add_argument("--baseline-s", default=DEFAULT_BASELINE_S, type=float)
     p.add_argument("--duration-s", default=DEFAULT_DURATION_S, type=float,
-                   help=f"Duration of compensated collection with PTP active"
-                        f" in seconds (default: {DEFAULT_DURATION_S})")
-    p.add_argument("--pause-ms", default=DEFAULT_PAUSE_MS, type=int,
-                   help=f"Pause between clk_get pairs in ms (default: {DEFAULT_PAUSE_MS})")
-    p.add_argument("--settle", default=DEFAULT_SETTLE_S, type=float,
-                   help=f"Settle time after FINE before collecting in s"
-                        f" (default: {DEFAULT_SETTLE_S})")
-    p.add_argument("--slope-threshold-ppm", default=DEFAULT_SLOPE_THRESHOLD_PPM,
-                   type=float,
-                   help=f"PASS/FAIL: residual slope threshold in ppm"
-                        f" (default: {DEFAULT_SLOPE_THRESHOLD_PPM})")
-    p.add_argument("--residual-threshold-us", default=DEFAULT_RESIDUAL_THRESHOLD_US,
-                   type=float,
-                   help=f"PASS/FAIL: residual stdev threshold in µs"
-                        f" (default: {DEFAULT_RESIDUAL_THRESHOLD_US})")
-    p.add_argument("--conv-timeout", default=DEFAULT_CONV_TIMEOUT, type=float,
-                   help=f"PTP FINE convergence timeout in s (default: {DEFAULT_CONV_TIMEOUT})")
-    p.add_argument("--no-swap", action="store_true",
-                   help="Disable swap-symmetrisation of clk_get pairs")
-    p.add_argument("--no-clk-set", action="store_true",
-                   help="Skip zeroing clocks with clk_set 0 before collection")
-    p.add_argument("--no-reset", action="store_true",
-                   help="Skip board reset at startup (boards already running)")
-    p.add_argument("--log-file", default=None,
-                   help="Write output to this file in addition to stdout")
-    p.add_argument("--verbose", action="store_true",
-                   help="Show raw serial debug output")
+                   help=f"Collection duration in s (default: {DEFAULT_DURATION_S})")
+    p.add_argument("--pause-ms", default=DEFAULT_PAUSE_MS, type=int)
+    p.add_argument("--settle",   default=DEFAULT_SETTLE_S, type=float)
+    p.add_argument("--slope-threshold-ppm",   default=DEFAULT_SLOPE_THRESHOLD_PPM,   type=float)
+    p.add_argument("--residual-threshold-us", default=DEFAULT_RESIDUAL_THRESHOLD_US, type=float)
+    p.add_argument("--outlier-us", default=DEFAULT_OUTLIER_US, type=float,
+                   help=f"Flag samples above this as outliers (default: {DEFAULT_OUTLIER_US} us)")
+    p.add_argument("--conv-timeout", default=DEFAULT_CONV_TIMEOUT, type=float)
+    p.add_argument("--no-swap",     action="store_true")
+    p.add_argument("--no-clk-set",  action="store_true")
+    p.add_argument("--no-reset",    action="store_true")
+    p.add_argument("--no-trace",    action="store_true",
+                   help="disable ptp_trace on firmware; mux still used for safe clk_get")
+    p.add_argument("--log-file",    default=None)
+    p.add_argument("--verbose",     action="store_true")
     args = p.parse_args()
 
     log_file = args.log_file
@@ -917,22 +1078,24 @@ def main() -> int:
 
     log = Logger(log_file=log_file, verbose=args.verbose)
     test = PTPDriftCompensateTest(
-        gm_port              = args.gm_port,
-        fol_port             = args.fol_port,
-        gm_ip                = args.gm_ip,
-        fol_ip               = args.fol_ip,
-        netmask              = args.netmask,
-        baseline_s           = args.baseline_s,
-        duration_s           = args.duration_s,
-        pause_ms             = args.pause_ms,
-        settle_s             = args.settle,
-        slope_threshold_ppm  = args.slope_threshold_ppm,
+        gm_port               = args.gm_port,
+        fol_port              = args.fol_port,
+        gm_ip                 = args.gm_ip,
+        fol_ip                = args.fol_ip,
+        netmask               = args.netmask,
+        baseline_s            = args.baseline_s,
+        duration_s            = args.duration_s,
+        pause_ms              = args.pause_ms,
+        settle_s              = args.settle,
+        slope_threshold_ppm   = args.slope_threshold_ppm,
         residual_threshold_us = args.residual_threshold_us,
-        conv_timeout         = args.conv_timeout,
-        no_swap              = args.no_swap,
-        no_clk_set           = args.no_clk_set,
-        no_reset             = args.no_reset,
-        log                  = log,
+        outlier_us            = args.outlier_us,
+        conv_timeout          = args.conv_timeout,
+        no_swap               = args.no_swap,
+        no_clk_set            = args.no_clk_set,
+        no_reset              = args.no_reset,
+        no_trace              = args.no_trace,
+        log                   = log,
     )
     try:
         return test.run()
