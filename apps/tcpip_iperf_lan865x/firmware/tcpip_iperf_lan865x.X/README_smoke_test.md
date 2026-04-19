@@ -105,6 +105,23 @@ This is the real litmus test: the whole chain — serial CLI, PTP lock, TC0
 tick conversion, spin-wait firing, ring buffer, dump, UDP socket layer —
 has to work for this phase to pass.
 
+**cyclic_fire end-to-end** — at the very end of Phase 3 the test starts
+`cyclic_start 500` on **both** boards with a shared PTP-wallclock anchor,
+dwells 2 s, then checks on each side:
+
+- **running** flag == yes during the dwell
+- **cycles** within a **loose** sanity range (500..15000) — see note below
+- **misses** < 20 (catches main-loop starvation)
+- **cyclic_stop** succeeds, **running** == no afterwards
+
+The cycle-count gate is intentionally wide because a scale-invariant
+~1.7× rate factor is currently observed on the reference hardware (4000
+nominal cycles, ~6800 observed at 500 µs period / 2 s dwell).  See
+Ticket 7 in `prompts/codebase_cleanup_followups.md`.  The smoke test's
+job here is to catch **"callback never fires"** and **"runaway"**, not
+to measure rate precision.  An oscilloscope on PB22 of both boards is
+the right tool for phase-alignment verification.
+
 **By-product: Crystal deviations** — at the end of Phase 3 the test
 prints per-crystal ppm deviations (no PASS/FAIL, informational only):
 
@@ -186,7 +203,7 @@ The log ends with a summary block:
 
 ```
 ======================================================================
-  Summary: 35 PASS / 0 FAIL  (total 35)
+  Summary: 42 PASS / 0 FAIL  (total 42)
 ======================================================================
 ```
 
@@ -206,6 +223,9 @@ Four numeric gates in Phase 3 guard the end-to-end chain:
 | `GATE_SW_NTP_OFFSET_NS`         | 1 000 000 ns | ~200 000 ns      | SW-NTP app-layer round-trip + UDP jitter |
 | `GATE_SW_NTP_MIN_SAMPLES`       | 5            | ~9 (at 1 Hz/8 s) | SW-NTP request/response actually works   |
 | `GATE_SW_NTP_MIN_SUCCESS`       | 70 %         | 100 % steady     | Tolerates ARP-settling timeouts on boot  |
+| `GATE_CYCLIC_MIN_CYCLES`        | 500          | ~6800 at 500 µs  | Catch "callback never fires"             |
+| `GATE_CYCLIC_MAX_CYCLES`        | 15 000       | ~6800 at 500 µs  | Catch runaway firing                     |
+| `GATE_CYCLIC_MAX_MISSES`        | 20           | 0                | Catch main-loop starvation               |
 
 Both are intentionally loose — roughly 3× the typical value on reference
 hardware. The smoke test is meant to flag _gross_ breakage (a factor-of-ten

@@ -21,12 +21,14 @@ This document describes each source module in `apps/tcpip_iperf_lan865x/firmware
 - [Applications Over PTP](#applications-over-ptp)
   - [sw_ntp](#sw_ntp)
   - [tfuture](#tfuture)
+  - [cyclic_fire](#cyclic_fire)
 - [CLI Adapters](#cli-adapters)
   - [lan_regs_cli](#lan_regs_cli)
   - [ptp_cli](#ptp_cli)
   - [sw_ntp_cli](#sw_ntp_cli)
   - [tfuture_cli](#tfuture_cli)
   - [loop_stats_cli](#loop_stats_cli)
+  - [cyclic_fire_cli](#cyclic_fire_cli)
 - [Application Glue](#application-glue)
   - [app](#app)
 - [Reuse Guidelines](#reuse-guidelines)
@@ -46,12 +48,13 @@ Portability rating for dropping a module into a different project:
 | `sw_ntp_offset_trace`   | fully portable   | plain C99                             | none                           |
 | `ptp_log`               | portable         | `SYS_CONSOLE_PRINT`                   | none                           |
 | `tfuture`               | portable         | `SYS_TIME_Counter64Get` + `ptp_clock` | none                           |
+| `cyclic_fire`           | portable         | `tfuture` + `SYS_PORT_PinToggle`      | none                           |
 | `sw_ntp`                | portable         | Harmony TCP/IP UDP API                | UDP                            |
 | `PTP_FOL_task`          | moderate         | LAN865x driver API                    | IEEE 1588                      |
 | `ptp_gm_task`           | moderate         | LAN865x driver API                    | IEEE 1588                      |
 | `ptp_ts_ipc`            | headers-only     | LAN865x TC6 driver                    | PTP 0x88F7                     |
 | `ptp_rx`                | moderate         | Harmony TCP/IP stack                  | PTP 0x88F7                     |
-| `*_cli` (all six)       | swap CLI layer   | Harmony `SYS_CMD`                     | depends on wrapped module      |
+| `*_cli` (all seven)     | swap CLI layer   | Harmony `SYS_CMD`                     | depends on wrapped module      |
 | `app`                   | not reusable     | Harmony Application template          | —                              |
 
 "Moderate" = works on any MCU/framework once the LAN865x driver, SYS_TIME, and the Harmony TCP/IP stack are available; the PTP protocol implementation itself is hardware-agnostic.
@@ -353,18 +356,58 @@ void            tfuture_get_last(uint64_t *target_ns, uint64_t *actual_ns);
 uint32_t        tfuture_get_fire_count(void);
 void            tfuture_set_drift_correction(bool enable);
 bool            tfuture_get_drift_correction(void);
+
+/* Post-fire callback hook: invoked inside tfuture_service() right after
+ * the spin-wait exits, BEFORE state goes IDLE.  Callback may re-arm via
+ * tfuture_arm_at_ns() to produce periodic firing (see `cyclic_fire`). */
+typedef void (*tfuture_fire_cb_t)(uint64_t target_ns, uint64_t actual_ns);
+void            tfuture_set_fire_callback(tfuture_fire_cb_t cb);
+
+/* Runtime-configurable busy-wait threshold.  Default 1000 µs matches the
+ * PTP service cadence.  Lower it (e.g. 100 µs) for cyclic sub-ms firing
+ * so other main-loop services still get CPU per cycle. */
+void            tfuture_set_spin_threshold_us(uint32_t us);
+uint32_t        tfuture_get_spin_threshold_us(void);
+
 void            tfuture_trace_reset(void);
 void            tfuture_trace_dump(void);
 uint32_t        tfuture_trace_count(void);
 ```
 
-**Reuse note** — Fully portable once `ptp_clock` and a 64-bit tick counter are available. The busy-wait window (1 ms default) is tunable via `TFUTURE_SPIN_THRESHOLD_TICKS` in `tfuture.c`.
+**Reuse note** — Fully portable once `ptp_clock` and a 64-bit tick counter are available.  The ns-per-tick conversion uses `SYS_TIME_FrequencyGet()` at runtime, so the module adapts to any TC0 clock configuration.  For a periodic-callback use case, pair with the `cyclic_fire` module instead of rolling your own re-arm loop.
+
+---
+
+### cyclic_fire
+
+**Function** — PTP-synchronous periodic GPIO toggle at a configurable rate.
+
+**Description** — Builds on `tfuture` via its post-fire callback hook.  `cyclic_fire_start(period_us, phase_anchor_ns)` arms `tfuture` for the first edge, then each callback toggles `PB22` and re-arms `tfuture` for the next slot `period_us` later in PTP-wallclock time.  Given two PTP-locked boards started with the same `phase_anchor_ns` + `period_us`, both boards toggle their `PB22` pins at identical PTP moments — scope-verifiable synchronous rectangle signals.
+
+Trade-off — shorter periods mean more CPU spent in `tfuture`'s busy-wait window.  `cyclic_fire_start` lowers `tfuture_set_spin_threshold_us()` to 100 µs on entry (and restores on stop) so `PTP_FOL_Service` / TCP-IP still get CPU between fires.  Periods below ~200 µs are not recommended.
+
+**Dependencies** — `tfuture`, `ptp_clock`, Harmony `SYS_PORT_PinToggle`.
+
+**API** — [cyclic_fire.h](cyclic_fire.h)
+
+```c
+#define CYCLIC_FIRE_DEFAULT_PERIOD_US  500u  /* → 1 kHz rectangle on PB22 */
+
+bool     cyclic_fire_start(uint32_t period_us, uint64_t phase_anchor_ns);
+void     cyclic_fire_stop(void);
+bool     cyclic_fire_is_running(void);
+uint32_t cyclic_fire_get_period_us(void);
+uint64_t cyclic_fire_get_cycle_count(void);
+uint64_t cyclic_fire_get_missed_count(void);
+```
+
+**Reuse note** — Swap `CYCLIC_FIRE_PIN` in `cyclic_fire.c` to retarget to another GPIO.  A known scale-invariant ~1.7× rate factor is currently observed (see `prompts/codebase_cleanup_followups.md` Ticket 7) — the mechanism works reliably, only the absolute rate is off.
 
 ---
 
 ## CLI Adapters
 
-These six modules were extracted from `app.c` during the `refactor/app-split` work. Each is a thin wrapper that registers commands with Harmony `SYS_CMD` and forwards them to the underlying functional module. Swap the CLI layer (e.g. for a plain UART REPL) and the underlying modules stay unchanged.
+These seven modules were extracted from `app.c` during the `refactor/app-split` work (six) plus `cyclic_fire_cli` on top.  Each is a thin wrapper that registers commands with Harmony `SYS_CMD` and forwards them to the underlying functional module. Swap the CLI layer (e.g. for a plain UART REPL) and the underlying modules stay unchanged.
 
 Pattern for every adapter:
 
@@ -451,6 +494,22 @@ void TFUTURE_CLI_Register(void);
 
 ```c
 void LOOP_STATS_CLI_Register(void);
+```
+
+---
+
+### cyclic_fire_cli
+
+**Function** — CLI for the periodic GPIO-toggle module.
+
+**Description** — 3 commands: `cyclic_start [period_us [anchor_ns]]` (defaults to 500 µs period, no explicit anchor), `cyclic_stop`, `cyclic_status` (running flag + period + cycle + miss counters).
+
+**Dependencies** — `cyclic_fire`, `SYS_CMD`.
+
+**API** — [cyclic_fire_cli.h](cyclic_fire_cli.h)
+
+```c
+void CYCLIC_FIRE_CLI_Register(void);
 ```
 
 ---

@@ -120,9 +120,26 @@ firing-jitter floor, so ignoring it is acceptable for the MVP.
 
 ```
 apps/tcpip_iperf_lan865x/firmware/src/
-├── tfuture.h          # Public API + state enum + ring-buffer size
+├── tfuture.h          # Public API + state enum + ring-buffer size +
+│                      #   post-fire callback hook + spin-threshold setter
 └── tfuture.c          # Arm/cancel, service, ring buffer, dump
 ```
+
+Callback hook API (added in the `cyclic-fire` branch, general-purpose):
+
+```c
+typedef void (*tfuture_fire_cb_t)(uint64_t target_ns, uint64_t actual_ns);
+void     tfuture_set_fire_callback(tfuture_fire_cb_t cb);
+void     tfuture_set_spin_threshold_us(uint32_t us);
+uint32_t tfuture_get_spin_threshold_us(void);
+```
+
+The callback runs inside `tfuture_service()` right after the spin-wait
+exits, with state set to IDLE beforehand — so the callback may re-arm
+via `tfuture_arm_at_ns()` to produce periodic firing.  The
+`cyclic_fire` module is the first consumer and drops the spin threshold
+from the 1 ms default to 100 µs on entry so other main-loop services
+still get CPU between fires at sub-millisecond periods.
 
 Integration in `app.c`:
 
@@ -532,16 +549,29 @@ Interpretation for this specific board pair:
   time constant (α = 1/32).  Run-to-run variance of ~100–200 ppm is normal
   and propagates into the §9 crystal-deviation readings.  Good enough for
   "which board has which mismatch" but not for calibration-grade numbers.
+- **Scale-invariant ~1.7× rate factor in the callback-driven cyclic path.**
+  When the post-fire callback re-arms `tfuture` for a periodic schedule
+  (see `cyclic_fire`), the observed firing rate is ~1.7× higher than the
+  configured period predicts (6800 cycles observed vs 4000 nominal at
+  500 µs / 2 s, same ratio at 2000 µs).  Ruled out: main-loop starvation
+  (misses == 0), TC0 frequency (verified 60 MHz from GCLK config),
+  hardcoded tick conversion (now uses `SYS_TIME_FrequencyGet()` at
+  runtime).  The single-shot tests in §7 are unaffected because they arm
+  once with large leads — the factor only surfaces at sub-millisecond
+  periodic arming.  Filed as Ticket 7 in
+  [prompts/codebase_cleanup_followups.md](../../../../prompts/codebase_cleanup_followups.md).
 
 ### Natural extensions
 
-1. **GPIO output** — add a CLI `tfuture_gpio <port> <pin>` that toggles a pin
-   inside the tight-spin exit path. ~20 lines of firmware.
+1. **GPIO output** — **implemented**: the `cyclic_fire` module uses the
+   new post-fire callback hook to toggle `PB22` on every callback.  See
+   [README_modules.md → cyclic_fire](../../src/README_modules.md#cyclic_fire).
 2. **EIC capture pin** on the other board — independent verification of firing
    coincidence without relying on PTP_CLOCK self-reports. ~100 lines + MCC
    config change.
-3. **Periodic firing** — a "fire every N ms starting at T" mode. Useful for
-   driving a synchronised sample rate across multiple boards.
+3. **Periodic firing** — **implemented**: `cyclic_fire` produces a
+   periodic GPIO rectangle synchronously across GM and FOL at a
+   configurable `period_us`.  Subject to the 1.7× rate caveat above.
 4. **TC compare interrupt** instead of spin — eliminates the 1 ms main-loop
    blocking. Gains ~zero precision but scales to continuous operation.
 5. **Dedicated `ptp_clock_inc` CLI** returning `TI + TISUBN` in a single

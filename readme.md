@@ -93,6 +93,7 @@ is not present in the original.
   - [5.9 Hardware-Timestamp Offset Capture](#59-hardware-timestamp-offset-capture--ptp_offset_capturepy)
   - [5.10 Software NTP vs HW-PTP Comparison](#510-software-ntp-vs-hw-ptp-comparison--sw_ntp_vs_ptp_testpy)
   - [5.11 tfuture Coordinated Firing + Crystal Deviation Analysis](#511-tfuture-coordinated-firing--crystal-deviation-analysis--tfuture_sync_testpy--tfuture_quick_checkpy)
+  - [5.12 Cyclic GPIO Toggle — cyclic_fire](#512-cyclic-gpio-toggle--cyclic_fire-module--pb22-rectangle)
 - [6. Hardware & Build Setup](#6-hardware--build-setup)
   - [6.1 Hardware Configuration](#61-hardware-configuration)
   - [6.2 Build Infrastructure](#62-build-infrastructure)
@@ -328,7 +329,15 @@ roles, switchable at runtime via CLI.
 | `src/ptp_offset_trace.c/.h` | 1024-entry ring buffer for hardware-timestamp PTP offsets. Used by `ptp_offset_capture.py` (§5.9). |
 | `src/sw_ntp.c/.h` | Minimal software-NTP (UDP) master + follower using SW timestamps from `PTP_CLOCK_GetTime_ns()`. Measurement-only; does not discipline the clock. See [README_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md). |
 | `src/sw_ntp_offset_trace.c/.h` | 1024-entry int64 ring buffer for SW-NTP offsets. Used by `sw_ntp_vs_ptp_test.py` (§5.10). |
-| `src/tfuture.c/.h` | Coordinated single-shot firing at an absolute PTP_CLOCK time. Hybrid precision (main-loop poll + 1 ms tight-spin). 256-entry ring buffer. See [README_tfuture.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture.md) and §5.11. |
+| `src/tfuture.c/.h` | Coordinated single-shot firing at an absolute PTP_CLOCK time. Hybrid precision (main-loop poll + runtime-configurable tight-spin). 256-entry ring buffer. Post-fire callback hook for periodic re-arming. See [README_tfuture.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture.md) and §5.11. |
+| `src/cyclic_fire.c/.h` | PTP-synchronous periodic GPIO toggle on `PB22` at a configurable `period_us` (default 500 µs → 1 kHz rectangle). Uses the `tfuture` callback hook. See §5.12. |
+| `src/cyclic_fire_cli.c/.h` | CLI wrapper for `cyclic_fire` — registers `cyclic_start` / `cyclic_stop` / `cyclic_status`. |
+| `src/lan_regs_cli.c/.h` | CLI adapter + async state machine for `lan_read` / `lan_write` LAN865x register access (extracted from `app.c`). |
+| `src/ptp_cli.c/.h` | CLI adapter for all 14 PTP / clock / offset-trace commands (extracted from `app.c`). |
+| `src/sw_ntp_cli.c/.h` | CLI adapter for all 6 SW-NTP commands + IP parser (extracted from `app.c`). |
+| `src/tfuture_cli.c/.h` | CLI adapter for all 7 tfuture commands (extracted from `app.c`). |
+| `src/loop_stats_cli.c/.h` | CLI adapter for the `loop_stats` command (extracted from `app.c`). |
+| `src/ptp_rx.c/.h` | PTP 0x88F7 frame filter + dispatcher between Harmony TCP/IP stack and the PTP tasks (extracted from `app.c`). |
 
 Three source files added to the CMake build in `cmake/.../CMakeLists.txt`:
 
@@ -572,6 +581,9 @@ Added `APP_STATE_IDLE` to the `APP_STATES` enumeration.
 | `tfuture_drift on\|off` | Diagnostic: enable/disable drift correction in `compute_target_tick` |
 | `ptp_gm_delay [<ns>]` | Diagnostic: add signed ns to GM anchor_wc at PTP_CLOCK_Update |
 | `clk_set_drift [<ppb>]` | Diagnostic: manually force PTP_CLOCK `drift_ppb` |
+| `cyclic_start [<period_us> [<anchor_ns>]]` | Start periodic GPIO toggle on `PB22` at `period_us` (default 500 µs); shared `anchor_ns` makes GM and FOL edges phase-aligned. See §5.12. |
+| `cyclic_stop` | Stop cyclic firing and drive `PB22` low |
+| `cyclic_status` | Show running flag, period, cycle count, miss count |
 
 ### 1.5 Console Output Format
 
@@ -1868,6 +1880,65 @@ python tfuture_diagnose_test.py                 # full 4-phase when needed
 
 All tfuture scripts import helpers from `ptp_drift_compensate_test.py`, so
 they must live in the same directory.
+
+---
+
+### 5.12 Cyclic GPIO Toggle — `cyclic_fire` module + PB22 rectangle
+
+§5.12 extends §5.11's single-shot firing into a **periodic** GPIO toggle on
+**PB22** of both boards, scheduled entirely from the PTP wallclock.  Given
+two PTP-locked boards armed with the same `period_us` and `phase_anchor_ns`,
+both boards toggle their PB22 pins at identical PTP moments — scope-verifiable
+synchronous rectangle signals across the link.
+
+Default period: **500 µs callback rate → 1 kHz rectangle** (500 µs high,
+500 µs low).  Period is configurable via the CLI `cyclic_start` argument.
+
+Firmware (`src/cyclic_fire.c`, `src/cyclic_fire_cli.c`):
+
+- Uses `tfuture_set_fire_callback()` to register a post-fire hook.
+- Each hook call: `SYS_PORT_PinToggle(PB22)`, then `tfuture_arm_at_ns(target + period)` to schedule the next edge at absolute PTP-wallclock time.
+- Lowers `tfuture_set_spin_threshold_us()` to 100 µs on start (and restores on stop) so PTP / TCP-IP still get CPU between fires at sub-ms periods.
+- Counts cycles + missed slots for diagnostics.
+
+Usage (run on **both** boards after PTP FINE):
+
+```
+# On GM: pick an anchor 100 ms in the future, shared with FOL
+> clk_get
+clk_get: 42195000000 ns  drift=+1200000ppb
+
+# On GM and FOL, same command:
+> cyclic_start 500 42295000000
+cyclic_start OK  period=500 us  anchor=42295000000 ns
+
+# Wait some time, then:
+> cyclic_status
+cyclic running : yes
+period         : 500 us
+cycles         : 14231
+misses         : 0
+
+# Stop:
+> cyclic_stop
+cyclic stopped
+```
+
+Verification path:
+
+- **Firmware-only regression** — `smoke_test.py` Phase 3 starts cyclic on
+  both boards for 2 s and checks that cycles accumulate (no callback-dead
+  bug) and misses stay low (no main-loop starvation).
+- **Physical verification** — requires a 2-channel oscilloscope on GM-PB22
+  and FOL-PB22.  Both rectangles should share edges within a few hundred ns
+  (limited by tfuture's firing precision from §5.11).
+
+**Known caveat**: a scale-invariant ~1.7× rate factor is observed (see
+Ticket 7 in `prompts/codebase_cleanup_followups.md`) — the callback
+mechanism works reliably, the two boards are PTP-locked to each other,
+but the absolute firing rate is offset from the configured `period_us`.
+The rectangles are synchronous between boards; only the period differs
+from the nominal configuration.
 
 ---
 
