@@ -30,10 +30,16 @@
 #define DRIFT_IIR_N  32
 
 /* Sanity window for the per-sample instantaneous ppb estimate.
- * Typical crystal tolerance is ±20-50 ppm; a ±200 ppm gate rejects extreme
- * outliers (e.g. during PTP state transitions) while allowing normal
- * crystal variation. */
-#define DRIFT_SANITY_PPB_ABS  200000
+ * Accepts up to ±5000 ppm.  Must cover the combined crystal mismatch
+ * between the SAME54 PLL source and the LAN865x internal oscillator
+ * (two independent crystals); measured on this board pair at
+ * approximately +1200 ppm.  The previous ±200 ppm limit silently
+ * dropped every GM sample (crystal mismatch > clamp), so the filter
+ * never converged and tfuture self_jitter showed ~1.3 ms of bias at
+ * lead=2 s.  Obviously-bad samples from anchor-update glitches
+ * typically produce values in tens of thousands of ppm and are still
+ * rejected. */
+#define DRIFT_SANITY_PPB_ABS  5000000
 
 /* Minimum elapsed-tick gap required before computing a rate estimate.
  * 10 ms = 600,000 TC0 ticks → per-sample noise ~50 ppm from 5 µs jitter,
