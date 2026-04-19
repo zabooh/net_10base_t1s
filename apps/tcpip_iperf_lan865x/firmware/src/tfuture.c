@@ -69,17 +69,22 @@ static bool compute_target_tick(uint64_t target_wc_ns, uint64_t *target_tick_out
     }
     uint64_t delta_wc_ns = target_wc_ns - now_wc_ns;
 
-    /* base_ticks = delta_wc_ns × 3 / 50  (inverse of the 50/3 ns/tick rate)
+    /* base_ticks = delta_wc_ns × (sys_time_freq_hz / 1e9).
+     * Querying SYS_TIME_FrequencyGet() at runtime decouples us from any
+     * hardcoded 60 MHz assumption and keeps timing correct if the TC0
+     * clock source ever changes.
      * First-order drift correction: if TC0 runs drift_ppb faster than nominal,
-     * each tick is shorter than 50/3 ns, so MORE ticks cover the same wc_ns.
+     * each tick is shorter than nominal, so MORE ticks cover the same wc_ns.
      * i.e. ticks ≈ base × (1 + drift_ppb/1e9). */
     int32_t drift_ppb = s_drift_correction ? PTP_CLOCK_GetDriftPPB() : 0;
 
-    /* Protect against overflow: delta_wc_ns up to ~2^63 → base_ticks up to
-     * 2^63 × 3/50 ≈ 5.5 × 10^17, still within int64 range.  For sane values
-     * (a few seconds in the future) this is many orders of magnitude away. */
-    uint64_t base_ticks = (delta_wc_ns / 50ULL) * 3ULL +
-                          ((delta_wc_ns % 50ULL) * 3ULL) / 50ULL;
+    uint64_t freq_hz = SYS_TIME_FrequencyGet();
+    if (freq_hz == 0u) freq_hz = 60000000ULL;     /* nominal fallback */
+
+    /* ticks = delta_ns × freq_hz / 1e9  — split to avoid 64-bit overflow for
+     * multi-second deltas (delta_ns up to ~10^10, freq_hz up to ~10^8). */
+    uint64_t base_ticks = (delta_wc_ns / 1000000000ULL) * freq_hz +
+                          ((delta_wc_ns % 1000000000ULL) * freq_hz) / 1000000000ULL;
 
     if (drift_ppb != 0) {
         /* adj magnitude = base × |ppb| / 1e9.  For ±200 ppm (|ppb|<2e5) and
@@ -169,7 +174,9 @@ void tfuture_service(void)
      * (already past firing point) — treated as positive delta, fire immediately. */
     int64_t ticks_until_target = (int64_t)(s_target_tick - now_tick);
 
-    uint64_t spin_threshold_ticks = (uint64_t)s_spin_threshold_us * TFUTURE_TICKS_PER_US;
+    uint64_t ticks_per_us = (uint64_t)SYS_TIME_FrequencyGet() / 1000000ULL;
+    if (ticks_per_us == 0u) ticks_per_us = TFUTURE_TICKS_PER_US;
+    uint64_t spin_threshold_ticks = (uint64_t)s_spin_threshold_us * ticks_per_us;
     if (ticks_until_target > (int64_t)spin_threshold_ticks) {
         /* Still far away, come back on next service call */
         return;

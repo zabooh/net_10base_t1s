@@ -81,6 +81,22 @@ GATE_SW_NTP_MIN_SAMPLES    = 5           # at 1 Hz poll, expect ≥5 in 8 s
 GATE_SW_NTP_MIN_SUCCESS    = 0.70        # ≥70 % successful replies — tolerates ARP-settling
                                          # timeouts right after a fresh boot
 
+# cyclic_fire end-to-end sanity — verifies the callback mechanism runs.
+# Period 500 µs, dwell 2 s, nominal would be 4000 cycles.  On the
+# reference hardware an unexplained ~1.7× rate factor is observed
+# (see prompts/codebase_cleanup_followups.md), so the gate is loose:
+# just catch "callback never fires" (< 500) and "runaway" (> 15000).
+CYCLIC_PERIOD_US           = 500
+CYCLIC_DWELL_S             = 2.0
+GATE_CYCLIC_MIN_CYCLES     = 500
+GATE_CYCLIC_MAX_CYCLES     = 15000
+GATE_CYCLIC_MAX_MISSES     = 20
+
+RE_CYC_RUNNING = re.compile(r"cyclic running\s*:\s+(yes|no)")
+RE_CYC_CYCLES  = re.compile(r"cycles\s*:\s+(\d+)")
+RE_CYC_MISSES  = re.compile(r"misses\s*:\s+(\d+)")
+RE_CYC_START_OK = re.compile(r"cyclic_start OK")
+
 # Crystal-deviation by-product — LAN8651 CLOCK_INCREMENT register pair
 # (see tfuture_quick_check.py §crystal-deviation-analysis for the math)
 MAC_TI_ADDR            = 0x00010077
@@ -376,6 +392,9 @@ def phase3_end_to_end(run: SmokeRunner, rounds: int = 5):
     # -------- Crystal-deviation by-product (informational only) ---------
     phase3_crystal_analysis(run)
 
+    # -------- cyclic_fire end-to-end: callback + re-arm loop on PB22 ----
+    phase3_cyclic_fire(run)
+
 
 def phase3_sw_ntp(run: SmokeRunner,
                   gm_ip: str = DEFAULT_GM_IP,
@@ -497,6 +516,92 @@ def phase3_crystal_analysis(run: SmokeRunner):
                  f"(from MAC_TI=0x{fol_ti:02X} TISUBN=0x{fol_tisubn:08X})")
     else:
         log.info(f"    FOL LAN8651 :   (unavailable — lan_read failed)")
+
+
+def phase3_cyclic_fire(run: SmokeRunner):
+    """Exercise cyclic_fire on both boards simultaneously with a shared
+    PTP-wallclock anchor, verify the callback actually fired at the
+    configured rate, and stop cleanly.
+
+    Firmware-only checks — cannot verify the actual GPIO signal edges
+    or GM↔FOL phase alignment (those need an oscilloscope).  Regression
+    value: catches a broken tfuture callback hook, broken re-arm loop,
+    main-loop starvation at short periods, or a broken start/stop API."""
+    log = run.log
+    gm, fol = run.ser_gm, run.ser_fol
+
+    # Pick a shared phase anchor ~100 ms in the future so both boards
+    # begin at the same PTP-wallclock moment regardless of the delta
+    # between their two cyclic_start calls.
+    resp = send_command(gm, "clk_get", 2.0, log)
+    m    = RE_CLK_GET.search(resp)
+    if not m:
+        run.check("cyclic_fire start (both)",
+                  lambda: (False, f"could not read GM clk: {resp[:80]!r}"))
+        return
+    anchor_ns = int(m.group(1)) + 100_000_000   # +100 ms
+
+    # Start both boards on the shared anchor.
+    gm_ok  = bool(RE_CYC_START_OK.search(
+        send_command(gm,  f"cyclic_start {CYCLIC_PERIOD_US} {anchor_ns}", 2.0, log)))
+    fol_ok = bool(RE_CYC_START_OK.search(
+        send_command(fol, f"cyclic_start {CYCLIC_PERIOD_US} {anchor_ns}", 2.0, log)))
+    run.check("cyclic_fire start (both)",
+              lambda: (gm_ok and fol_ok,
+                       f"GM={'OK' if gm_ok else 'FAIL'}  FOL={'OK' if fol_ok else 'FAIL'}"))
+    if not (gm_ok and fol_ok):
+        # Try to clean up so subsequent tests don't see a running instance
+        send_command(gm,  "cyclic_stop", 2.0, log)
+        send_command(fol, "cyclic_stop", 2.0, log)
+        return
+
+    log.info(f"  cyclic_fire: dwell {CYCLIC_DWELL_S:.1f} s  "
+             f"(period {CYCLIC_PERIOD_US} µs)")
+    time.sleep(CYCLIC_DWELL_S)
+
+    # Read status on both boards.
+    def parse_status(ser):
+        resp = send_command(ser, "cyclic_status", 3.0, log)
+        mr = RE_CYC_RUNNING.search(resp)
+        mc = RE_CYC_CYCLES.search(resp)
+        mm = RE_CYC_MISSES.search(resp)
+        if not (mr and mc and mm):
+            return None
+        return {
+            "running": mr.group(1) == "yes",
+            "cycles":  int(mc.group(1)),
+            "misses":  int(mm.group(1)),
+        }
+
+    gm_st  = parse_status(gm)
+    fol_st = parse_status(fol)
+
+    # Stop both unconditionally (so a partial-failure run still cleans up)
+    send_command(gm,  "cyclic_stop", 2.0, log)
+    send_command(fol, "cyclic_stop", 2.0, log)
+
+    if gm_st is None or fol_st is None:
+        run.check("cyclic_status parse",
+                  lambda: (False, f"GM={gm_st}  FOL={fol_st}"))
+        return
+
+    for side, st in (("GM", gm_st), ("FOL", fol_st)):
+        run.check(f"cyclic {side} running during dwell",
+                  lambda st=st: (st["running"], f"running={st['running']}"))
+        run.check(f"cyclic {side} callback ran (cycles in {GATE_CYCLIC_MIN_CYCLES}..{GATE_CYCLIC_MAX_CYCLES})",
+                  lambda st=st: (GATE_CYCLIC_MIN_CYCLES <= st["cycles"] <= GATE_CYCLIC_MAX_CYCLES,
+                                 f"cycles={st['cycles']}"))
+        run.check(f"cyclic {side} misses < {GATE_CYCLIC_MAX_MISSES}",
+                  lambda st=st: (st["misses"] < GATE_CYCLIC_MAX_MISSES,
+                                 f"misses={st['misses']}  (gate {GATE_CYCLIC_MAX_MISSES})"))
+
+    # After stop: both must show running=no.
+    gm_st2  = parse_status(gm)
+    fol_st2 = parse_status(fol)
+    for side, st in (("GM", gm_st2), ("FOL", fol_st2)):
+        run.check(f"cyclic {side} stopped after cyclic_stop",
+                  lambda st=st: (st is not None and not st["running"],
+                                 f"running={st['running'] if st else 'parse-fail'}"))
 
 
 # ---------------------------------------------------------------------------

@@ -73,7 +73,37 @@ Aktuell gemischt:
 
 **Warnung**: Das ist ein **großer** Eingriff mit vielen Call-Site-Änderungen. Nur angehen, wenn Zeit und klare Motivation vorhanden sind. Sonst: Status quo akzeptieren.
 
-## Ticket 7: `g_ptp_raw_rx` kapseln
+## Ticket 7: tfuture / cyclic_fire — scale-invariant 1.7× rate factor
+
+**Scope**: `tfuture.c` (compute_target_tick)
+
+**Symptom**: With `cyclic_fire` running at configurable periods (tested
+500 µs and 2000 µs), the observed callback rate is consistently ~1.7×
+higher than what the configured period would predict.  The ratio is
+scale-invariant — same factor at 500 µs period as at 2000 µs.
+
+**What was ruled out**:
+- Main-loop starvation (misses == 0 throughout).
+- TC0 clock config is 60 MHz as expected (GCLK1 = DPLL0/2 = 120/2).
+- `SYS_TIME_FrequencyGet()` returns 60 MHz; switching `base_ticks`
+  from hardcoded `× 3/50` to dynamic `× freq/1e9` changed nothing.
+- Drift correction: effect is only ~0.1 % (+1 Mppb ≈ 1000 ppm), not
+  enough to explain a 70 % rate error.
+
+**Suspected**: discrepancy between `PTP_CLOCK_GetTime_ns()` and the
+TC0 counter rate, possibly in how the anchor/interpolation maps PTP
+ns to TC0 ticks during periodic re-arming inside tfuture.
+
+**Why the smoke test tolerates this**: `cyclic_fire`'s check gate is
+deliberately loose (500 ≤ cycles ≤ 15000) to catch callback-dead or
+runaway bugs without depending on the exact rate.
+
+**Impact**: the GPIO signal still toggles and is still PTP-locked
+across GM/FOL (so both boards toggle at the same real-world moments
+— the rate is just different from the configured number).  Investigate
+when absolute rate precision matters.
+
+## Ticket 8: `g_ptp_raw_rx` kapseln
 
 **Scope**: `ptp_ts_ipc.h`, `ptp_rx.c` (nach Refactoring)
 
