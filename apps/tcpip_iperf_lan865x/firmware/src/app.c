@@ -28,17 +28,16 @@
 // *****************************************************************************
 
 #include "app.h"
-#include <string.h>
 #include "ptp_ts_ipc.h"
 #include "PTP_FOL_task.h"
 #include "ptp_gm_task.h"
-#include "loop_stats.h"
 #include "sw_ntp.h"
 #include "tfuture.h"
 #include "lan_regs_cli.h"
 #include "ptp_cli.h"
 #include "sw_ntp_cli.h"
 #include "tfuture_cli.h"
+#include "loop_stats_cli.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
 #include "system/command/sys_command.h"
@@ -80,30 +79,15 @@ static const void *MyEth0HandlerParam = NULL;
 static bool lan865x_prev_ready = false;
 
 // *****************************************************************************
-// Section: Application Local Functions
+// Section: Command Aggregation
 // *****************************************************************************
 
-/* loop_stats — print per-subsystem max/avg loop time since last reset */
-static void loop_stats_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
-    (void)pCmdIO;
-    if (argc >= 2 && strcmp(argv[1], "reset") == 0) {
-        LOOP_STATS_Reset();
-        SYS_CONSOLE_PRINT("loop_stats: reset\r\n");
-        return;
-    }
-    LOOP_STATS_Print();
-}
-
-static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
-    {"loop_stats",  (SYS_CMD_FNC) loop_stats_cmd,  ": main-loop per-subsystem timing (loop_stats [reset])"},
-};
-
-static bool Command_Init(void) {
+static void Command_Init(void) {
     LAN_REGS_CLI_Register();
     PTP_CLI_Register();
     SW_NTP_CLI_Register();
     TFUTURE_CLI_Register();
-    return SYS_CMD_ADDGRP(lan_cmd_tbl, (int)(sizeof(lan_cmd_tbl) / sizeof(*lan_cmd_tbl)), "Test", ": Test Commands");
+    LOOP_STATS_CLI_Register();
 }
 
 /* --------------------------------------------------------------------------
