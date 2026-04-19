@@ -28,7 +28,6 @@
 // *****************************************************************************
 
 #include "app.h"
-#include "ptp_ts_ipc.h"
 #include "PTP_FOL_task.h"
 #include "ptp_gm_task.h"
 #include "sw_ntp.h"
@@ -38,13 +37,12 @@
 #include "sw_ntp_cli.h"
 #include "tfuture_cli.h"
 #include "loop_stats_cli.h"
+#include "ptp_rx.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
-#include "system/command/sys_command.h"
 #include "system/console/sys_console.h"
 #define TCPIP_THIS_MODULE_ID    TCPIP_MODULE_MANAGER
 #include "library/tcpip/tcpip.h"
-#include "library/tcpip/src/tcpip_packet.h"
 
 // *****************************************************************************
 // *****************************************************************************
@@ -69,12 +67,6 @@
 
 APP_DATA appData;
 
-// *****************************************************************************
-// PTP packet handler forward declaration
-// *****************************************************************************
-bool pktEth0Handler(TCPIP_NET_HANDLE hNet, TCPIP_MAC_PACKET* rxPkt, uint16_t frameType, const void* hParam);
-static const void *MyEth0HandlerParam = NULL;
-
 /* Track LAN865x driver ready state to detect reinit-complete while in GM mode */
 static bool lan865x_prev_ready = false;
 
@@ -88,29 +80,6 @@ static void Command_Init(void) {
     SW_NTP_CLI_Register();
     TFUTURE_CLI_Register();
     LOOP_STATS_CLI_Register();
-}
-
-/* --------------------------------------------------------------------------
- * pktEth0Handler — Harmony TCP/IP packet handler for eth0 (LAN865x).
- * Called by the TCP/IP stack in interrupt/task context for every received frame.
- * Returns true if the packet was consumed (caller must NOT free it);
- * returns false to let the stack process the frame normally.
- * -------------------------------------------------------------------------- */
-bool pktEth0Handler(TCPIP_NET_HANDLE hNet, TCPIP_MAC_PACKET* rxPkt,
-                    uint16_t frameType, const void* hParam)
-{
-    (void)hNet;
-    (void)hParam;
-
-    /* PTP frame (EtherType 0x88F7): consumed here so the IP stack does not see it.
-     * Frame data is already captured by the primary path (TC6_CB_OnRxEthernetPacket
-     * → g_ptp_raw_rx) at driver level before this handler is called.
-     * No buffering needed here — ptp_rx_buffer fallback is retired. */
-    if (frameType == 0x88F7u) {
-        TCPIP_PKT_PacketAcknowledge(rxPkt, TCPIP_MAC_PKT_ACK_RX_OK);
-        return true;
-    }
-    return false;
 }
 
 // *****************************************************************************
@@ -182,10 +151,9 @@ void APP_Tasks ( void )
             }
 
             /* Register the PTP packet handler */
-            TCPIP_STACK_PROCESS_HANDLE hPktHnd =
-                TCPIP_STACK_PacketHandlerRegister(eth0_net_hd, pktEth0Handler, MyEth0HandlerParam);
+            bool ptpRxOk = PTP_RX_Register(eth0_net_hd);
             SYS_CONSOLE_PRINT("[APP] PacketHandlerRegister: %s\r\n",
-                              (hPktHnd != NULL) ? "OK" : "FAIL");
+                              ptpRxOk ? "OK" : "FAIL");
 
             appData.state = APP_STATE_IDLE;
             break;
@@ -243,22 +211,9 @@ void APP_Tasks ( void )
              * threshold can fire with tick-level precision. */
             tfuture_service();
 
-            /* === FOL: process a buffered PTP frame ===
-             * Filled by TC6_CB_OnRxEthernetPacket at driver level.
-             * pktEth0Handler only consumes the frame so the IP stack does not see it. */
-            if (g_ptp_raw_rx.pending) {
-                g_ptp_raw_rx.pending = false;   /* clear first to avoid re-entry */
-                if (PTP_FOL_GetMode() == PTP_SLAVE) {
-                    PTP_FOL_OnFrame((const uint8_t *)g_ptp_raw_rx.data,
-                                   g_ptp_raw_rx.length,
-                                   g_ptp_raw_rx.rxTimestamp);
-                } else if (PTP_FOL_GetMode() == PTP_MASTER) {
-                    /* GM: respond to Delay_Req frames from followers */
-                    PTP_GM_OnDelayReq((const uint8_t *)g_ptp_raw_rx.data,
-                                      g_ptp_raw_rx.length,
-                                      g_ptp_raw_rx.rxTimestamp);
-                }
-            }
+            /* === FOL/GM: process a buffered PTP frame ===
+             * Filled by TC6_CB_OnRxEthernetPacket at driver level. */
+            PTP_RX_Poll();
 
             /* Re-run PTP_GM_Init() if the LAN865x driver recovers from a
              * reinit (Loss-of-Framing-Error) while in GM mode. The reinit
