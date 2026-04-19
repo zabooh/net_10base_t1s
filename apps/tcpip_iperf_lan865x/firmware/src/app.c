@@ -472,16 +472,61 @@ static void tfuture_status_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **arg
     tfuture_state_t st = tfuture_get_state();
     const char *ss = (st == TFUTURE_PENDING) ? "pending" :
                      (st == TFUTURE_FIRED)   ? "fired"   : "idle";
-    SYS_CONSOLE_PRINT("tfuture state  : %s\r\n", ss);
-    SYS_CONSOLE_PRINT("tfuture fires  : %lu\r\n", (unsigned long)tfuture_get_fire_count());
+    SYS_CONSOLE_PRINT("tfuture state     : %s\r\n", ss);
+    SYS_CONSOLE_PRINT("tfuture fires     : %lu\r\n", (unsigned long)tfuture_get_fire_count());
+    SYS_CONSOLE_PRINT("drift correction  : %s\r\n",
+                      tfuture_get_drift_correction() ? "ON" : "OFF");
+    SYS_CONSOLE_PRINT("PTP_CLOCK drift   : %+ld ppb\r\n", (long)PTP_CLOCK_GetDriftPPB());
     uint64_t last_t = 0u, last_a = 0u;
     tfuture_get_last(&last_t, &last_a);
     if (last_t != 0u) {
         int64_t delta = (int64_t)(last_a - last_t);
-        SYS_CONSOLE_PRINT("last target ns : %llu\r\n", (unsigned long long)last_t);
-        SYS_CONSOLE_PRINT("last actual ns : %llu\r\n", (unsigned long long)last_a);
-        SYS_CONSOLE_PRINT("last delta ns  : %+lld\r\n", (long long)delta);
+        SYS_CONSOLE_PRINT("last target ns    : %llu\r\n", (unsigned long long)last_t);
+        SYS_CONSOLE_PRINT("last actual ns    : %llu\r\n", (unsigned long long)last_a);
+        SYS_CONSOLE_PRINT("last delta ns     : %+lld\r\n", (long long)delta);
     }
+}
+
+static void clk_set_drift_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc < 2) {
+        SYS_CONSOLE_PRINT("clk_set_drift: current drift_ppb = %+ld\r\n",
+                          (long)PTP_CLOCK_GetDriftPPB());
+        return;
+    }
+    int32_t ppb = (int32_t)strtol(argv[1], NULL, 0);
+    PTP_CLOCK_SetDriftPPB(ppb);
+    SYS_CONSOLE_PRINT("clk_set_drift: drift_ppb forced to %+ld\r\n", (long)ppb);
+}
+
+static void ptp_gm_delay_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc < 2) {
+        SYS_CONSOLE_PRINT("ptp_gm_delay: %lld ns\r\n",
+                          (long long)PTP_GM_GetExtraAnchorDelay());
+        return;
+    }
+    int64_t ns = (int64_t)strtoll(argv[1], NULL, 0);
+    PTP_GM_SetExtraAnchorDelay(ns);
+    SYS_CONSOLE_PRINT("ptp_gm_delay set to %lld ns\r\n", (long long)ns);
+}
+
+static void tfuture_drift_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc < 2) {
+        SYS_CONSOLE_PRINT("tfuture drift correction: %s\r\n",
+                          tfuture_get_drift_correction() ? "ON" : "OFF");
+        return;
+    }
+    bool enable;
+    if (strcmp(argv[1], "on") == 0)        enable = true;
+    else if (strcmp(argv[1], "off") == 0)  enable = false;
+    else {
+        SYS_CONSOLE_PRINT("Usage: tfuture_drift [on|off]\r\n");
+        return;
+    }
+    tfuture_set_drift_correction(enable);
+    SYS_CONSOLE_PRINT("tfuture drift correction: %s\r\n", enable ? "ON" : "OFF");
 }
 
 static void tfuture_reset_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
@@ -523,6 +568,9 @@ static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
     {"tfuture_status", (SYS_CMD_FNC) tfuture_status_cmd, ": show tfuture state, fire count, last target/actual"},
     {"tfuture_reset",  (SYS_CMD_FNC) tfuture_reset_cmd,  ": clear tfuture ring buffer"},
     {"tfuture_dump",   (SYS_CMD_FNC) tfuture_dump_cmd,   ": dump all recorded fires (<target_ns> <actual_ns> <delta>)"},
+    {"tfuture_drift",  (SYS_CMD_FNC) tfuture_drift_cmd,  ": enable/disable drift correction in tfuture (tfuture_drift [on|off])"},
+    {"ptp_gm_delay",   (SYS_CMD_FNC) ptp_gm_delay_cmd,   ": diagnostic: set extra ns added to GM anchor_wc (ptp_gm_delay [<ns>])"},
+    {"clk_set_drift",  (SYS_CMD_FNC) clk_set_drift_cmd,  ": diagnostic: manually set PTP_CLOCK drift_ppb (clk_set_drift [<ppb>])"},
 };
 
 static bool Command_Init(void) {

@@ -72,6 +72,7 @@ static gmState_t        gm_state            = GM_STATE_IDLE;
 static volatile bool    gm_op_done          = false;   /* set by read/write callback */
 static volatile uint32_t gm_op_val          = 0u;      /* value from last read callback */
 static uint32_t         gm_status0          = 0u;      /* OA_STATUS0 snapshot */
+static int64_t          gm_extra_anchor_delay_ns = 0;  /* diagnostic: added to anchor_wc (H1) */
 static uint32_t         gm_ts_sec           = 0u;      /* TX timestamp: seconds */
 static uint32_t         gm_ts_nsec          = 0u;      /* TX timestamp: nanoseconds */
 static uint32_t         gm_tick_ms          = 0u;      /* ms counter, incremented per Service() call */
@@ -717,10 +718,11 @@ void PTP_GM_Service(void)
              * bias that empirically reduces the ptp_time diff to < ±1 ms.
              * Drift correction is disabled, so no amplification of this bias. */
             {
-                uint64_t wc_ns = (uint64_t)gm_ts_sec * 1000000000ULL
-                               + (uint64_t)gm_ts_nsec
-                               + PTP_GM_ANCHOR_OFFSET_NS;
-                PTP_CLOCK_Update(wc_ns, SYS_TIME_Counter64Get());
+                int64_t wc_ns = (int64_t)gm_ts_sec * 1000000000LL
+                              + (int64_t)gm_ts_nsec
+                              + (int64_t)PTP_GM_ANCHOR_OFFSET_NS
+                              + gm_extra_anchor_delay_ns;
+                PTP_CLOCK_Update((uint64_t)wc_ns, SYS_TIME_Counter64Get());
             }
             gm_seq_id++;
             gm_sync_cnt++;
@@ -1043,6 +1045,16 @@ void PTP_GM_SetVerbose(bool verbose)
 void PTP_GM_SetTrace(bool enable)
 {
     gm_trace_enabled = enable;
+}
+
+void PTP_GM_SetExtraAnchorDelay(int64_t ns)
+{
+    gm_extra_anchor_delay_ns = ns;
+}
+
+int64_t PTP_GM_GetExtraAnchorDelay(void)
+{
+    return gm_extra_anchor_delay_ns;
 }
 
 void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)

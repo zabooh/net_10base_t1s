@@ -177,4 +177,16 @@ void PTP_GM_SetTrace(bool enable);
  */
 void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp);
 
+/**
+ * Diagnostic: extra anchor delay added to the GM PTP_CLOCK anchor_wc on
+ * each Sync TX.  Default 0.  Used to compensate the ~6 ms gap between the
+ * LAN865x TTSCA capture moment (SFD on wire) and the SYS_TIME_Counter64Get
+ * read moment (after register readback).  Setting this to the measured
+ * gap aligns anchor_wc with anchor_tick so PTP_CLOCK_GetTime_ns() output
+ * stays consistent across anchor updates.  Signed int64; negative values
+ * subtract from anchor_wc.
+ */
+void    PTP_GM_SetExtraAnchorDelay(int64_t ns);
+int64_t PTP_GM_GetExtraAnchorDelay(void);
+
 #endif /* PTP_GM_TASK_H */

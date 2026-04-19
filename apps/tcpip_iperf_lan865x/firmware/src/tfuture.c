@@ -28,6 +28,7 @@ static uint64_t        s_target_tick   = 0u;   /* target in raw TC0 ticks     */
 static uint64_t        s_last_target_ns = 0u;
 static uint64_t        s_last_actual_ns = 0u;
 static uint32_t        s_fires_count   = 0u;
+static bool            s_drift_correction = true;   /* diagnostic toggle */
 
 /* Ring buffer: (target_ns, actual_ns) pairs. */
 static uint64_t s_trace_target[TFUTURE_TRACE_SIZE];
@@ -68,7 +69,7 @@ static bool compute_target_tick(uint64_t target_wc_ns, uint64_t *target_tick_out
      * First-order drift correction: if TC0 runs drift_ppb faster than nominal,
      * each tick is shorter than 50/3 ns, so MORE ticks cover the same wc_ns.
      * i.e. ticks ≈ base × (1 + drift_ppb/1e9). */
-    int32_t drift_ppb = PTP_CLOCK_GetDriftPPB();
+    int32_t drift_ppb = s_drift_correction ? PTP_CLOCK_GetDriftPPB() : 0;
 
     /* Protect against overflow: delta_wc_ns up to ~2^63 → base_ticks up to
      * 2^63 × 3/50 ≈ 5.5 × 10^17, still within int64 range.  For sane values
@@ -201,6 +202,16 @@ void tfuture_get_last(uint64_t *target_ns_out, uint64_t *actual_ns_out)
 uint32_t tfuture_get_fire_count(void)
 {
     return s_fires_count;
+}
+
+void tfuture_set_drift_correction(bool enable)
+{
+    s_drift_correction = enable;
+}
+
+bool tfuture_get_drift_correction(void)
+{
+    return s_drift_correction;
 }
 
 /* -------------------------------------------------------------------------

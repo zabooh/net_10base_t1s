@@ -47,6 +47,12 @@ void            tfuture_get_last(uint64_t *target_ns_out,
                                  uint64_t *actual_ns_out);
 uint32_t        tfuture_get_fire_count(void);
 
+/* Diagnostic: when false, compute_target_tick ignores drift_ppb (acts as if
+ * drift = 0).  Useful to test whether the observed self_jitter bias comes
+ * from the drift correction term. */
+void            tfuture_set_drift_correction(bool enable);
+bool            tfuture_get_drift_correction(void);
+
 /* Ring-buffer trace */
 void            tfuture_trace_reset(void);
 void            tfuture_trace_dump(void);
