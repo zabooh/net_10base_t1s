@@ -95,7 +95,8 @@ as a sanity snapshot of the system state.
   enters `sw_ntp_mode follower <gm_ip>`, and after an 8 s dwell the
   follower's `sw_ntp_status` is checked for:
   - **samples ≥ 5** (at 1 Hz poll)
-  - **timeouts == 0**
+  - **success rate ≥ 70 %** (tolerates 1-2 initial ARP-settling timeouts
+    after a fresh boot; typical steady-state is 100 %)
   - **|last_offset| < 1 ms** (PTP is locked, so application-layer offset
     is dominated by UDP jitter, typically 100-300 µs)
   Both boards revert to `sw_ntp_mode off` afterwards.
@@ -179,7 +180,8 @@ Four numeric gates in Phase 3 guard the end-to-end chain:
 | `GATE_PTP_OFFSET_ABS_NS`        | 50 000 ns    | ~1 000 ns        | PTP lock quality after settle            |
 | `GATE_FOL_SELF_JITTER_NS`       | 200 000 ns   | ~70 000 ns       | `tfuture` tick-conversion end-to-end     |
 | `GATE_SW_NTP_OFFSET_NS`         | 1 000 000 ns | ~200 000 ns      | SW-NTP app-layer round-trip + UDP jitter |
-| `GATE_SW_NTP_MIN_SAMPLES`       | 5            | ~8 (at 1 Hz/8 s) | SW-NTP request/response actually works   |
+| `GATE_SW_NTP_MIN_SAMPLES`       | 5            | ~9 (at 1 Hz/8 s) | SW-NTP request/response actually works   |
+| `GATE_SW_NTP_MIN_SUCCESS`       | 70 %         | 100 % steady     | Tolerates ARP-settling timeouts on boot  |
 
 Both are intentionally loose — roughly 3× the typical value on reference
 hardware. The smoke test is meant to flag _gross_ breakage (a factor-of-ten

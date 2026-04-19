@@ -76,8 +76,10 @@ RE_LOOP_STATS       = re.compile(r"(loop_stats|Main loop|subsystem)", re.IGNOREC
 # End-to-end sanity gates (generous bounds — tight gates live in dedicated tests)
 GATE_FOL_SELF_JITTER_NS = 200_000        # 200 µs
 GATE_PTP_OFFSET_ABS_NS  = 50_000         # 50 µs after FINE lock + settle
-GATE_SW_NTP_OFFSET_NS   = 1_000_000      # 1 ms — generous since app-layer incl. UDP jitter
-GATE_SW_NTP_MIN_SAMPLES = 5              # at 1 Hz poll, expect ≥5 in 8 s
+GATE_SW_NTP_OFFSET_NS      = 1_000_000   # 1 ms — generous since app-layer incl. UDP jitter
+GATE_SW_NTP_MIN_SAMPLES    = 5           # at 1 Hz poll, expect ≥5 in 8 s
+GATE_SW_NTP_MIN_SUCCESS    = 0.70        # ≥70 % successful replies — tolerates ARP-settling
+                                         # timeouts right after a fresh boot
 
 RE_SW_NTP_SAMPLES  = re.compile(r"Samples\s*:\s+(\d+)")
 RE_SW_NTP_TIMEOUTS = re.compile(r"Timeouts\s*:\s+(\d+)")
@@ -400,11 +402,15 @@ def phase3_sw_ntp(run: SmokeRunner,
     timeouts = int(m_t.group(1))
     offset   = int(m_o.group(1))
 
+    total_requests = samples + timeouts
+    success_rate   = (samples / total_requests) if total_requests > 0 else 0.0
+
     run.check(f"SW-NTP samples ≥ {GATE_SW_NTP_MIN_SAMPLES}",
               lambda: (samples >= GATE_SW_NTP_MIN_SAMPLES,
                        f"samples={samples}  timeouts={timeouts}"))
-    run.check("SW-NTP no timeouts",
-              lambda: (timeouts == 0, f"timeouts={timeouts}"))
+    run.check(f"SW-NTP success rate ≥ {GATE_SW_NTP_MIN_SUCCESS:.0%}",
+              lambda: (success_rate >= GATE_SW_NTP_MIN_SUCCESS,
+                       f"{samples}/{total_requests} = {success_rate:.0%}"))
     run.check(f"SW-NTP |last_offset| < {GATE_SW_NTP_OFFSET_NS/1000:.0f} µs",
               lambda: (abs(offset) < GATE_SW_NTP_OFFSET_NS,
                        f"last_offset={offset:+d} ns  (gate {GATE_SW_NTP_OFFSET_NS})"))
