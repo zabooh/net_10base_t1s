@@ -105,6 +105,30 @@ This is the real litmus test: the whole chain — serial CLI, PTP lock, TC0
 tick conversion, spin-wait firing, ring buffer, dump, UDP socket layer —
 has to work for this phase to pass.
 
+**By-product: Crystal deviations** — at the end of Phase 3 the test
+prints per-crystal ppm deviations (no PASS/FAIL, informational only):
+
+```
+Crystal deviations (by-product, informational):
+  GM  LAN8651 :     0.000 ppm   (reference)
+  GM  SAME54  :  -965.835 ppm   (from drift_ppb)
+  FOL SAME54  : -1124.758 ppm   (from drift_ppb)
+  FOL LAN8651 :    +5.020 ppm   (from MAC_TI + MAC_TISUBN)
+```
+
+Derived as a side-effect of the PTP lock:
+
+- **SAME54 crystals** → `−drift_ppb / 1000` (the PI servo drives the
+  LAN865x TSU to the real wallclock, so the reported drift is the
+  complement of the SAME54's deviation).
+- **FOL LAN8651** → decode of the PI-calibrated `CLOCK_INCREMENT`
+  register pair (`MAC_TI` + `MAC_TISUBN`, read live via `lan_read`).
+- **GM LAN8651** → 0 ppm by definition (reference).
+
+The same analysis is implemented in `tfuture_quick_check.py`. If you
+need numerical cross-validation across many runs use that tool; the
+smoke test just prints the current values once per run.
+
 ---
 
 ## 4. What It Deliberately Omits

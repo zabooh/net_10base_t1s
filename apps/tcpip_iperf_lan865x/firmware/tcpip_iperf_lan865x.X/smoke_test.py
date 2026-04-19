@@ -81,6 +81,12 @@ GATE_SW_NTP_MIN_SAMPLES    = 5           # at 1 Hz poll, expect ≥5 in 8 s
 GATE_SW_NTP_MIN_SUCCESS    = 0.70        # ≥70 % successful replies — tolerates ARP-settling
                                          # timeouts right after a fresh boot
 
+# Crystal-deviation by-product — LAN8651 CLOCK_INCREMENT register pair
+# (see tfuture_quick_check.py §crystal-deviation-analysis for the math)
+MAC_TI_ADDR            = 0x00010077
+MAC_TISUBN_ADDR        = 0x0001006F
+CLOCK_CYCLE_NS_NOMINAL = 40.0            # 25 MHz nominal LAN8651 clock
+
 RE_SW_NTP_SAMPLES  = re.compile(r"Samples\s*:\s+(\d+)")
 RE_SW_NTP_TIMEOUTS = re.compile(r"Timeouts\s*:\s+(\d+)")
 RE_SW_NTP_LAST_OFF = re.compile(r"Last offset ns\s*:\s+([+-]?\d+)")
@@ -367,6 +373,9 @@ def phase3_end_to_end(run: SmokeRunner, rounds: int = 5):
     # -------- SW-NTP end-to-end: real UDP exchange over the link --------
     phase3_sw_ntp(run)
 
+    # -------- Crystal-deviation by-product (informational only) ---------
+    phase3_crystal_analysis(run)
+
 
 def phase3_sw_ntp(run: SmokeRunner,
                   gm_ip: str = DEFAULT_GM_IP,
@@ -414,6 +423,80 @@ def phase3_sw_ntp(run: SmokeRunner,
     run.check(f"SW-NTP |last_offset| < {GATE_SW_NTP_OFFSET_NS/1000:.0f} µs",
               lambda: (abs(offset) < GATE_SW_NTP_OFFSET_NS,
                        f"last_offset={offset:+d} ns  (gate {GATE_SW_NTP_OFFSET_NS})"))
+
+
+def _lan_read_value(ser, addr: int, log) -> int:
+    """Read a LAN865x register via lan_read CLI. Returns value or None."""
+    resp = send_command(ser, f"lan_read 0x{addr:08X}", 2.0, log)
+    m = RE_LAN_READ_OK.search(resp)
+    return int(m.group(1), 16) if m else None
+
+
+def _decode_clock_inc_ppm(ti_reg: int, tisubn_raw: int) -> float:
+    """Decode the LAN8651 CLOCK_INCREMENT register pair as written by
+    PTP_FOL_task.c into a ppm deviation from the nominal 40 ns period.
+
+    Firmware packing (see PTP_FOL_task.c):
+      calcSubInc_uint = ((calcSubInc_uint >> 8) & 0xFFFF) | ((calcSubInc_uint & 0xFF) << 24)
+    Reversing:  orig = (tisubn_raw_low24 << 8) | tisubn_raw_high8
+    """
+    raw_low24    = tisubn_raw & 0x00FFFFFF
+    raw_high8    = (tisubn_raw >> 24) & 0xFF
+    orig         = (raw_low24 << 8) | raw_high8
+    fraction_ns  = orig / (1 << 24)
+    effective_ns = (ti_reg & 0xFF) + fraction_ns
+    return (effective_ns - CLOCK_CYCLE_NS_NOMINAL) / CLOCK_CYCLE_NS_NOMINAL * 1e6
+
+
+def phase3_crystal_analysis(run: SmokeRunner):
+    """Derive per-crystal ppm deviations as a by-product of the PTP lock.
+
+    Sources:
+      - GM/FOL SAME54  ← -drift_ppb/1000     (sign convention: PI regulates
+                                               board TSU to real wallclock,
+                                               so TC0 deviation is the complement)
+      - FOL LAN8651    ← decoded CLOCK_INCREMENT (PI-calibrated)
+      - GM  LAN8651    = 0 ppm (reference)
+
+    Purely informational — does not run any run.check(), so a flaky
+    register read or a weird drift value won't fail the smoke test.
+    """
+    log = run.log
+    gm, fol = run.ser_gm, run.ser_fol
+    log.info("")
+    log.info("  Crystal deviations (by-product, informational):")
+
+    # SAME54 deviations from drift_ppb readings (clk_get)
+    def _drift_ppb(ser):
+        m = RE_CLK_GET.search(send_command(ser, "clk_get", 2.0, log))
+        return int(m.group(2)) if m else None
+
+    gm_drift  = _drift_ppb(gm)
+    fol_drift = _drift_ppb(fol)
+
+    # FOL LAN8651 deviation from CLOCK_INCREMENT
+    fol_ti     = _lan_read_value(fol, MAC_TI_ADDR,     log)
+    fol_tisubn = _lan_read_value(fol, MAC_TISUBN_ADDR, log)
+    fol_lan_ppm = None
+    if fol_ti is not None and fol_tisubn is not None:
+        fol_lan_ppm = _decode_clock_inc_ppm(fol_ti, fol_tisubn)
+
+    log.info(f"    GM  LAN8651 :     0.000 ppm   (reference)")
+    if gm_drift is not None:
+        log.info(f"    GM  SAME54  : {-gm_drift/1000.0:+9.3f} ppm   "
+                 f"(from drift_ppb={gm_drift:+d})")
+    else:
+        log.info(f"    GM  SAME54  :   (unavailable — no clk_get match)")
+    if fol_drift is not None:
+        log.info(f"    FOL SAME54  : {-fol_drift/1000.0:+9.3f} ppm   "
+                 f"(from drift_ppb={fol_drift:+d})")
+    else:
+        log.info(f"    FOL SAME54  :   (unavailable — no clk_get match)")
+    if fol_lan_ppm is not None:
+        log.info(f"    FOL LAN8651 : {fol_lan_ppm:+9.3f} ppm   "
+                 f"(from MAC_TI=0x{fol_ti:02X} TISUBN=0x{fol_tisubn:08X})")
+    else:
+        log.info(f"    FOL LAN8651 :   (unavailable — lan_read failed)")
 
 
 # ---------------------------------------------------------------------------
