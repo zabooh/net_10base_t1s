@@ -1,9 +1,14 @@
 # tfuture Bias Investigation — Session Handoff
 
-**Status:** Primary fix applied and committed. GM bias resolved
-(−1600 µs → −34 µs median, 47× improvement). **A smaller residual
-FOL-side bias of −322 µs remains** — different mechanism, see §12.
-**Last updated:** 2026-04-19 (after primary fix verified)
+**Status:** Primary fix applied and committed (GM bias resolved, 47×
+improvement).  **FOL residual bias is now characterised** (2026-04-19):
+it is **rate-proportional**, not a fixed offset — linear fit
+`bias = +1535 − 1084 × lead_s` (µs).  FOL's drift filter reports ~0 ppb
+despite the ~1084 ppm proportional effect, because the filter measures
+the wrong quantity for tfuture's purposes (see §12.2).  Next session:
+validate the sweet-spot hypothesis by sweeping FOL's drift_ppb
+manually via `clk_set_drift`.
+**Last updated:** 2026-04-19 (after FOL diagnose re-run)
 
 ---
 
@@ -12,19 +17,22 @@ FOL-side bias of −322 µs remains** — different mechanism, see §12.
 Paste this into the next Claude session verbatim:
 
 > Read `apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture_bias_open.md`.
-> The primary bias (GM-side, caused by DRIFT_SANITY_PPB_ABS clamping out
-> every sample) is already fixed and committed.  A residual FOL-side
-> bias of ~−322 µs median remains (see §12), systematic and tight
-> (MAD 37 µs) — suggests a lead-time-independent fixed offset in the
-> FOL anchor path, not a drift-filter issue.  Next step is to confirm
-> lead-time independence: rerun `tfuture_diagnose_test.py` on the
-> currently-flashed firmware and look at Phase A/B/C (lead=1/2/4 s,
-> drift ON).  If the FOL median stays near −322 µs across all three
-> leads, the cause is a fixed offset (likely a GM-vs-FOL
-> anchor-capture asymmetry, e.g. the +575983 ns PTP_GM_ANCHOR_OFFSET_NS
-> constant that has no FOL counterpart).  If FOL median scales with
-> lead_ms, the cause is still rate-related and the drift filter on
-> FOL needs more attention.
+> Primary GM fix is done (committed d18a102).  FOL residual bias is
+> characterised in §12: it scales with lead_ms (−633 µs @ 2 s, −2801 µs
+> @ 4 s), fit `bias = +1535 − 1084 × lead_s` µs, yet FOL's drift_ppb
+> filter reports ~0 throughout.  Section §12.2 explains why
+> (filter measures a matched-but-wrong quantity).
+>
+> Next concrete step: build a FOL-side version of
+> `tfuture_drift_forced_test.py` that sweeps FOL's drift_ppb via
+> `clk_set_drift` (the CLI is sent to the FOL serial port instead of GM).
+> Expected sweet spot around +1 084 000 ppb where the proportional
+> term cancels.  If a sweet spot exists and reduces the bias to within
+> the constant +1535 µs (≈ ±200 µs achievable at lead=2 s once the
+> rate term is zeroed), we have confirmation that the mechanism is
+> rate-based and the proper fix is to improve FOL's drift filter input
+> (see §12.4 fix candidates).  If no sweet spot exists, reconsider the
+> model — something deeper than a rate mismatch.
 
 ---
 
@@ -339,54 +347,135 @@ verification log referenced in the git history of this repo.
 
 ## 12. Remaining FOL-side residual bias (open)
 
-**Observed after the primary fix is applied:**
+### 12.1 Characterisation (post-fix, 2026-04-19)
 
-| Metric (at lead=2000 ms)   | Value        |
-|----------------------------|--------------|
-| GM  self_jitter median     | **−34 µs**   |
-| FOL self_jitter median     | **−322 µs**  |
-| Inter-board median         | +287 µs      |
-| FOL robust stdev (MAD·1.4826) | 55 µs    |
+First observation came from a single-lead sync test
+(`tfuture_sync_test_20260419_113338.log`, lead=2000 ms):
 
-FOL's bias is **tight** (MAD 37 µs = tight distribution around its median),
-so the −322 µs is **systematic**, not random scheduling noise.  It is
-~5× smaller than the original GM problem, so much less severe, but
-still over the 200 µs target.
+| Metric               | Value      |
+|----------------------|------------|
+| GM  self_jitter med  | **−34 µs** |
+| FOL self_jitter med  | **−322 µs**|
+| Inter-board median   | +287 µs    |
 
-### 12.1 Next diagnostic step
+Follow-up multi-lead diagnose run (`tfuture_diagnose_test_20260419_114553.log`)
+reveals the scaling behaviour:
 
-Rerun `tfuture_diagnose_test.py` on the currently-flashed firmware
-(with the primary fix active) and compare FOL self_jitter median
-across lead_ms = 1000 / 2000 / 4000:
+| Phase | lead_ms | drift | GM median | FOL median | GM drift_ppb | FOL drift_ppb |
+|-------|--------:|:-----:|----------:|-----------:|-------------:|--------------:|
+| A     | 1000    | ON    | (arm-fail — CLI RTT too long at this lead) |||
+| B     | 2000    | ON    | +13 µs    | **−633 µs**  | +1 180 918   | −2            |
+| C     | 4000    | ON    | −12 µs    | **−2801 µs** | +1 240 388   | −108          |
+| D     | 2000    | OFF   | −1458 µs  | −664 µs     | +1 080 968   | −114          |
 
-- If FOL median stays near −322 µs regardless of lead_ms
-  → **fixed offset**, lead-time-independent.  Investigate asymmetries
-  between GM and FOL anchor-capture paths (most likely suspect:
-  `PTP_GM_ANCHOR_OFFSET_NS = 575983` has no FOL counterpart; the
-  anchor points might be semantically offset by that amount).
-- If FOL median scales with lead_ms (doubles from 2000→4000)
-  → proportional effect.  Look at FOL's drift_ppb filter behavior
-  post-fix; the filter might still be clamping samples on FOL despite
-  the wider limit.
+**GM is perfect in B and C.**  Phase D (drift OFF) reverts GM to its
+pre-fix behaviour, reconfirming the drift filter is now doing its job
+on GM.
 
-### 12.2 Possible fix candidates (not yet tried)
+**FOL bias scales super-linearly with lead_ms.**  Ratio C/B = 4.43
+for a 2× lead increase; a pure-proportional effect would give 2.0.
+Linear fit:
 
-1. Apply a similar constant offset to FOL's anchor_wc, equal to
-   `PTP_GM_ANCHOR_OFFSET_NS` — so both boards have the same semantic
-   anchor position relative to the wire SFD.
-2. Capture FOL's anchor_tick via the same EIC-ISR path already used
-   for `g_ptp_raw_rx.sysTickAtRx`, and add an equivalent low-jitter
-   anchor-tick path on GM (removes the ~6 ms variable read delay).
-3. Use the `clk_set_drift` CLI on FOL during the run to probe whether
-   forcing FOL's drift_ppb to values around ±200 kppb changes the
-   residual (similar to the drift-forced-sweep we did for GM).
+    bias = +1535 − 1084 × lead_s   (µs, lead_s in seconds)
 
-### 12.3 Pragmatic take
+Two components superimposed:
+  - **Constant +1535 µs** (lead-time-independent offset)
+  - **−1084 µs/s** (proportional, equivalent to ~1084 ppm rate error)
 
-The −322 µs remaining bias is small enough that many use-cases
-(coordinated firing within ±1 ms inter-board) will tolerate it.
-The original ~1.3 ms catastrophic bias is gone.  This can remain
-open until a concrete application demands sub-200 µs inter-board
+**FOL drift_ppb stays near 0** throughout all phases.  Phase B vs D
+(both lead=2000 ms) shows only 31 µs difference — i.e. drift correction
+has almost zero effect on FOL, because the filter value is essentially
+zero.  The filter *is* converging, just not to a value that would help
+tfuture compensate.
+
+### 12.2 Why the filter "correctly" reports ~0
+
+Each board has two independent clocks:
+  - TC0 (SAME54 crystal × PLL, ~60 MHz nominal)
+  - LAN865x TSU (LAN865x's own crystal, driven through CLOCK_INCREMENT)
+
+After PTP PI-servo convergence, **FOL's LAN865x TSU rate is
+regulated to match GM's LAN865x TSU rate** (via adjusting
+CLOCK_INCREMENT).  The drift filter measures
+`(anchor_wc rate) / (anchor_tick rate) − 1`:
+
+  - GM:  rate_ratio = GM_LAN_rate / GM_TC0_rate − 1 = **+1200 ppm** (observed)
+  - FOL: rate_ratio = GM_LAN_rate / FOL_TC0_rate − 1 ≈ **0** (observed)
+
+The implication: **FOL's TC0 happens to run at approximately GM's
+LAN865x rate** (coincidence of crystals).  Both are ~1200 ppm off from
+"GM_TC0_rate" — but FOL's TC0 matches the regulated LAN865x timeline.
+
+So the filter is correct in its own definition.  But tfuture's
+compute_target_tick assumes `(50/3) ns per TC0 tick = 1 ns per real ns`,
+which is a statement about TC0 rate vs **real wallclock**.  Neither
+the filter on GM (with 1200 ppm compensation) nor the filter on FOL
+(with 0 compensation) gives tfuture what it really needs: the rate
+of TC0 against a truly-stable reference.
+
+The remaining FOL bias — proportional at ~1084 ppm — reflects some
+*residual* time-varying effect that neither board's filter captures.
+Possibilities: the PI servo's ongoing adjustments to FOL's
+CLOCK_INCREMENT create a time-varying LAN865x rate; anchor update
+timing jitter; subtle asymmetry in how anchor_wc is derived from t2
+vs. ptp_gm_anchor_offset on GM.
+
+### 12.3 Next diagnostic step — FOL drift sweep
+
+Build `tfuture_drift_forced_test_FOL.py` by cloning
+`tfuture_drift_forced_test.py` and sending the `clk_set_drift` CLI
+to the FOL serial port instead of GM.  Sweep values covering
+±1 500 000 ppb.  Expected outcome:
+
+- A sweet spot near **+1 084 000 ppb** (to cancel the rate term)
+  produces bias close to the pure constant **+1535 µs**.
+- If that matches, two findings fall out:
+  1. The mechanism is rate-based (proportional term is real, not an
+     artefact).
+  2. The +1535 µs intercept is a separate mechanism (likely an
+     anchor-capture asymmetry; see §12.4).
+
+If no sweet spot exists (bias is insensitive to drift_ppb forcing),
+the model is wrong and we need to dig into PTP_FOL_task.c to
+understand exactly what anchor_wc and anchor_tick represent on FOL.
+
+### 12.4 Possible fix candidates (not yet tried)
+
+Once §12.3 confirms the model:
+
+1. **For the +1535 µs constant term**: apply a similar constant offset
+   to FOL's anchor_wc, equal to `PTP_GM_ANCHOR_OFFSET_NS` (575 983 ns)
+   — so both boards have the same semantic anchor position relative
+   to the wire SFD.  Note: the observed constant is +1535 µs, not
+   +575 µs, so this might only partially account for it.
+2. **For the −1084 ppm rate term**: the filter on FOL needs to measure
+   a different quantity.  One option — capture FOL's anchor_tick via
+   a truly low-jitter mechanism (the existing EIC ISR for
+   `g_ptp_raw_rx.sysTickAtRx` is already low-jitter), and recompute
+   the relationship between consecutive anchor-ticks and
+   anchor-wc differently.  Another — hard-code a correction
+   coefficient on FOL (simple but brittle, needs per-board
+   calibration).
+3. **Short-term workaround**: expose a `tfuture_fol_bias_ns <ns>` CLI
+   that subtracts a constant from the fire time on FOL.  Works but is
+   a per-board-pair hack.
+
+### 12.5 Artefacts from this session
+
+- `tfuture_sync_test_20260419_113338.log` — first post-fix verification
+  (20 rounds, lead=2 s)
+- `tfuture_diagnose_test_20260419_114553.log` — multi-lead characterisation
+
+Both uncommitted (log files are evidence, can be kept locally or
+attached to a GitHub issue for the FOL follow-up).
+
+### 12.6 Pragmatic take
+
+The −633 µs at lead=2 s and −2.8 ms at lead=4 s are consequential for
+application use-cases.  The 2-second lead case is the most common in
+tfuture usage and has ~1× inter-board error at the CLI-RTT-defined
+minimum.  This is **not a show-stopper for many applications** but
+should be solved before anyone depends on sub-ms inter-board
 coordination.
 
 ---
