@@ -20,6 +20,15 @@ how precisely the software clock can be used from application code — see:
 
 **[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md)**
 
+For the **tfuture** module — coordinated single-shot firing at an absolute
+PTP_CLOCK time across two HW-PTP-synchronised boards (self_jitter < 50 µs median,
+inter-board coincidence within ±30 µs), bias-investigation history that
+uncovered and fixed two latent bugs in the PTP_CLOCK drift filter, and a
+by-product that reports the ppm deviations of all four crystals in the system
+(2× SAME54 + 2× LAN8651) — see:
+
+**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_tfuture.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture.md)**
+
 ---
 
 ### Origin
@@ -83,6 +92,7 @@ is not present in the original.
   - [5.8 Before/After (mux-based)](#58-beforeafter-mux-based--ptp_sync_before_after_mux_testpy)
   - [5.9 Hardware-Timestamp Offset Capture](#59-hardware-timestamp-offset-capture--ptp_offset_capturepy)
   - [5.10 Software NTP vs HW-PTP Comparison](#510-software-ntp-vs-hw-ptp-comparison--sw_ntp_vs_ptp_testpy)
+  - [5.11 tfuture Coordinated Firing + Crystal Deviation Analysis](#511-tfuture-coordinated-firing--crystal-deviation-analysis--tfuture_sync_testpy--tfuture_quick_checkpy)
 - [6. Hardware & Build Setup](#6-hardware--build-setup)
   - [6.1 Hardware Configuration](#61-hardware-configuration)
   - [6.2 Build Infrastructure](#62-build-infrastructure)
@@ -318,6 +328,7 @@ roles, switchable at runtime via CLI.
 | `src/ptp_offset_trace.c/.h` | 1024-entry ring buffer for hardware-timestamp PTP offsets. Used by `ptp_offset_capture.py` (§5.9). |
 | `src/sw_ntp.c/.h` | Minimal software-NTP (UDP) master + follower using SW timestamps from `PTP_CLOCK_GetTime_ns()`. Measurement-only; does not discipline the clock. See [README_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md). |
 | `src/sw_ntp_offset_trace.c/.h` | 1024-entry int64 ring buffer for SW-NTP offsets. Used by `sw_ntp_vs_ptp_test.py` (§5.10). |
+| `src/tfuture.c/.h` | Coordinated single-shot firing at an absolute PTP_CLOCK time. Hybrid precision (main-loop poll + 1 ms tight-spin). 256-entry ring buffer. See [README_tfuture.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture.md) and §5.11. |
 
 Three source files added to the CMake build in `cmake/.../CMakeLists.txt`:
 
@@ -552,6 +563,15 @@ Added `APP_STATE_IDLE` to the `APP_STATES` enumeration.
 | `sw_ntp_trace on\|off` | Enable per-packet UART trace with all four SW timestamps (disturbs timing) |
 | `sw_ntp_offset_reset` | Clear the SW-NTP offset ring buffer |
 | `sw_ntp_offset_dump` | Dump all recorded SW-NTP offsets (one per line, `<offset_ns> <valid>`) |
+| `tfuture_at <ns>` | Arm a firing event at absolute PTP_CLOCK nanosecond value |
+| `tfuture_in <ms>` | Convenience: arm at `now + <ms>` |
+| `tfuture_cancel` | Cancel a pending tfuture |
+| `tfuture_status` | Show state, fires count, current `drift_ppb`, last target/actual/delta |
+| `tfuture_reset` | Clear the tfuture ring buffer |
+| `tfuture_dump` | Dump all recorded fires (one per line, `<target_ns> <actual_ns> <delta>`) |
+| `tfuture_drift on\|off` | Diagnostic: enable/disable drift correction in `compute_target_tick` |
+| `ptp_gm_delay [<ns>]` | Diagnostic: add signed ns to GM anchor_wc at PTP_CLOCK_Update |
+| `clk_set_drift [<ppb>]` | Diagnostic: manually force PTP_CLOCK `drift_ppb` |
 
 ### 1.5 Console Output Format
 
@@ -1753,6 +1773,101 @@ python sw_ntp_vs_ptp_test.py --skip-phase-a   # only HW-PTP-on run
 Imports `Logger`, `open_port`, `send_command`, `wait_for_pattern` and regex
 constants from `ptp_drift_compensate_test.py`, and `zero_both_clocks` from
 `hw_timer_sync_test.py`, so all three scripts must live in the same directory.
+
+---
+
+### 5.11 tfuture Coordinated Firing + Crystal Deviation Analysis — `tfuture_sync_test.py` / `tfuture_quick_check.py`
+
+Caps the time-sync chain on the application side: §5.9 measures how well the
+PHY hardware aligns clocks (50 ns), §5.10 measures how much of that is
+observable from plain application-layer code (25 µs SW-NTP floor), and
+§5.11 measures how precisely the application can **act** on the synchronised
+clock by scheduling a coordinated firing event at an absolute PTP_CLOCK time.
+
+The full `README_tfuture.md` covers the module, the four diagnostic scripts,
+and the bias-investigation history.  Summary here:
+
+#### What the module does
+
+Firmware (`src/tfuture.c`) exposes CLI `tfuture_at <target_ns>`.  When two
+HW-PTP-synchronised boards arm the same target, each fires when its own
+`PTP_CLOCK_GetTime_ns()` reaches that value.  Hybrid precision: main-loop
+polling when > 1 ms away, tight busy-wait-spin within the last 1 ms, so
+firing precision ≈ TC0 tick (~17 ns) without needing a TC compare ISR.
+A 256-entry ring buffer records `(target, actual)` pairs for statistical
+analysis; dump over UART happens outside the measurement path.
+
+#### Test scripts
+
+- `tfuture_sync_test.py` — baseline regression, 20 rounds × 2 s lead, full
+  setup (~2 min).
+- `tfuture_quick_check.py` — **fast iteration tool**, 10 rounds × 2 s lead,
+  ~40 s with reset or ~25 s with `--no-reset`.  Emits a one-line PASS/FAIL
+  verdict and the **crystal-deviation summary** (see below).
+- `tfuture_diagnose_test.py` — 4-phase lead-ms scan + drift-toggle, ~4 min.
+  Used when you want to confirm proportional-vs-fixed bias behaviour.
+- `tfuture_anchor_delay_test.py` / `tfuture_drift_forced_test.py` /
+  `tfuture_drift_forced_fol_test.py` — historical sweep tools used during
+  the bias investigation; kept as regression probes.
+
+#### Measured performance on this hardware
+
+After both bias fixes (see `README_tfuture.md` §8 and the git log of
+`fix(ptp_clock)` + `fix(ptp_fol)` commits):
+
+| Metric                      | Median  | Robust stdev |
+|-----------------------------|--------:|-------------:|
+| GM  self_jitter @ lead=2 s  | +9 µs   | 60 µs        |
+| FOL self_jitter @ lead=2 s  | +2 µs   | 50 µs        |
+| Inter-board @ lead=2 s      | +28 µs  | 100 µs       |
+
+"Inter-board" is the physical coincidence of the two boards' firings,
+derived from each board's self-reported PTP_CLOCK value at the firing
+moment.  Sub-100 µs inter-board coincidence is the floor set by the HW-PTP
+sync accuracy; the tfuture module itself contributes < 50 µs self-jitter
+per board.
+
+#### Crystal deviation by-product
+
+`tfuture_quick_check.py` also derives the ppm deviation of all four
+crystals in the system (2× SAME54 for TC0, 2× LAN8651 for TSU) relative
+to GM_LAN8651 as reference.  Works because:
+
+- `drift_ppb_GM` directly gives GM_SAME54 deviation.
+- `drift_ppb_FOL` directly gives FOL_SAME54 deviation (since the PI servo
+  regulates FOL's TSU rate to match GM's TSU).
+- Reading the live `MAC_TI` + `MAC_TISUBN` registers on both boards via
+  `lan_read` gives the ratio of CLOCK_INCREMENT values, from which
+  FOL_LAN8651's deviation is computed.
+- GM_LAN8651 is the reference by choice.
+
+Example output on this board pair:
+
+```
+Crystal deviations  (reference: GM_LAN8651 = 0 ppm)
+  GM  LAN8651 :        0 ppm   (reference)
+  GM  SAME54  :  -1028 ppm     (from GM drift_ppb)
+  FOL SAME54  :  -1012 ppm     (PI makes FOL_TSU = GM_TSU)
+  FOL LAN8651 :     -5 ppm     (from live CLOCK_INCREMENT ratio)
+```
+
+The ~1100 ppm mismatch between LAN8651 and SAME54 crystals on each board
+is what originally caused the catastrophic ~1.3 ms tfuture bias — the old
+`DRIFT_SANITY_PPB_ABS = 200 000` (±200 ppm) sanity clamp silently rejected
+every sample and the drift filter never converged.  See `README_tfuture.md`
+§8 for the full story.
+
+#### Usage
+
+```bat
+python tfuture_sync_test.py --gm-port COM8 --fol-port COM10
+python tfuture_quick_check.py --gm-port COM8 --fol-port COM10
+python tfuture_quick_check.py --no-reset        # repeat in ~25 s
+python tfuture_diagnose_test.py                 # full 4-phase when needed
+```
+
+All tfuture scripts import helpers from `ptp_drift_compensate_test.py`, so
+they must live in the same directory.
 
 ---
 
