@@ -74,8 +74,14 @@ RE_TFUT_DUMP_END    = re.compile(r"tfuture_dump:\s+end")
 RE_LOOP_STATS       = re.compile(r"(loop_stats|Main loop|subsystem)", re.IGNORECASE)
 
 # End-to-end sanity gates (generous bounds — tight gates live in dedicated tests)
-GATE_FOL_SELF_JITTER_NS = 200_000   # 200 µs
-GATE_PTP_OFFSET_ABS_NS  = 50_000    # 50 µs after FINE lock + settle
+GATE_FOL_SELF_JITTER_NS = 200_000        # 200 µs
+GATE_PTP_OFFSET_ABS_NS  = 50_000         # 50 µs after FINE lock + settle
+GATE_SW_NTP_OFFSET_NS   = 1_000_000      # 1 ms — generous since app-layer incl. UDP jitter
+GATE_SW_NTP_MIN_SAMPLES = 5              # at 1 Hz poll, expect ≥5 in 8 s
+
+RE_SW_NTP_SAMPLES  = re.compile(r"Samples\s*:\s+(\d+)")
+RE_SW_NTP_TIMEOUTS = re.compile(r"Timeouts\s*:\s+(\d+)")
+RE_SW_NTP_LAST_OFF = re.compile(r"Last offset ns\s*:\s+([+-]?\d+)")
 
 # ---------------------------------------------------------------------------
 # Check framework
@@ -355,6 +361,53 @@ def phase3_end_to_end(run: SmokeRunner, rounds: int = 5):
         return ok, (f"median={med:+d} ns  n={len(deltas_fol)}  "
                     f"(gate {GATE_FOL_SELF_JITTER_NS})")
     run.check("FOL self-jitter median < 200 µs", check_jitter)
+
+    # -------- SW-NTP end-to-end: real UDP exchange over the link --------
+    phase3_sw_ntp(run)
+
+
+def phase3_sw_ntp(run: SmokeRunner,
+                  gm_ip: str = DEFAULT_GM_IP,
+                  dwell_s: float = 8.0):
+    """Enable GM as sw_ntp master + FOL as follower, wait dwell_s, verify
+    samples arrived with plausible offset (PTP is locked so offsets are tiny),
+    then disable both boards."""
+    log = run.log
+    gm, fol = run.ser_gm, run.ser_fol
+
+    send_command(gm,  "sw_ntp_offset_reset",   2.0, log)
+    send_command(fol, "sw_ntp_offset_reset",   2.0, log)
+    send_command(gm,  "sw_ntp_mode master",    2.0, log)
+    send_command(fol, f"sw_ntp_mode follower {gm_ip}", 2.0, log)
+    log.info(f"  SW-NTP: wait {dwell_s:.1f} s for samples ...")
+    time.sleep(dwell_s)
+
+    resp = send_command(fol, "sw_ntp_status", 3.0, log)
+    m_s = RE_SW_NTP_SAMPLES.search(resp)
+    m_t = RE_SW_NTP_TIMEOUTS.search(resp)
+    m_o = RE_SW_NTP_LAST_OFF.search(resp)
+
+    # Restore: off on both, regardless of result
+    send_command(fol, "sw_ntp_mode off", 2.0, log)
+    send_command(gm,  "sw_ntp_mode off", 2.0, log)
+
+    if not (m_s and m_t and m_o):
+        run.check("SW-NTP end-to-end exchange",
+                  lambda: (False, f"could not parse sw_ntp_status: {resp[:120]!r}"))
+        return
+
+    samples  = int(m_s.group(1))
+    timeouts = int(m_t.group(1))
+    offset   = int(m_o.group(1))
+
+    run.check(f"SW-NTP samples ≥ {GATE_SW_NTP_MIN_SAMPLES}",
+              lambda: (samples >= GATE_SW_NTP_MIN_SAMPLES,
+                       f"samples={samples}  timeouts={timeouts}"))
+    run.check("SW-NTP no timeouts",
+              lambda: (timeouts == 0, f"timeouts={timeouts}"))
+    run.check(f"SW-NTP |last_offset| < {GATE_SW_NTP_OFFSET_NS/1000:.0f} µs",
+              lambda: (abs(offset) < GATE_SW_NTP_OFFSET_NS,
+                       f"last_offset={offset:+d} ns  (gate {GATE_SW_NTP_OFFSET_NS})"))
 
 
 # ---------------------------------------------------------------------------

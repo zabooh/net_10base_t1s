@@ -91,10 +91,18 @@ as a sanity snapshot of the system state.
   future targets.
 - **FOL self-jitter median < 200 µs** across the 5 fires (typical is ~70 µs
   on the reference hardware).
+- **SW-NTP end-to-end exchange**: GM enters `sw_ntp_mode master`, FOL
+  enters `sw_ntp_mode follower <gm_ip>`, and after an 8 s dwell the
+  follower's `sw_ntp_status` is checked for:
+  - **samples ≥ 5** (at 1 Hz poll)
+  - **timeouts == 0**
+  - **|last_offset| < 1 ms** (PTP is locked, so application-layer offset
+    is dominated by UDP jitter, typically 100-300 µs)
+  Both boards revert to `sw_ntp_mode off` afterwards.
 
 This is the real litmus test: the whole chain — serial CLI, PTP lock, TC0
-tick conversion, spin-wait firing, ring buffer, dump — has to work for this
-phase to pass.
+tick conversion, spin-wait firing, ring buffer, dump, UDP socket layer —
+has to work for this phase to pass.
 
 ---
 
@@ -164,12 +172,14 @@ the summary.
 
 ## 7. Sanity Gates
 
-Two numeric gates in Phase 3 guard the end-to-end chain:
+Four numeric gates in Phase 3 guard the end-to-end chain:
 
-| Gate                            | Default   | Typical observed | Purpose                                |
-| ------------------------------- | --------- | ---------------- | -------------------------------------- |
-| `GATE_PTP_OFFSET_ABS_NS`        | 50 000 ns | ~1 000 ns        | PTP lock quality after settle          |
-| `GATE_FOL_SELF_JITTER_NS`       | 200 000 ns| ~70 000 ns       | `tfuture` tick-conversion end-to-end   |
+| Gate                            | Default      | Typical observed | Purpose                                  |
+| ------------------------------- | ------------ | ---------------- | ---------------------------------------- |
+| `GATE_PTP_OFFSET_ABS_NS`        | 50 000 ns    | ~1 000 ns        | PTP lock quality after settle            |
+| `GATE_FOL_SELF_JITTER_NS`       | 200 000 ns   | ~70 000 ns       | `tfuture` tick-conversion end-to-end     |
+| `GATE_SW_NTP_OFFSET_NS`         | 1 000 000 ns | ~200 000 ns      | SW-NTP app-layer round-trip + UDP jitter |
+| `GATE_SW_NTP_MIN_SAMPLES`       | 5            | ~8 (at 1 Hz/8 s) | SW-NTP request/response actually works   |
 
 Both are intentionally loose — roughly 3× the typical value on reference
 hardware. The smoke test is meant to flag _gross_ breakage (a factor-of-ten
