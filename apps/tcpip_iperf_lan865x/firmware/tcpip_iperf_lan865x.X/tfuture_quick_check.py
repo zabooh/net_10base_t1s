@@ -46,8 +46,63 @@ RE_CLK_GET   = re.compile(r"clk_get:\s+(\d+)\s+ns")
 RE_ARM_OK    = re.compile(r"tfuture_at OK")
 RE_ARM_FAIL  = re.compile(r"tfuture_at FAIL")
 RE_DRIFT_PPB = re.compile(r"PTP_CLOCK drift\s*:\s*([+-]?\d+)")
+RE_TI_TISUBN = re.compile(r"TI=(\d+)\s+TISUBN=0x([0-9A-Fa-f]+)")
+RE_LAN_READ  = re.compile(r"LAN865X Read OK: Addr=0x([0-9A-Fa-f]+) Value=0x([0-9A-Fa-f]+)")
 
 LEAD_MS = 2000
+# Nominal LAN8651 clock period (25 MHz crystal → 40 ns).  Matches
+# CLOCK_CYCLE_NS in firmware/src/filters.h.
+CLOCK_CYCLE_NS_NOMINAL = 40.0
+
+# LAN8651 CLOCK_INCREMENT register addresses (from
+# firmware/src/PTP_FOL_task.h: MAC_TI / MAC_TISUBN).
+MAC_TI_ADDR     = 0x00010077
+MAC_TISUBN_ADDR = 0x0001006F
+
+
+def lan_read_reg(ser, addr, log):
+    """Read a LAN865x register via the lan_read CLI.  Returns the 32-bit value,
+    or None on failure.  The firmware's state machine takes ~10-50 ms to complete
+    the read and print the result, so we wait for the printed output."""
+    resp = send_command(ser, f"lan_read 0x{addr:08X}", 2.0, log)
+    for m in RE_LAN_READ.finditer(resp):
+        if int(m.group(1), 16) == addr:
+            return int(m.group(2), 16)
+    return None
+
+
+def read_clock_increment(ser, log):
+    """Live readback of a board's LAN8651 CLOCK_INCREMENT registers
+    (MAC_TI + MAC_TISUBN).  Returns (ti, tisubn_raw) or (None, None).
+    Works regardless of whether PTP has been reset in this session."""
+    tisubn = lan_read_reg(ser, MAC_TISUBN_ADDR, log)
+    ti_reg = lan_read_reg(ser, MAC_TI_ADDR,     log)
+    if tisubn is None or ti_reg is None:
+        return (None, None)
+    # MAC_TI low byte holds the integer TI value.
+    ti = ti_reg & 0xFF
+    return (ti, tisubn)
+
+
+def decode_clock_increment_ppm(ti: int, tisubn_raw: int) -> float:
+    """Decode the LAN8651 CLOCK_INCREMENT register pair as written by
+    PTP_FOL_task.c into the effective ns-per-tick value, and return the
+    deviation from nominal 40 ns in ppm.
+
+    Firmware packing (PTP_FOL_task.c):
+        calcSubInc_uint = ((calcSubInc_uint >> 8) & 0xFFFF) | ((calcSubInc_uint & 0xFF) << 24)
+    Reversing: the original 24-bit unsigned fraction counter is
+        orig = ((raw_low24) << 8) | (raw_high8)
+    where raw_low24 = tisubn_raw & 0x00FFFFFF and raw_high8 = (tisubn_raw >> 24) & 0xFF.
+    The original was calcSubInc × 2^24 where calcSubInc is the
+    fractional ns portion of CLOCK_CYCLE_NS × rateRatioFIR.
+    """
+    raw_low24 = tisubn_raw & 0x00FFFFFF
+    raw_high8 = (tisubn_raw >> 24) & 0xFF
+    orig = (raw_low24 << 8) | raw_high8
+    fraction_ns = orig / (1 << 24)
+    effective_ns = ti + fraction_ns
+    return (effective_ns - CLOCK_CYCLE_NS_NOMINAL) / CLOCK_CYCLE_NS_NOMINAL * 1e6
 
 
 def read_clk_ns(ser, log):
@@ -153,6 +208,10 @@ def main():
     except serial.SerialException as exc:
         print(f"ERROR: cannot open port: {exc}"); return 1
 
+    # Captured during reset sequence (MATCHFREQ log line); None on --no-reset.
+    fol_ti: int = None
+    fol_tisubn_raw: int = None
+
     try:
         if not args.no_reset:
             log.info("\n--- Reset + IP + PTP to FINE ---")
@@ -165,15 +224,38 @@ def main():
             time.sleep(0.3)
             ser_fol.reset_input_buffer()
             send_command(ser_gm, "ptp_mode master", 3.0, log)
-            m, e, _ = wait_for_pattern(
-                ser_fol, RE_FINE, args.conv_timeout, log,
-                extra_patterns={"MATCHFREQ": RE_MATCHFREQ,
-                                "HARD_SYNC": RE_HARD_SYNC,
-                                "COARSE":    RE_COARSE},
-                live_log=True)
-            if not m:
+
+            # Inline wait-for-FINE that also captures the TI/TISUBN values
+            # emitted during UNINIT->MATCHFREQ transition.  These values
+            # encode FOL's PI-calibrated LAN8651 CLOCK_INCREMENT, from which
+            # we can back out FOL_LAN8651's crystal deviation vs. GM_LAN8651.
+            buffer = ""
+            start  = time.monotonic()
+            matched = False
+            while time.monotonic() - start < args.conv_timeout:
+                chunk = ser_fol.read(256)
+                if chunk:
+                    decoded = chunk.decode("ascii", errors="replace")
+                    buffer += decoded
+                    for line in decoded.splitlines():
+                        if line.strip():
+                            log.info(f"    {line.rstrip()}")
+                    if fol_ti is None:
+                        mti = RE_TI_TISUBN.search(buffer)
+                        if mti:
+                            fol_ti         = int(mti.group(1))
+                            fol_tisubn_raw = int(mti.group(2), 16)
+                    if RE_FINE.search(buffer):
+                        matched = True
+                        break
+                else:
+                    time.sleep(0.05)
+            if not matched:
                 log.info("FAIL: FINE not reached"); return 1
+            e = time.monotonic() - start
             log.info(f"  FINE in {e:.1f}s; stabilise {args.settle_s:.0f}s...")
+            if fol_ti is not None:
+                log.info(f"  Captured FOL calibration: TI={fol_ti} TISUBN=0x{fol_tisubn_raw:08X}")
             time.sleep(args.settle_s)
         else:
             log.info("\n--- Skip reset (--no-reset) ---")
@@ -235,6 +317,61 @@ def main():
         log.info("")
         log.info(f"  GM  drift_ppb    : {gm_ppb_post:+d}   (baseline: ~+1 200 000 after primary fix)")
         log.info(f"  FOL drift_ppb    : {fol_ppb_post:+d}   (baseline pre-fix: ~0; after removing override: expect non-zero)")
+
+        # --------  Crystal-deviation side-analysis  -----------------------
+        # Reference frame: GM_LAN8651 crystal = 0 ppm.
+        # drift_ppb ≈ δ_LAN − δ_TC0 (same board), where δ is crystal
+        # deviation from nominal in ppm vs. the GM_LAN reference.
+        #   δ_GM_TC0  = −drift_ppb_GM   (δ_GM_LAN = 0 by choice)
+        # PI regulates FOL_TSU = GM_TSU, so FOL's drift_ppb gives
+        #   δ_FOL_TC0 = −drift_ppb_FOL (in the GM_LAN reference frame)
+        # δ_FOL_LAN comes from ratio of PI-calibrated CLOCK_INCREMENTs:
+        #   FOL_TSU_rate = GM_TSU_rate
+        #   f_FOL_LAN × CLOCK_INC_FOL = f_GM_LAN × CLOCK_INC_GM
+        #   δ_FOL_LAN = (CLOCK_INC_GM / CLOCK_INC_FOL) − 1
+        log.info("")
+        log.info("  Reading CLOCK_INCREMENT registers live (MAC_TI/MAC_TISUBN)...")
+        gm_ti, gm_tisubn   = read_clock_increment(ser_gm,  log)
+        fol_ti_live, fol_tisubn_live = read_clock_increment(ser_fol, log)
+        # Prefer live readback (works with --no-reset); fall back to
+        # boot-log capture if live read fails (e.g. stack busy).
+        gm_valid  = (gm_ti  is not None)
+        fol_valid = (fol_ti_live is not None) or (fol_ti is not None)
+        if not fol_valid and fol_ti is not None:
+            fol_ti_live, fol_tisubn_live = fol_ti, fol_tisubn_raw
+        elif fol_ti_live is None and fol_ti is not None:
+            fol_ti_live, fol_tisubn_live = fol_ti, fol_tisubn_raw
+
+        log.info("")
+        log.info(f"  Crystal deviations  (reference: GM_LAN8651 = 0 ppm)")
+        log.info(f"    GM  LAN8651 :        0 ppm   (reference)")
+        log.info(f"    GM  SAME54  : {-gm_ppb_post/1000:+7.1f} ppm   "
+                 f"(from GM drift_ppb)")
+        log.info(f"    FOL SAME54  : {-fol_ppb_post/1000:+7.1f} ppm   "
+                 f"(from FOL drift_ppb, PI makes FOL_TSU = GM_TSU)")
+
+        if gm_valid and fol_ti_live is not None:
+            # Effective CLOCK_INCREMENT in ns/tick on each board.
+            from_gm  = CLOCK_CYCLE_NS_NOMINAL * (1.0 + decode_clock_increment_ppm(gm_ti,  gm_tisubn)     / 1e6)
+            from_fol = CLOCK_CYCLE_NS_NOMINAL * (1.0 + decode_clock_increment_ppm(fol_ti_live, fol_tisubn_live) / 1e6)
+            # δ_FOL_LAN in the GM_LAN reference frame.
+            delta_fol_lan_ppm = (from_gm / from_fol - 1.0) * 1e6
+            log.info(f"    FOL LAN8651 : {delta_fol_lan_ppm:+7.1f} ppm   "
+                     f"(from live CLOCK_INCREMENT ratio: "
+                     f"GM={from_gm:.4f}ns, FOL={from_fol:.4f}ns)")
+            log.info(f"")
+            log.info(f"  CLOCK_INCREMENT raw registers:")
+            log.info(f"    GM : TI={gm_ti}  TISUBN=0x{gm_tisubn:08X}")
+            log.info(f"    FOL: TI={fol_ti_live}  TISUBN=0x{fol_tisubn_live:08X}")
+        elif fol_ti is not None:
+            # Live readback failed; fall back to boot-log capture (assumes
+            # GM is nominal 40 ns).  Will only happen in edge cases.
+            delta_fol_lan_ppm = -decode_clock_increment_ppm(fol_ti, fol_tisubn_raw)
+            log.info(f"    FOL LAN8651 : {delta_fol_lan_ppm:+7.1f} ppm   "
+                     f"(from boot-log TISUBN; GM live readback unavailable — assuming nominal)")
+        else:
+            log.info(f"    FOL LAN8651 :  (no data — live readback failed and no boot-log capture)")
+
         log.info("")
         log.info(f"  VERDICT: {verdict(fol_m, gm_m)}")
 
