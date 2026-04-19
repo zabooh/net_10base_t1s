@@ -1034,7 +1034,19 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
                                                   rateRatio, 0.5);
                 rateRatioFIR = firLowPassFilterF((double)diffRemote / (double)diffLocal,
                                                  &rateRatiolpfState);
-                PTP_CLOCK_SetDriftPPB((int32_t)((rateRatioFIR - 1.0) * 1e9));
+                /* NOTE: the following line was previously here and is intentionally
+                 * removed.  rateRatioFIR measures t1/t2 ratio = GM_LAN/FOL_LAN rate —
+                 * a quantity the PI servo already regulates (via CLOCK_INCREMENT
+                 * at line ~1076 below) and which converges to ~1.0 in FINE state.
+                 * drift_ppb in PTP_CLOCK is meant to capture anchor_wc vs anchor_tick
+                 * rate (LAN865x vs TC0), a different quantity.  Letting the IIR
+                 * filter inside PTP_CLOCK_Update() compute drift_ppb directly
+                 * restores tfuture bias to sub-100 µs on FOL (previously ~−600 µs
+                 * at lead=2 s because this line stamped ~0 over the filter value
+                 * on every sync).  See README_tfuture_bias_open.md §12.
+                 *
+                 * PTP_CLOCK_SetDriftPPB((int32_t)((rateRatioFIR - 1.0) * 1e9));
+                 */
             } else {
                 if (ptp_trace_enabled) {
                     PTP_LOG("Filtered rateRatio outlier\r\n");
