@@ -38,6 +38,7 @@
 #include "ptp_offset_trace.h"
 #include "sw_ntp.h"
 #include "sw_ntp_offset_trace.h"
+#include "tfuture.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
 #include "system/command/sys_command.h"
@@ -427,6 +428,73 @@ static void sw_ntp_offset_dump_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char *
     sw_ntp_offset_trace_dump();
 }
 
+/* --------------------------------------------------------------------------
+ * tfuture — coordinated firing at absolute PTP_CLOCK time
+ * -------------------------------------------------------------------------- */
+
+static void tfuture_at_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc < 2) {
+        SYS_CONSOLE_PRINT("Usage: tfuture_at <absolute_ns>\r\n");
+        return;
+    }
+    uint64_t target_ns = (uint64_t)strtoull(argv[1], NULL, 0);
+    if (!tfuture_arm_at_ns(target_ns)) {
+        SYS_CONSOLE_PRINT("tfuture_at FAIL  (target not in future, PTP_CLOCK invalid, or already pending)\r\n");
+        return;
+    }
+    SYS_CONSOLE_PRINT("tfuture_at OK  target=%llu ns\r\n",
+                      (unsigned long long)target_ns);
+}
+
+static void tfuture_in_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc < 2) {
+        SYS_CONSOLE_PRINT("Usage: tfuture_in <ms_from_now>\r\n");
+        return;
+    }
+    uint32_t ms = (uint32_t)strtoul(argv[1], NULL, 0);
+    if (!tfuture_arm_in_ms(ms)) {
+        SYS_CONSOLE_PRINT("tfuture_in FAIL  (PTP_CLOCK invalid, or already pending)\r\n");
+        return;
+    }
+    SYS_CONSOLE_PRINT("tfuture_in OK  delay=%lu ms\r\n", (unsigned long)ms);
+}
+
+static void tfuture_cancel_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO; (void)argc; (void)argv;
+    tfuture_cancel();
+    SYS_CONSOLE_PRINT("tfuture cancelled\r\n");
+}
+
+static void tfuture_status_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO; (void)argc; (void)argv;
+    tfuture_state_t st = tfuture_get_state();
+    const char *ss = (st == TFUTURE_PENDING) ? "pending" :
+                     (st == TFUTURE_FIRED)   ? "fired"   : "idle";
+    SYS_CONSOLE_PRINT("tfuture state  : %s\r\n", ss);
+    SYS_CONSOLE_PRINT("tfuture fires  : %lu\r\n", (unsigned long)tfuture_get_fire_count());
+    uint64_t last_t = 0u, last_a = 0u;
+    tfuture_get_last(&last_t, &last_a);
+    if (last_t != 0u) {
+        int64_t delta = (int64_t)(last_a - last_t);
+        SYS_CONSOLE_PRINT("last target ns : %llu\r\n", (unsigned long long)last_t);
+        SYS_CONSOLE_PRINT("last actual ns : %llu\r\n", (unsigned long long)last_a);
+        SYS_CONSOLE_PRINT("last delta ns  : %+lld\r\n", (long long)delta);
+    }
+}
+
+static void tfuture_reset_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO; (void)argc; (void)argv;
+    tfuture_trace_reset();
+    SYS_CONSOLE_PRINT("tfuture: trace reset\r\n");
+}
+
+static void tfuture_dump_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO; (void)argc; (void)argv;
+    tfuture_trace_dump();
+}
+
 static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
     {"lan_read",    (SYS_CMD_FNC) lan_read,        ": read LAN865X register (lan_read <addr_hex>)"},
     {"lan_write",   (SYS_CMD_FNC) lan_write,       ": write LAN865X register (lan_write <addr_hex> <value_hex>)"},
@@ -449,6 +517,12 @@ static const SYS_CMD_DESCRIPTOR lan_cmd_tbl[] = {
     {"sw_ntp_trace",       (SYS_CMD_FNC) sw_ntp_trace_cmd,       ": enable/disable SW-NTP trace (sw_ntp_trace [on|off])"},
     {"sw_ntp_offset_reset",(SYS_CMD_FNC) sw_ntp_offset_reset_cmd, ": clear SW-NTP offset ring buffer"},
     {"sw_ntp_offset_dump", (SYS_CMD_FNC) sw_ntp_offset_dump_cmd,  ": dump all recorded SW-NTP offsets (one per line, <ns> <valid>)"},
+    {"tfuture_at",     (SYS_CMD_FNC) tfuture_at_cmd,     ": arm firing at absolute PTP_CLOCK ns (tfuture_at <ns>)"},
+    {"tfuture_in",     (SYS_CMD_FNC) tfuture_in_cmd,     ": arm firing at now + <ms> (tfuture_in <ms>)"},
+    {"tfuture_cancel", (SYS_CMD_FNC) tfuture_cancel_cmd, ": cancel any pending tfuture"},
+    {"tfuture_status", (SYS_CMD_FNC) tfuture_status_cmd, ": show tfuture state, fire count, last target/actual"},
+    {"tfuture_reset",  (SYS_CMD_FNC) tfuture_reset_cmd,  ": clear tfuture ring buffer"},
+    {"tfuture_dump",   (SYS_CMD_FNC) tfuture_dump_cmd,   ": dump all recorded fires (<target_ns> <actual_ns> <delta>)"},
 };
 
 static bool Command_Init(void) {
@@ -499,6 +573,7 @@ void APP_Initialize ( void )
 
     Command_Init();
     sw_ntp_init();
+    tfuture_init();
 }
 
 
@@ -668,6 +743,10 @@ void APP_Tasks ( void )
             /* === SW-NTP Service: run every iteration (low RX-poll latency).
              * Internal poll-interval gate decides when to actually TX a request. */
             sw_ntp_service();
+
+            /* === tfuture Service: runs every iteration so the 1-ms spin
+             * threshold can fire with tick-level precision. */
+            tfuture_service();
 
             /* === FOL: process a buffered PTP frame ===
              * Filled by TC6_CB_OnRxEthernetPacket at driver level.
