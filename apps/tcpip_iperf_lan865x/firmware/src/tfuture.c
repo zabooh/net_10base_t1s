@@ -14,21 +14,25 @@
 /* TC0 runs at 60 MHz → 60 ticks per microsecond.
  * 1 ms = 60 000 ticks.  When the target is this close, switch from
  * "check and return" mode to a tight busy-wait until the target is hit.
- * 1 ms is also the PTP service gate period — this means at most one
- * PTP_FOL_Service invocation can be delayed by a single firing. */
-#define TFUTURE_SPIN_THRESHOLD_TICKS  60000UL
+ * Default 1 ms matches the PTP service gate period.  For cyclic sub-ms
+ * firing, lower this at runtime via tfuture_set_spin_threshold_us() to
+ * leave CPU time for the other main-loop services per cycle. */
+#define TFUTURE_TICKS_PER_US          60UL
+#define TFUTURE_DEFAULT_SPIN_US       1000UL
 
 /* -------------------------------------------------------------------------
  * Module state
  * ---------------------------------------------------------------------- */
 
-static tfuture_state_t s_state         = TFUTURE_IDLE;
-static uint64_t        s_target_ns     = 0u;   /* target in PTP_CLOCK ns      */
-static uint64_t        s_target_tick   = 0u;   /* target in raw TC0 ticks     */
-static uint64_t        s_last_target_ns = 0u;
-static uint64_t        s_last_actual_ns = 0u;
-static uint32_t        s_fires_count   = 0u;
-static bool            s_drift_correction = true;   /* diagnostic toggle */
+static tfuture_state_t   s_state          = TFUTURE_IDLE;
+static uint64_t          s_target_ns      = 0u;   /* target in PTP_CLOCK ns   */
+static uint64_t          s_target_tick    = 0u;   /* target in raw TC0 ticks  */
+static uint64_t          s_last_target_ns = 0u;
+static uint64_t          s_last_actual_ns = 0u;
+static uint32_t          s_fires_count    = 0u;
+static bool              s_drift_correction = true;   /* diagnostic toggle   */
+static uint32_t          s_spin_threshold_us = TFUTURE_DEFAULT_SPIN_US;
+static tfuture_fire_cb_t s_fire_cb        = NULL;
 
 /* Ring buffer: (target_ns, actual_ns) pairs. */
 static uint64_t s_trace_target[TFUTURE_TRACE_SIZE];
@@ -110,12 +114,14 @@ static void trace_record(uint64_t target_ns, uint64_t actual_ns)
 
 void tfuture_init(void)
 {
-    s_state         = TFUTURE_IDLE;
-    s_target_ns     = 0u;
-    s_target_tick   = 0u;
-    s_last_target_ns = 0u;
-    s_last_actual_ns = 0u;
-    s_fires_count   = 0u;
+    s_state              = TFUTURE_IDLE;
+    s_target_ns          = 0u;
+    s_target_tick        = 0u;
+    s_last_target_ns     = 0u;
+    s_last_actual_ns     = 0u;
+    s_fires_count        = 0u;
+    s_spin_threshold_us  = TFUTURE_DEFAULT_SPIN_US;
+    s_fire_cb            = NULL;
     tfuture_trace_reset();
 }
 
@@ -163,7 +169,8 @@ void tfuture_service(void)
      * (already past firing point) — treated as positive delta, fire immediately. */
     int64_t ticks_until_target = (int64_t)(s_target_tick - now_tick);
 
-    if (ticks_until_target > (int64_t)TFUTURE_SPIN_THRESHOLD_TICKS) {
+    uint64_t spin_threshold_ticks = (uint64_t)s_spin_threshold_us * TFUTURE_TICKS_PER_US;
+    if (ticks_until_target > (int64_t)spin_threshold_ticks) {
         /* Still far away, come back on next service call */
         return;
     }
@@ -185,7 +192,29 @@ void tfuture_service(void)
     s_last_actual_ns = actual_ns;
     s_fires_count++;
     trace_record(s_target_ns, actual_ns);
-    s_state = TFUTURE_IDLE;    /* ready for next arm */
+
+    /* State must be IDLE before the callback so the callback can re-arm
+     * via tfuture_arm_at_ns() (which refuses if state is PENDING). */
+    s_state = TFUTURE_IDLE;
+    if (s_fire_cb != NULL) {
+        s_fire_cb(s_target_ns, actual_ns);
+    }
+}
+
+void tfuture_set_fire_callback(tfuture_fire_cb_t cb)
+{
+    s_fire_cb = cb;
+}
+
+void tfuture_set_spin_threshold_us(uint32_t us)
+{
+    if (us == 0u) us = TFUTURE_DEFAULT_SPIN_US;
+    s_spin_threshold_us = us;
+}
+
+uint32_t tfuture_get_spin_threshold_us(void)
+{
+    return s_spin_threshold_us;
 }
 
 tfuture_state_t tfuture_get_state(void)

@@ -37,6 +37,7 @@
 #include "sw_ntp_cli.h"
 #include "tfuture_cli.h"
 #include "loop_stats_cli.h"
+#include "cyclic_fire_cli.h"
 #include "ptp_rx.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
@@ -80,6 +81,7 @@ static void Command_Init(void) {
     SW_NTP_CLI_Register();
     TFUTURE_CLI_Register();
     LOOP_STATS_CLI_Register();
+    CYCLIC_FIRE_CLI_Register();
 }
 
 // *****************************************************************************

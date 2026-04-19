@@ -32,6 +32,13 @@ typedef enum {
 
 #define TFUTURE_TRACE_SIZE  256u
 
+/* Optional fire-callback hook.  Invoked from inside tfuture_service()
+ * immediately after the spin-wait exits, before s_state is set back to
+ * IDLE.  Runs in main-loop context (same stack as tfuture_service).
+ * Keep the callback short — it directly extends the spin window. */
+typedef void (*tfuture_fire_cb_t)(uint64_t target_ns, uint64_t actual_ns);
+void            tfuture_set_fire_callback(tfuture_fire_cb_t cb);
+
 /* Lifecycle */
 void            tfuture_init(void);
 void            tfuture_service(void);
@@ -52,6 +59,14 @@ uint32_t        tfuture_get_fire_count(void);
  * from the drift correction term. */
 void            tfuture_set_drift_correction(bool enable);
 bool            tfuture_get_drift_correction(void);
+
+/* Configure the busy-wait threshold: when the remaining ticks-until-target
+ * drops below this, the service enters the tight spin loop.  Larger =
+ * tighter tick-level precision but blocks other services for longer.
+ * Default: 1000 µs (matches PTP service cadence).  For cyclic sub-ms
+ * firing use ~100 µs to leave room for PTP/TCP-IP per cycle. */
+void            tfuture_set_spin_threshold_us(uint32_t us);
+uint32_t        tfuture_get_spin_threshold_us(void);
 
 /* Ring-buffer trace */
 void            tfuture_trace_reset(void);
