@@ -426,8 +426,13 @@ SERVICE_GM:   // called every 1 ms via SYS_TIME periodic callback
     state WRITE_CLEAR → WAIT_CLEAR:
         W1C write to OA_STATUS0  (clear TTSCAA flag)
 
+    state WAIT_STATUS0 (or CB-path equivalent):
+        // At the moment TTSCAA is first seen, snapshot the ISR-latched tick:
+        gm_anchor_tick = DRV_LAN865X_GetTsCaptureNirqTick(0)   // = s_nirq_tick
+        → state READ_TTSCA_H   // continues as before to read t1
+
     state SEND_FOLLOWUP:
-        nsec = gm_ts_nsec + 575983        // empirical static TX-path offset
+        nsec = gm_ts_nsec + PTP_GM_STATIC_OFFSET (7650)  // static TX-path offset
         if nsec >= 1e9: nsec -= 1e9; sec++
         build FollowUp  (preciseOriginTimestamp = sec:nsec, seqId)
         send via DRV_LAN865X_SendRawEthFrame(tsc=0)
@@ -435,9 +440,13 @@ SERVICE_GM:   // called every 1 ms via SYS_TIME periodic callback
 
     state WAIT_FOLLOWUP_TX_DONE:
         wait for TX-done callback
-        // Update local software clock anchor (live TC0 tick)
-        wc_ns = gm_ts_sec * 1e9 + gm_ts_nsec + GM_ANCHOR_OFFSET_NS
-        PTP_CLOCK_Update(wc_ns, SYS_TIME_Counter64Get())
+        // Update local software clock anchor using the ISR-latched tick
+        // captured back in WAIT_STATUS0 (~5 µs jitter vs SFD event on wire).
+        // Previously used SYS_TIME_Counter64Get() here at task level
+        // (~100 µs jitter, dominated drift-filter noise); switched on
+        // 2026-04-20.
+        wc_ns = gm_ts_sec * 1e9 + gm_ts_nsec + PTP_GM_ANCHOR_OFFSET_NS (800000)
+        PTP_CLOCK_Update(wc_ns, gm_anchor_tick)
         seq_id++
         → state WAIT_PERIOD
 ```
@@ -464,6 +473,7 @@ DRV_LAN865X_Tasks():                           // main-loop polled
         if !pinRead(nIRQ):                     // second edge during service?
             s_nirq_pending = true              // re-arm
 
+// RX path — used by FOL to latch t2 anchor:
 TC6_CB_OnRxEthernetPacket(data, length, rxTimestamp):
     if EtherType(data[12:13]) == 0x88F7:
         g_ptp_raw_rx.data         = copy(data, length)
@@ -473,10 +483,24 @@ TC6_CB_OnRxEthernetPacket(data, length, rxTimestamp):
             g_ptp_raw_rx.sysTickAtRx = s_nirq_tick    // pre-captured in ISR
         g_ptp_raw_rx.pending = true
     pass frame to TCPIP stack
+
+// TX-timestamp path — used by GM to latch t1 anchor (added 2026-04-20):
+_OnStatus0(addr, value):                       // SPI-callback after STATUS0 read
+    if value & 0x0700 (TTSCAA/B/C bits):
+        drvTsCaptureStatus0[idx]  |= (value & 0x0700)
+        drvTsCaptureNirqTick[idx]  = s_nirq_tick   // latch ISR-tick paired with TTSCAA
+
+DRV_LAN865X_GetTsCaptureNirqTick(idx):         // exported getter
+    return drvTsCaptureNirqTick[idx]           // GM task snapshots into gm_anchor_tick
 ```
 
 > **Note:** `rxTimestamp` is non-NULL only for Sync frames (RTSA bit set in SPI footer).
 > FollowUp frames have `rxTimestamp=NULL`; the IPC struct keeps the previous SYNC ts.
+> The `drvTsCaptureNirqTick` entry is written when `_OnStatus0` sees the TTSCAA bit and
+> gives the GM state machine an ISR-precision tick paired with the TX-timestamp it is
+> about to read from OA_TTSCA{H,L}.  Replaces the older scheme of calling
+> `SYS_TIME_Counter64Get()` at FollowUp-TX-done in task context (~100 µs jitter →
+> ~5 µs).
 
 #### Timing — from SFD on the wire to `s_nirq_tick` written
 
@@ -626,19 +650,44 @@ PTP_FOL_Service():   // called every 1 ms
 
 ```
 PTP_CLOCK_Update(wallclock_ns, sys_tick):
-    anchor_wc_ns = wallclock_ns   // GM or FOL HW timestamp
-    anchor_tick  = sys_tick       // TC0 tick captured at same moment
+    // Rate estimate from consecutive anchors:
+    if s_valid:
+        dwc_ns       = wallclock_ns - s_anchor_wc_ns    // GM-frame elapsed
+        dtick        = sys_tick     - s_anchor_tick     // local TC0 elapsed
+        if dtick >= DRIFT_MIN_GAP_TICKS (10 ms) and dwc_ns > 0:
+            expected_ns = dtick × 50/3                  // nominal 60 MHz
+            residual_ns = dwc_ns - expected_ns
+            inst_ppb    = -residual_ns × 1e9 / expected_ns
+            if |inst_ppb| < DRIFT_SANITY_PPB_ABS (5000 ppm):
+                // IIR blend (α = 1/N, N = 128):
+                // N was 32 until 2026-04-20; raised to 128 after
+                // drift_filter_analysis.py showed ~47 ppm filter stddev
+                // with strong lag-1 autocorrelation (random walk).
+                s_drift_ppb = ((N-1) × s_drift_ppb + inst_ppb) / N
+    anchor_wc_ns = wallclock_ns
+    anchor_tick  = sys_tick
     valid = true
-    // Drift correction disabled: sys_tick capture jitter (~200 µs)
-    // dominates the 21 ppm crystal error over 500 ms window
 
 PTP_CLOCK_GetTime_ns() → uint64_t:
-    now_tick    = SYS_TIME_Counter64Get()    // TC0 @ 60 MHz, 64-bit
+    now_tick    = SYS_TIME_Counter64Get()               // TC0 @ 60 MHz, 64-bit
     delta_tick  = now_tick - anchor_tick
-    delta_ns    = (delta_tick / 3) * 50
-                + ((delta_tick % 3) * 50) / 3   // exact: 50/3 ns per tick
+    // delta_ns with continuous rate correction:
+    base_ns     = (delta_tick / 3) × 50
+                + ((delta_tick % 3) × 50) / 3           // exact: 50/3 ns per tick
+    delta_ns    = base_ns × (1 - s_drift_ppb / 1e9)     // only if s_drift_valid
     return anchor_wc_ns + delta_ns
 ```
+
+**Anchor-tick capture strategy (asymmetric but calibrated):**
+
+| Side | anchor_wc | anchor_tick | Gap |
+|------|-----------|-------------|-----|
+| **GM**  | `TTSCA + PTP_GM_ANCHOR_OFFSET_NS` (800 µs) | `drvTsCaptureNirqTick[0]` — ISR-latched `s_nirq_tick` captured when `_OnStatus0` saw TTSCAA set | ~5 µs |
+| **FOL** | `t2` (RTSA) | `g_ptp_raw_rx.sysTickAtRx` — ISR-latched at nIRQ for the Sync frame | ~5 µs |
+
+Both sides now latch the anchor tick in the EXTINT-14 ISR (low jitter, ~5 µs), paired with the LAN865x hardware timestamp.  Previously GM used `SYS_TIME_Counter64Get()` at task level at FollowUp-TX-done (~100 µs jitter, dominated drift filter noise floor at ~50 ppm).  Switching GM to ISR capture (2026-04-20, uncommitted on top of `baaa3e5`) dropped the long-term cross-board rate residual from ~11 ppm to ~1.2 ppm.
+
+`PTP_GM_ANCHOR_OFFSET_NS` was recalibrated from 575983 (old task-latency gap) to 800000 ns (new ISR-freshness gap).  Calibration procedure: run `cyclic_fire_hw_test.py --no-compensate`, read median rising delta D, new `PTP_GM_ANCHOR_OFFSET_NS = old - D`.
 
 ---
 
@@ -940,7 +989,8 @@ accuracy, because the read happens some distance away from the event of interest
 |---|---|---|
 | 1. Clock value itself | HW-PTP FINE anchor error + drift-corrected TC0 interpolation | ~100 ns – 1 µs |
 | 2. Call-site latency | ISR dispatch, FreeRTOS scheduling, stack processing between event and `GetTime_ns()` call | 200 ns (ISR) – several ms (task under load) |
-| 3. Cross-board SW stamping | Forward/reverse path asymmetry in SPI + TCP/IP stack when two boards stamp the *same* external event | ~25 µs (measured, see README_NTP §7) |
+| 3. Cross-board SW stamping (2 boards stamp same external event) | Forward/reverse path asymmetry in SPI + TCP/IP stack | ~25 µs (measured, see README_NTP §7) |
+| 4. Cross-board SW firing (2 boards fire GPIO at same PTP-wallclock moment) | Anchor-strategy asymmetry + drift-filter short-term wander + main-loop / tfuture spin latency | ~30 µs median, ~35 µs MAD (measured 2026-04-20 with ISR-captured GM anchor + `DRIFT_IIR_N=128`, via `cyclic_fire_hw_test.py`) |
 
 ### 12.2 Practical guidance
 

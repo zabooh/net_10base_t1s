@@ -385,18 +385,29 @@ uint32_t        tfuture_trace_count(void);
 
 **Function** — PTP-synchronous periodic GPIO toggle at a configurable rate.
 
-**Description** — Builds on `tfuture` via its post-fire callback hook.  `cyclic_fire_start(period_us, phase_anchor_ns)` arms `tfuture` for the first rising edge, then each callback toggles `PD10` and re-arms `tfuture` for the next half-period (`period_us / 2`) in PTP-wallclock time.  `period_us` is the FULL rectangle period, so 1000 µs → 1 kHz rectangle.  Given two PTP-locked boards started with the same `phase_anchor_ns` + `period_us`, both boards toggle their `PD10` pins at identical PTP moments — scope-verifiable synchronous rectangle signals.
+**Description** — Builds on `tfuture` via its post-fire callback hook.  `cyclic_fire_start(period_us, phase_anchor_ns)` arms `tfuture` for the first rising edge, then each callback acts on `PD10` and re-arms `tfuture` for the next half-period (`period_us / 2`) in PTP-wallclock time.  `period_us` is the FULL rectangle period, so 1000 µs → 1 kHz.  Given two PTP-locked boards started with the same `phase_anchor_ns` + `period_us`, both boards fire at identical PTP moments — scope-verifiable synchronous signals.
+
+**Two output patterns** (select via `cyclic_fire_start_ex`):
+- `CYCLIC_FIRE_PATTERN_SQUARE` (default): one toggle per callback → 50/50 square wave.  Best for rate/phase measurement.
+- `CYCLIC_FIRE_PATTERN_MARKER`: 10-half-period cycle.  Phase 0 sets HIGH, phase 2 clears LOW, phases 1 + 3..9 leave the pin alone.  Result: one rising edge every 5 × `period_us`, signal HIGH for 1 period, LOW for 4 periods.  Isolated rising edge makes cross-board "who fires first?" unambiguous on a scope.
 
 Trade-off — shorter periods mean more CPU spent in `tfuture`'s busy-wait window.  `cyclic_fire_start` lowers `tfuture_set_spin_threshold_us()` to 100 µs on entry (and restores on stop) so `PTP_FOL_Service` / TCP-IP still get CPU between fires.  Periods below ~400 µs are not recommended (half-period ≈ spin threshold).
 
-**Dependencies** — `tfuture`, `ptp_clock`, Harmony `SYS_PORT_PinToggle`.
+**Dependencies** — `tfuture`, `ptp_clock`, Harmony `SYS_PORT_PinToggle / PinSet / PinClear`.
 
 **API** — [cyclic_fire.h](cyclic_fire.h)
 
 ```c
 #define CYCLIC_FIRE_DEFAULT_PERIOD_US  1000u  /* full rectangle period → 1 kHz on PD10 */
 
+typedef enum {
+    CYCLIC_FIRE_PATTERN_SQUARE = 0,
+    CYCLIC_FIRE_PATTERN_MARKER = 1,
+} cyclic_fire_pattern_t;
+
 bool     cyclic_fire_start(uint32_t period_us, uint64_t phase_anchor_ns);
+bool     cyclic_fire_start_ex(uint32_t period_us, uint64_t phase_anchor_ns,
+                              cyclic_fire_pattern_t pattern);
 void     cyclic_fire_stop(void);
 bool     cyclic_fire_is_running(void);
 uint32_t cyclic_fire_get_period_us(void);
@@ -531,7 +542,7 @@ void LOOP_STATS_CLI_Register(void);
 
 **Function** — CLI for the periodic GPIO-toggle module.
 
-**Description** — 4 commands: `cyclic_start [period_us [anchor_ns]]` (defaults to 1000 µs rectangle period = 1 kHz, no explicit anchor; requires PTP sync), `cyclic_start_free [period_us]` (same but bootstraps PTP_CLOCK to local TC0 — boards run on independent crystals, edges drift apart; intended to demo the "before sync" state), `cyclic_stop`, `cyclic_status` (running flag + period + cycle + miss counters).
+**Description** — 5 commands: `cyclic_start [period_us [anchor_ns]]` (defaults to 1000 µs rectangle period = 1 kHz, no explicit anchor; requires PTP sync; 50/50 square wave), `cyclic_start_marker [period_us [anchor_ns]]` (same arming but 1-period-high + 4-period-low pulse pattern — isolated rising edges make cross-board "who fires first?" visually unambiguous on a scope), `cyclic_start_free [period_us]` (same but bootstraps PTP_CLOCK to local TC0 — boards run on independent crystals, edges drift apart; intended to demo the "before sync" state), `cyclic_stop`, `cyclic_status` (running flag + period + cycle + miss counters).
 
 **Dependencies** — `cyclic_fire`, `SYS_CMD`.
 

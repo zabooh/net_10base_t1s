@@ -75,6 +75,7 @@ static uint32_t         gm_status0          = 0u;      /* OA_STATUS0 snapshot */
 static int64_t          gm_extra_anchor_delay_ns = 0;  /* diagnostic: added to anchor_wc (H1) */
 static uint32_t         gm_ts_sec           = 0u;      /* TX timestamp: seconds */
 static uint32_t         gm_ts_nsec          = 0u;      /* TX timestamp: nanoseconds */
+static uint64_t         gm_anchor_tick      = 0u;      /* TC0 tick latched at TTSCAA nIRQ — ISR-precision pair for gm_ts_sec/nsec in PTP_CLOCK_Update */
 static uint32_t         gm_tick_ms          = 0u;      /* ms counter, incremented per Service() call */
 static uint32_t         gm_period_start     = 0u;      /* tick at start of current period */
 static uint16_t         gm_seq_id           = 0u;
@@ -510,9 +511,13 @@ void PTP_GM_Service(void)
              * entirely (STATUS0 would read 0x00 anyway since TC6 already cleared it). */
             uint32_t cbCapture = gm_get_and_clear_ts_capture();
             if (0u != cbCapture) {
-                gm_status0    = cbCapture;
-                gm_retry_cnt  = 0u;
-                gm_wait_ticks = 0u;
+                gm_status0     = cbCapture;
+                /* Snapshot the nIRQ-tick that was latched when _OnStatus0
+                 * saw TTSCAA set.  This is our low-jitter anchor tick for
+                 * the PTP_CLOCK update at the end of this cycle. */
+                gm_anchor_tick = DRV_LAN865X_GetTsCaptureNirqTick(0u);
+                gm_retry_cnt   = 0u;
+                gm_wait_ticks  = 0u;
                 GM_SET_STATE(GM_STATE_READ_TTSCA_H);
                 break;
             }
@@ -534,9 +539,10 @@ void PTP_GM_Service(void)
              * TTSCAA (and W1C-cleared STATUS0).  Check it here too. */
             uint32_t cbCapture = gm_get_and_clear_ts_capture();
             if (0u != cbCapture) {
-                gm_status0    = cbCapture;
-                gm_retry_cnt  = 0u;
-                gm_wait_ticks = 0u;
+                gm_status0     = cbCapture;
+                gm_anchor_tick = DRV_LAN865X_GetTsCaptureNirqTick(0u);
+                gm_retry_cnt   = 0u;
+                gm_wait_ticks  = 0u;
                 GM_SET_STATE(GM_STATE_READ_TTSCA_H);
                 break;
             }
@@ -553,7 +559,11 @@ void PTP_GM_Service(void)
             PTP_LOG("[PTP-GM] STATUS0=0x%08lX after Sync #%u\r\n",
                                (unsigned long)gm_op_val, (unsigned)gm_seq_id);
             if (0u != (gm_op_val & (GM_STS0_TTSCAA | GM_STS0_TTSCAB | GM_STS0_TTSCAC))) {
-                gm_status0 = gm_op_val;
+                gm_status0     = gm_op_val;
+                /* The driver's _OnStatus0 also latched the nIRQ tick in
+                 * drvTsCaptureNirqTick for this SPI round — read it as
+                 * our anchor tick. */
+                gm_anchor_tick = DRV_LAN865X_GetTsCaptureNirqTick(0u);
                 GM_SET_STATE(GM_STATE_READ_TTSCA_H);
             } else {
                 gm_retry_cnt++;
@@ -702,27 +712,37 @@ void PTP_GM_Service(void)
             }
             /* gm_tx_busy == false: Callback was invoked, transmission confirmed */
             gm_wait_ticks = 0u;
-            /* Update software PTP clock with LIVE TC0 tick.
-             * wc_ns = TTSCA (exact wire time of SYNC on GM LAN865x clock).
-             * tick  = SYS_TIME_Counter64Get() captured RIGHT NOW, at FollowUp
-             *         TX-done time (~T0+6 ms after SYNC TX).
+            /* Update software PTP clock with the ISR-latched TC0 tick.
+             * wc_ns        = TTSCA (exact wire time of SYNC on GM LAN865x clock).
+             * anchor_tick  = gm_anchor_tick — captured in drv_lan865x's
+             *                _OnStatus0 callback at the moment TTSCAA was first
+             *                observed.  That callback runs just after the nIRQ
+             *                that signalled timestamp-capture, and the tick
+             *                value comes from the EXTINT-14 ISR → ~5 µs
+             *                jitter from the actual SFD-on-wire event.
              *
-             * On the FOL side, PTP_CLOCK_Update() is called from
-             * processFollowUp() which itself is called from APP_IDLE after the
-             * FollowUp frame travels the wire and is processed through DRV_LAN865X_Tasks.
-             * The FOL anchor tick (g_ptp_raw_rx.sysTickAtRx) is captured in the
-             * TC6_CB_OnRxEthernetPacket callback, at ~T0+7 ms from SYNC TX.
+             * This replaces the older strategy of reading SYS_TIME_Counter64Get()
+             * here at FollowUp-TX-done time (~6 ms after t1), which had ~100 µs
+             * task-level jitter and dominated the drift-IIR filter noise on the
+             * GM side.  With the ISR anchor, GM's drift_ppb filter noise should
+             * match FOL's (FOL already uses an ISR-captured tick via
+             * g_ptp_raw_rx.sysTickAtRx).
              *
-             * By capturing the GM tick live here (~T0+6 ms), the age difference
-             * between the two anchor-ticks is ≈ 1 ms, which causes a static
-             * bias that empirically reduces the ptp_time diff to < ±1 ms.
-             * Drift correction is disabled, so no amplification of this bias. */
+             * PTP_GM_ANCHOR_OFFSET_NS still compensates the LAN865x-internal
+             * TX-path latency between the TTSCA latch moment and the SFD on
+             * the wire; the required value is different from the previous
+             * ~576 µs because the anchor-tick-to-wallclock gap is now ~80 µs
+             * instead of ~6 ms.  See the PTP_GM_ANCHOR_OFFSET_NS comment in
+             * ptp_gm_task.h for the calibration procedure. */
             {
                 int64_t wc_ns = (int64_t)gm_ts_sec * 1000000000LL
                               + (int64_t)gm_ts_nsec
                               + (int64_t)PTP_GM_ANCHOR_OFFSET_NS
                               + gm_extra_anchor_delay_ns;
-                PTP_CLOCK_Update((uint64_t)wc_ns, SYS_TIME_Counter64Get());
+                uint64_t anchor_tick = (gm_anchor_tick != 0u)
+                                     ? gm_anchor_tick
+                                     : SYS_TIME_Counter64Get();   /* fallback on first cycle */
+                PTP_CLOCK_Update((uint64_t)wc_ns, anchor_tick);
             }
             gm_seq_id++;
             gm_sync_cnt++;

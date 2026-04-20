@@ -331,8 +331,8 @@ roles, switchable at runtime via CLI.
 | `src/sw_ntp.c/.h` | Minimal software-NTP (UDP) master + follower using SW timestamps from `PTP_CLOCK_GetTime_ns()`. Measurement-only; does not discipline the clock. See [README_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md). |
 | `src/sw_ntp_offset_trace.c/.h` | 1024-entry int64 ring buffer for SW-NTP offsets. Used by `sw_ntp_vs_ptp_test.py` (§5.10). |
 | `src/tfuture.c/.h` | Coordinated single-shot firing at an absolute PTP_CLOCK time. Hybrid precision (main-loop poll + runtime-configurable tight-spin). 256-entry ring buffer. Post-fire callback hook for periodic re-arming. See [README_tfuture.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture.md) and §5.11. |
-| `src/cyclic_fire.c/.h` | PTP-synchronous periodic GPIO toggle on `PD10` at a configurable `period_us` (default 500 µs → 1 kHz rectangle). Uses the `tfuture` callback hook. See §5.12. |
-| `src/cyclic_fire_cli.c/.h` | CLI wrapper for `cyclic_fire` — registers `cyclic_start` / `cyclic_stop` / `cyclic_status`. |
+| `src/cyclic_fire.c/.h` | PTP-synchronous periodic GPIO toggle on `PD10` at a configurable `period_us` (default 1000 µs → 1 kHz rectangle).  Two output patterns: SQUARE (50/50 toggle, for rate/phase measurement) and MARKER (1-high + 4-low pulse, for visual "who fires first?").  Uses the `tfuture` callback hook. See §5.12. |
+| `src/cyclic_fire_cli.c/.h` | CLI wrapper for `cyclic_fire` — registers `cyclic_start` / `cyclic_start_marker` / `cyclic_start_free` / `cyclic_stop` / `cyclic_status`. |
 | `src/pd10_blink.c/.h` | Standalone main-loop rectangle generator on `PD10` at a configurable frequency. Independent of PTP and `tfuture`; pure `SYS_TIME_Counter64Get` service. See §5.13. |
 | `src/pd10_blink_cli.c/.h` | CLI wrapper for `pd10_blink` — registers the `blink` command. |
 | `src/lan_regs_cli.c/.h` | CLI adapter + async state machine for `lan_read` / `lan_write` LAN865x register access (extracted from `app.c`). |
@@ -1889,37 +1889,60 @@ they must live in the same directory.
 
 ### 5.12 Cyclic GPIO Toggle — `cyclic_fire` module + PD10 rectangle
 
-§5.12 extends §5.11's single-shot firing into a **periodic** GPIO toggle on
+§5.12 extends §5.11's single-shot firing into a **periodic** GPIO action on
 **PD10** of both boards, scheduled entirely from the PTP wallclock.  Given
 two PTP-locked boards armed with the same `period_us` and `phase_anchor_ns`,
-both boards toggle their PD10 pins at identical PTP moments — scope-verifiable
-synchronous rectangle signals across the link.
+both boards drive their PD10 pins at identical PTP moments — scope-verifiable
+synchronous signals across the link.
 
-Default period: **500 µs callback rate → 1 kHz rectangle** (500 µs high,
-500 µs low).  Period is configurable via the CLI `cyclic_start` argument.
+**Default period: 1000 µs (full rectangle period) → 1 kHz.**  The argument
+is the *full* rectangle period; the internal callback fires twice per period
+(every `period_us / 2`) to keep edge jitter bounded.
 
 Firmware (`src/cyclic_fire.c`, `src/cyclic_fire_cli.c`):
 
 - Uses `tfuture_set_fire_callback()` to register a post-fire hook.
-- Each hook call: `SYS_PORT_PinToggle(PD10)`, then `tfuture_arm_at_ns(target + period)` to schedule the next edge at absolute PTP-wallclock time.
-- Lowers `tfuture_set_spin_threshold_us()` to 100 µs on start (and restores on stop) so PTP / TCP-IP still get CPU between fires at sub-ms periods.
+- Each hook call acts on PD10 according to the selected pattern (see below),
+  then calls `tfuture_arm_at_ns(target + half_period)` to schedule the next
+  callback at an absolute PTP-wallclock time.
+- Lowers `tfuture_set_spin_threshold_us()` to 100 µs on start (and restores
+  on stop) so PTP / TCP-IP still get CPU between fires at sub-ms periods.
 - Counts cycles + missed slots for diagnostics.
+
+**Two output patterns:**
+
+| Pattern | Behaviour | CLI |
+|---|---|---|
+| `SQUARE` (default) | One toggle per callback → 50/50 square wave | `cyclic_start` |
+| `MARKER` | 10-callback cycle: callback 0 → HIGH, callback 2 → LOW, callbacks 1 + 3..9 → no-op.  Result: one rising edge every 5 × `period_us`, signal HIGH for 1 period, LOW for 4 periods | `cyclic_start_marker` |
+
+MARKER is meant for the "who fires first?" diagnostic — an isolated rising
+edge is unambiguous to read on a scope, whereas in SQUARE mode at sub-100 µs
+cross-board offsets the edges look flat-topped overlapped.
 
 Usage (run on **both** boards after PTP FINE):
 
 ```
-# On GM: pick an anchor 100 ms in the future, shared with FOL
+# On GM: pick an anchor 2 s in the future, shared with FOL
 > clk_get
-clk_get: 42195000000 ns  drift=+1200000ppb
+clk_get: 42195000000 ns  drift=+900000ppb
 
-# On GM and FOL, same command:
-> cyclic_start 500 42295000000
-cyclic_start OK  period=500 us  anchor=42295000000 ns
+# On GM and FOL, same command — square-wave pattern for measurement:
+> cyclic_start 1000 44195000000
+cyclic_start OK  period=1000 us  anchor=44195000000 ns
+
+# or for visual demo:
+> cyclic_start_marker 1000 44195000000
+cyclic_start_marker OK  period=1000 us  anchor=44195000000 ns  (1-high + 4-low pattern)
+
+# or for the "before sync" half of the demo (no PTP required):
+> cyclic_start_free 1000
+cyclic_start_free OK  period=1000 us  (free-run, no PTP sync)
 
 # Wait some time, then:
 > cyclic_status
 cyclic running : yes
-period         : 500 us
+period         : 1000 us
 cycles         : 14231
 misses         : 0
 
@@ -1933,16 +1956,32 @@ Verification path:
 - **Firmware-only regression** — `smoke_test.py` Phase 3 starts cyclic on
   both boards for 2 s and checks that cycles accumulate (no callback-dead
   bug) and misses stay low (no main-loop starvation).
-- **Physical verification** — requires a 2-channel oscilloscope on GM-PD10
-  and FOL-PD10.  Both rectangles should share edges within a few hundred ns
-  (limited by tfuture's firing precision from §5.11).
+- **Physical verification via Saleae automation** — `cyclic_fire_hw_test.py`
+  drives the full test: reset → PTP FINE → `cyclic_start` on both boards with
+  a shared anchor → 3 s Saleae Logic 8 capture (Ch0=GM, Ch1=FOL) → edge
+  extraction → cross-board delta statistics with verification timestamps for
+  Logic-2-cursor cross-check.  Run with `--marker` for the isolated-pulse
+  visual form.  CSV of per-edge deltas written for offline plotting.
+- **Drift-filter characterisation** — `drift_filter_analysis.py` polls
+  `clk_get` on both boards at ~1-2 Hz for 60 s and computes
+  per-board `drift_ppb` stddev, autocorrelation, trend and cross-board
+  rate residual (ppm).  Use after firmware changes to `DRIFT_IIR_N` or to
+  the anchor-tick capture path.
 
-**Known caveat**: a scale-invariant ~1.7× rate factor is observed (see
-Ticket 7 in `prompts/codebase_cleanup_followups.md`) — the callback
-mechanism works reliably, the two boards are PTP-locked to each other,
-but the absolute firing rate is offset from the configured `period_us`.
-The rectangles are synchronous between boards; only the period differs
-from the nominal configuration.
+**Measured on the bench (2026-04-20, with ISR-captured GM anchor tick +
+`DRIFT_IIR_N = 128` + `PTP_GM_ANCHOR_OFFSET_NS = 800000`):**
+
+| Metric | Value |
+|---|---|
+| Cross-board rising-edge median (SQUARE, 1 kHz) | **−30 µs** |
+| MAD | 35 µs |
+| Long-term rate residual (60 s) | +1.2 ppm |
+| Drift filter stddev per board | 32-37 ppm |
+| Period jitter per board | sub-µs MAD |
+
+These are substantially better than the older numbers (~−135 µs median,
+~50 ppm filter stddev, ~11 ppm rate residual) which dated from before the
+ISR-anchor change and the larger IIR window.
 
 ---
 

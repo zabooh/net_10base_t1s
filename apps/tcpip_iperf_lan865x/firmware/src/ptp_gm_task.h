@@ -63,21 +63,32 @@ typedef enum {
 #define PTP_GM_MAX_RETRIES      5u
 
 /* Empirical TX-path offset added to the GM software-clock anchor after each
- * Sync TX.  Corrects the fixed age difference between the GM anchor-tick
- * (captured at FollowUp TX-done, ~T0+6 ms) and the FOL anchor-tick (captured
- * at frame RX callback, ~T0+7 ms).  Measured on ATSAME54P20A + LAN865x
- * hardware (2026-04-09): +565000 ns base → residual +10983 ns → 575983 ns.
+ * Sync TX.  This compensates for the time gap between the GM anchor-tick
+ * (= TC0 tick latched in the _OnStatus0 callback when TTSCAA was first seen,
+ * sourced from the EXTINT-14 ISR's s_nirq_tick — see
+ * DRV_LAN865X_GetTsCaptureNirqTick) and the GM MAC wallclock value that
+ * anchor-tick corresponds to.
+ *
+ * History:
+ *   2026-04-09: 575983 ns — calibrated for the old code path that read
+ *               SYS_TIME_Counter64Get() live at FollowUp-TX-done (~ms-scale
+ *               age gap to the TTSCA event).  Gave cyclic_fire_hw_test
+ *               median cross-board delta of ~-135 µs.
+ *   2026-04-20: 800000 ns — re-calibrated for the new ISR-anchor path.
+ *               The anchor tick is now ~ISR-precision fresh (~5 µs after
+ *               wire-SFD), so the compensation value shifted.  Value chosen
+ *               to make cyclic_fire_hw_test median delta ≈ 0.
  *
  * Override at build time via CMake:
  *   target_compile_definitions(... PRIVATE PTP_GM_ANCHOR_OFFSET_NS=<value>ULL)
  * or in user.cmake:
- *   add_compile_definitions(PTP_GM_ANCHOR_OFFSET_NS=575983ULL)
+ *   add_compile_definitions(PTP_GM_ANCHOR_OFFSET_NS=800000ULL)
  *
- * To re-calibrate: set to 0, build, run ptp_time_test, use the reported mean
- * bias as the new value.
+ * To re-calibrate: run cyclic_fire_hw_test.py --no-compensate, read the
+ * median rising delta D; new PTP_GM_ANCHOR_OFFSET_NS = old - D (in ns).
  */
 #ifndef PTP_GM_ANCHOR_OFFSET_NS
-#define PTP_GM_ANCHOR_OFFSET_NS  575983ULL
+#define PTP_GM_ANCHOR_OFFSET_NS  800000ULL
 #endif
 
 /* ---- Optional LAN865x driver access switches ----

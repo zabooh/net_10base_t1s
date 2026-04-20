@@ -822,6 +822,21 @@ bool DRV_LAN865X_IsReady(uint8_t idx);
  */
 uint32_t DRV_LAN865X_GetAndClearTsCapture(uint8_t idx);
 
+/* Returns the TC0 tick (SYS_TIME_Counter64) that was latched at the moment
+ * the driver's _OnStatus0 callback saw TTSCAA/B/C being set.  The value
+ * comes from the EXTINT-14 ISR (s_nirq_tick) and therefore reflects ISR-
+ * precision timing (~5 µs jitter) of the LAN865x's nIRQ-assert moment.
+ * Intended as the anchor tick for PTP_CLOCK_Update on the GM side,
+ * replacing the task-level SYS_TIME_Counter64Get() read that had ~100 µs
+ * jitter and several ms of latency from the actual t1 event.
+ *
+ * Not atomic with GetAndClearTsCapture() — caller should read both in
+ * quick succession.  The value persists across calls (no clear-on-read).
+ *   idx - Driver instance index (0-based)
+ * Returns: the latched TC0 tick, or 0 if never captured.
+ */
+uint64_t DRV_LAN865X_GetTsCaptureNirqTick(uint8_t idx);
+
 
 #ifdef __cplusplus
 }

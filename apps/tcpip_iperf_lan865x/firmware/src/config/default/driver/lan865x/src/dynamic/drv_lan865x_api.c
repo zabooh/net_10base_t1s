@@ -157,6 +157,14 @@ static DRV_LAN865X_DriverInfo drvLAN865XDrvInst[DRV_LAN865X_INSTANCES_NUMBER];
 /* TX Timestamp Capture Available bits (STATUS0 bits 8-10) saved by _OnStatus0 before W1C.
  * Read and atomically cleared by DRV_LAN865X_GetAndClearTsCapture(). */
 static volatile uint32_t drvTsCaptureStatus0[DRV_LAN865X_INSTANCES_NUMBER];
+/* TC0 tick latched at the moment _OnStatus0 saw the TTSCAA/B/C bits set.
+ * Paired with drvTsCaptureStatus0 above.  The value comes from s_nirq_tick,
+ * which was captured in the EXTINT-14 ISR when the LAN865x raised nIRQ for
+ * the TX-timestamp-available status change.  This gives the GM state machine
+ * an ISR-precision anchor tick (~5 µs jitter) to pair with the TTSCA
+ * wallclock reading, instead of reading SYS_TIME_Counter64Get() at task
+ * level (~100 µs jitter) several ms later at FollowUp-TX-done. */
+static volatile uint64_t drvTsCaptureNirqTick[DRV_LAN865X_INSTANCES_NUMBER];
 static uint8_t drvLAN865xNumOfDrivers = 0;
 static OSAL_MUTEX_HANDLE_TYPE  drvLAN865xClntMutex;
 /******************************************************************************
@@ -2434,11 +2442,15 @@ static void _OnStatus0(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
             bool reinit = false;
             uint8_t i;
             /* Save TTSCAA/B/C bits (8-10) before W1C clear so the GM state machine
-             * can retrieve them via DRV_LAN865X_GetAndClearTsCapture(). */
+             * can retrieve them via DRV_LAN865X_GetAndClearTsCapture().
+             * Also latch the nIRQ tick that triggered this STATUS0 read — it
+             * corresponds (approximately) to the real-time moment of the SFD
+             * on the wire, and gives the GM a low-jitter anchor tick. */
             if (0u != (value & 0x0700u)) {
                 for (i = 0u; i < DRV_LAN865X_INSTANCES_NUMBER; i++) {
                     if (pDrvInst == &drvLAN865XDrvInst[i]) {
                         drvTsCaptureStatus0[i] |= (value & 0x0700u);
+                        drvTsCaptureNirqTick[i] = s_nirq_tick;
                         break;
                     }
                 }
@@ -2575,4 +2587,14 @@ uint32_t DRV_LAN865X_GetAndClearTsCapture(uint8_t idx)
     uint32_t val = drvTsCaptureStatus0[idx];
     drvTsCaptureStatus0[idx] = 0u;
     return val;
+}
+
+uint64_t DRV_LAN865X_GetTsCaptureNirqTick(uint8_t idx)
+{
+    /* Read-only — the value is valid until the next TS-capture event.
+     * Caller should snapshot it into a local variable alongside any
+     * DRV_LAN865X_GetAndClearTsCapture() call, to keep the pairing
+     * atomic-enough for the GM state machine's purposes. */
+    if (idx >= DRV_LAN865X_INSTANCES_NUMBER) { return 0u; }
+    return drvTsCaptureNirqTick[idx];
 }
