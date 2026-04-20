@@ -1,0 +1,21 @@
+{
+    "files.associations": {
+        "*.h": "c",
+        "*.c": "c",
+        "*.inc": "c"
+    },
+    "files.exclude": {
+        "**/temp": true,
+        "**/_build": true,
+        "**/*.o": true,
+        "**/*.d": true,
+        "**/build_summary_*.txt": true
+    },
+    "search.exclude": {
+        "apps/*/firmware/*.X/out/": true,
+        "apps/*/firmware/*.X/cyclic_fire_hw_*/": true,
+        "apps/*/firmware/*.X/drift_filter_*/": true,
+        "apps/*/firmware/*.X/__pycache__/": true,
+        "compile_commands.json": true
+    }
+}

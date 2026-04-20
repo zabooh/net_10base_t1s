@@ -19,6 +19,11 @@ mcc-manifest-autosave.yml
 **/*.X/build
 **/*.X/.generated_files
 **/*.code-workspace
+
+# VSCode IntelliSense — compile_commands.json is generated fresh by build.bat
+# on every configure and varies by local filesystem paths / xc32 install dir.
+compile_commands.json
+/.vscode/browse.vc.db
 /apps/tcpip_iperf_lan867x/firmware/tcpip_iperf_lan867x.X/tcpip_iperf_lan867x_default.bak0/components
 /apps/tcpip_iperf_lan867x/firmware/tcpip_iperf_lan867x.X/tcpip_iperf_lan867x_default.bak1/components
 /apps/tcpip_iperf_lan867x/firmware/tcpip_iperf_lan867x_freertos.X/tcpip_iperf_lan867x_freertos_FreeRTOS.bak0/components

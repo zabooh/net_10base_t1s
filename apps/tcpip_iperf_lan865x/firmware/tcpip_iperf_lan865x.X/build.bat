@@ -82,10 +82,24 @@ goto :build
 :incremental
 :build
 echo [1/2] Configuring with CMake...
-cmake --preset tcpip_iperf_lan865x_default_conf -S "%CMAKE_DIR%" -B "%BUILD_DIR%" -DPACK_REPO_PATH="%USERPROFILE%/.mchp_packs"
+cmake --preset tcpip_iperf_lan865x_default_conf -S "%CMAKE_DIR%" -B "%BUILD_DIR%" -DPACK_REPO_PATH="%USERPROFILE%/.mchp_packs" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 if errorlevel 1 (
     echo ERROR: CMake configure failed.
     exit /b 1
+)
+
+:: --------------------------------------------------------------------------
+:: Copy compile_commands.json to the repo root so VSCode's C/C++ extension
+:: (configured via .vscode/c_cpp_properties.json) can resolve "Find All
+:: References" / "Go to Definition" across the project.
+:: SCRIPT_DIR is .../net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/
+:: so ..\..\..\.. climbs up to the repo root (net_10base_t1s/).
+:: --------------------------------------------------------------------------
+if exist "%BUILD_DIR%\compile_commands.json" (
+    pushd "%SCRIPT_DIR%..\..\..\.." >nul
+    copy /Y "%BUILD_DIR%\compile_commands.json" "compile_commands.json" >nul
+    echo compile_commands.json copied to repo root for VSCode IntelliSense.
+    popd >nul
 )
 
 echo [2/2] Building with Ninja...
