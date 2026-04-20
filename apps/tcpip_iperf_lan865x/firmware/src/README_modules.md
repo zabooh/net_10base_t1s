@@ -22,6 +22,7 @@ This document describes each source module in `apps/tcpip_iperf_lan865x/firmware
   - [sw_ntp](#sw_ntp)
   - [tfuture](#tfuture)
   - [cyclic_fire](#cyclic_fire)
+  - [pd10_blink](#pd10_blink)
 - [CLI Adapters](#cli-adapters)
   - [lan_regs_cli](#lan_regs_cli)
   - [ptp_cli](#ptp_cli)
@@ -29,6 +30,7 @@ This document describes each source module in `apps/tcpip_iperf_lan865x/firmware
   - [tfuture_cli](#tfuture_cli)
   - [loop_stats_cli](#loop_stats_cli)
   - [cyclic_fire_cli](#cyclic_fire_cli)
+  - [pd10_blink_cli](#pd10_blink_cli)
 - [Application Glue](#application-glue)
   - [app](#app)
 - [Reuse Guidelines](#reuse-guidelines)
@@ -49,12 +51,13 @@ Portability rating for dropping a module into a different project:
 | `ptp_log`               | portable         | `SYS_CONSOLE_PRINT`                   | none                           |
 | `tfuture`               | portable         | `SYS_TIME_Counter64Get` + `ptp_clock` | none                           |
 | `cyclic_fire`           | portable         | `tfuture` + `SYS_PORT_PinToggle`      | none                           |
+| `pd10_blink`            | fully portable   | `SYS_TIME_Counter64Get` + `SYS_PORT_PinToggle` | none                  |
 | `sw_ntp`                | portable         | Harmony TCP/IP UDP API                | UDP                            |
 | `PTP_FOL_task`          | moderate         | LAN865x driver API                    | IEEE 1588                      |
 | `ptp_gm_task`           | moderate         | LAN865x driver API                    | IEEE 1588                      |
 | `ptp_ts_ipc`            | headers-only     | LAN865x TC6 driver                    | PTP 0x88F7                     |
 | `ptp_rx`                | moderate         | Harmony TCP/IP stack                  | PTP 0x88F7                     |
-| `*_cli` (all seven)     | swap CLI layer   | Harmony `SYS_CMD`                     | depends on wrapped module      |
+| `*_cli` (all eight)     | swap CLI layer   | Harmony `SYS_CMD`                     | depends on wrapped module      |
 | `app`                   | not reusable     | Harmony Application template          | —                              |
 
 "Moderate" = works on any MCU/framework once the LAN865x driver, SYS_TIME, and the Harmony TCP/IP stack are available; the PTP protocol implementation itself is hardware-agnostic.
@@ -382,16 +385,16 @@ uint32_t        tfuture_trace_count(void);
 
 **Function** — PTP-synchronous periodic GPIO toggle at a configurable rate.
 
-**Description** — Builds on `tfuture` via its post-fire callback hook.  `cyclic_fire_start(period_us, phase_anchor_ns)` arms `tfuture` for the first edge, then each callback toggles `PB22` and re-arms `tfuture` for the next slot `period_us` later in PTP-wallclock time.  Given two PTP-locked boards started with the same `phase_anchor_ns` + `period_us`, both boards toggle their `PB22` pins at identical PTP moments — scope-verifiable synchronous rectangle signals.
+**Description** — Builds on `tfuture` via its post-fire callback hook.  `cyclic_fire_start(period_us, phase_anchor_ns)` arms `tfuture` for the first rising edge, then each callback toggles `PD10` and re-arms `tfuture` for the next half-period (`period_us / 2`) in PTP-wallclock time.  `period_us` is the FULL rectangle period, so 1000 µs → 1 kHz rectangle.  Given two PTP-locked boards started with the same `phase_anchor_ns` + `period_us`, both boards toggle their `PD10` pins at identical PTP moments — scope-verifiable synchronous rectangle signals.
 
-Trade-off — shorter periods mean more CPU spent in `tfuture`'s busy-wait window.  `cyclic_fire_start` lowers `tfuture_set_spin_threshold_us()` to 100 µs on entry (and restores on stop) so `PTP_FOL_Service` / TCP-IP still get CPU between fires.  Periods below ~200 µs are not recommended.
+Trade-off — shorter periods mean more CPU spent in `tfuture`'s busy-wait window.  `cyclic_fire_start` lowers `tfuture_set_spin_threshold_us()` to 100 µs on entry (and restores on stop) so `PTP_FOL_Service` / TCP-IP still get CPU between fires.  Periods below ~400 µs are not recommended (half-period ≈ spin threshold).
 
 **Dependencies** — `tfuture`, `ptp_clock`, Harmony `SYS_PORT_PinToggle`.
 
 **API** — [cyclic_fire.h](cyclic_fire.h)
 
 ```c
-#define CYCLIC_FIRE_DEFAULT_PERIOD_US  500u  /* → 1 kHz rectangle on PB22 */
+#define CYCLIC_FIRE_DEFAULT_PERIOD_US  1000u  /* full rectangle period → 1 kHz on PD10 */
 
 bool     cyclic_fire_start(uint32_t period_us, uint64_t phase_anchor_ns);
 void     cyclic_fire_stop(void);
@@ -401,7 +404,33 @@ uint64_t cyclic_fire_get_cycle_count(void);
 uint64_t cyclic_fire_get_missed_count(void);
 ```
 
-**Reuse note** — Swap `CYCLIC_FIRE_PIN` in `cyclic_fire.c` to retarget to another GPIO.  A known scale-invariant ~1.7× rate factor is currently observed (see `prompts/codebase_cleanup_followups.md` Ticket 7) — the mechanism works reliably, only the absolute rate is off.
+**Reuse note** — Swap `CYCLIC_FIRE_PIN` in `cyclic_fire.c` to retarget to another GPIO.
+
+---
+
+### pd10_blink
+
+**Function** — Simple main-loop rectangle generator on `PD10`, PTP-independent.
+
+**Description** — Toggles `PD10` at a configurable frequency using only `SYS_TIME_Counter64Get()` + `SYS_PORT_PinToggle()`.  No tfuture, no PTP, no spin-wait — just a scheduled-tick comparison per main-loop iteration.  Starts silent; enabled via the `blink` CLI.  Primary uses: post-flash scope-probe verification, wiring checks, a background reference tick while measuring other subsystems.
+
+Frequency semantics: the argument to `pd10_blink_set_hz()` is the **rectangle** frequency.  The underlying toggle rate is `2 × hz`.  The half-period is `ticks_per_sec / (2 × hz)` ticks; `set_hz()` returns `false` if this collapses to 0 ticks (frequency too high for the SYS_TIME resolution).
+
+Drift behaviour: the scheduled toggle tick advances by exactly one half-period each time (`s_next_toggle_tick += half_period`), so minor per-iteration jitter does not accumulate.  However, because `pd10_blink` uses the MCU-local quartz directly (no PTP discipline), the rectangle frequency sits ~1000 ppm off nominal on typical dev-board crystals — as expected.
+
+**Dependencies** — `SYS_TIME_Counter64Get`, `SYS_PORT_PinToggle`.  Nothing else.
+
+**API** — [pd10_blink.h](pd10_blink.h)
+
+```c
+void     pd10_blink_init(void);                       /* called from APP_Initialize */
+void     pd10_blink_service(uint64_t current_tick);   /* main-loop tick every iter */
+bool     pd10_blink_set_hz(uint32_t hz);              /* 0 → stop; returns false if hz too high */
+bool     pd10_blink_is_running(void);
+uint32_t pd10_blink_get_hz(void);
+```
+
+**Reuse note** — The simplest reusable block in the whole tree: replace `PD10_BLINK_PIN` in `pd10_blink.c` and the module is ready for any other GPIO on any other target that has a 64-bit monotonic tick counter.
 
 ---
 
@@ -502,7 +531,7 @@ void LOOP_STATS_CLI_Register(void);
 
 **Function** — CLI for the periodic GPIO-toggle module.
 
-**Description** — 3 commands: `cyclic_start [period_us [anchor_ns]]` (defaults to 500 µs period, no explicit anchor), `cyclic_stop`, `cyclic_status` (running flag + period + cycle + miss counters).
+**Description** — 4 commands: `cyclic_start [period_us [anchor_ns]]` (defaults to 1000 µs rectangle period = 1 kHz, no explicit anchor; requires PTP sync), `cyclic_start_free [period_us]` (same but bootstraps PTP_CLOCK to local TC0 — boards run on independent crystals, edges drift apart; intended to demo the "before sync" state), `cyclic_stop`, `cyclic_status` (running flag + period + cycle + miss counters).
 
 **Dependencies** — `cyclic_fire`, `SYS_CMD`.
 
@@ -510,6 +539,24 @@ void LOOP_STATS_CLI_Register(void);
 
 ```c
 void CYCLIC_FIRE_CLI_Register(void);
+```
+
+---
+
+### pd10_blink_cli
+
+**Function** — CLI for the standalone `PD10` rectangle generator.
+
+**Description** — One command: `blink [<hz>|stop]`.  No argument starts at the default 1000 Hz; `<hz>` as any positive integer starts / retunes; `0` or `stop` halts.  Non-numeric arguments print a short usage message instead of silently being interpreted as 0.
+
+Note on `MAX_CMD_GROUP`: adding this module pushed the number of SYS_CMD groups to 9, above the default Harmony limit of 8.  The limit has been raised to 16 in both `config/default/system/command/sys_command.h` and `config/FreeRTOS/system/command/sys_command.h` — any further CLI module extraction will fit without re-bumping for a while.
+
+**Dependencies** — `pd10_blink`, `SYS_CMD`.
+
+**API** — [pd10_blink_cli.h](pd10_blink_cli.h)
+
+```c
+void PD10_BLINK_CLI_Register(void);
 ```
 
 ---

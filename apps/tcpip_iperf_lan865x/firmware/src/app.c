@@ -38,6 +38,8 @@
 #include "tfuture_cli.h"
 #include "loop_stats_cli.h"
 #include "cyclic_fire_cli.h"
+#include "pd10_blink.h"
+#include "pd10_blink_cli.h"
 #include "ptp_rx.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
@@ -82,6 +84,7 @@ static void Command_Init(void) {
     TFUTURE_CLI_Register();
     LOOP_STATS_CLI_Register();
     CYCLIC_FIRE_CLI_Register();
+    PD10_BLINK_CLI_Register();
 }
 
 // *****************************************************************************
@@ -106,6 +109,7 @@ void APP_Initialize ( void )
     Command_Init();
     sw_ntp_init();
     tfuture_init();
+    pd10_blink_init();
 }
 
 
@@ -185,6 +189,9 @@ void APP_Tasks ( void )
                 ptp_fol_initialized = true;
             }
             uint64_t current_tick = SYS_TIME_Counter64Get();
+
+            /* === PD10 rectangle generator — enabled via `blink` CLI === */
+            pd10_blink_service(current_tick);
 
             /* === Manual LAN865x register access service === */
             LAN_REGS_CLI_Service(current_tick, ticks_per_ms);

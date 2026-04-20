@@ -24,10 +24,20 @@
 
 /* IIR smoothing window for the ppb rate estimate.
  * α = 1/N, half-life ≈ 0.7 × N samples.
- * N = 32 → half-life ~22 samples ≈ 2.75 s at 125 ms Sync interval.
- * Per-sample noise from 5 µs sysTickAtRx jitter over a 125 ms interval is
- * ~40 ppm; √N averaging brings it to ~7 ppm within one time-constant. */
-#define DRIFT_IIR_N  32
+ * N = 128 → half-life ~89 samples ≈ 11 s at 125 ms Sync interval.
+ *
+ * History: N was 32 until 2026-04-20.  Characterisation with
+ * drift_filter_analysis.py revealed filter stddev of ~47 ppm over 60 s
+ * with strong lag-1 autocorrelation (0.91, random walk), leading to
+ * ~65 µs/s cross-board phase drift in short capture windows.
+ * Quadrupling N reduces stddev by √4 ≈ 2× to ~24 ppm at the cost of
+ * slower response to crystal-rate changes (e.g. thermal drift).  For
+ * a static indoor bench the slower response is a good trade-off.
+ *
+ * Per-sample noise from 5 µs sysTickAtRx jitter over a 125 ms interval
+ * is ~40 ppm; √N averaging brings the steady-state floor to ~4 ppm
+ * within one time constant. */
+#define DRIFT_IIR_N  128
 
 /* Sanity window for the per-sample instantaneous ppb estimate.
  * Accepts up to ±5000 ppm.  Must cover the combined crystal mismatch

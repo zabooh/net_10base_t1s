@@ -16,6 +16,7 @@ Target audience: developer who wants to type _"refactor `app.c` into 6 modules, 
 - [8. Recommended workflow](#8-recommended-workflow)
 - [9. Troubleshooting](#9-troubleshooting)
 - [10. Example: this project's `settings.local.json`](#10-example-this-projects-settingslocaljson)
+- [11. Keep the allowlist tidy](#11-keep-the-allowlist-tidy)
 
 ---
 
@@ -141,19 +142,26 @@ Autonomy is cheap; unintended destruction is expensive. Keep **explicit confirma
 - Uploads to external services (gists, pastebins, diagram renderers, cloud buckets)
 - Anything that modifies CI/CD pipelines, shared infrastructure, or runs in production
 
-Setting these in the `deny` block of `settings.local.json` makes the rule explicit:
+Setting these in the `deny` block of `settings.local.json` makes the rule explicit. A real-world deny block as used in this project:
 
 ```json
 {
   "permissions": {
     "allow": [ "..." ],
-    "deny":  [
+    "deny": [
       "Bash(git push --force *)",
-      "Bash(rm -rf *)"
+      "Bash(git push -f *)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean -f*)",
+      "Bash(rm -rf *)",
+      "Bash(rm -r *)"
     ]
   }
 }
 ```
+
+`deny` wins over `allow` when both match — so a broad `Bash(git *)` allow combined with the `deny` entries above still blocks the dangerous variants. That is exactly the combination you want: maximum autonomy on safe commands, zero autonomy on destructive ones.
 
 A well-written agent won't run these routinely, but the deny list is a hard backstop.
 
@@ -208,7 +216,7 @@ Open the log file the test harness wrote; most harnesses have a `--log-file` opt
 
 ## 10. Example: this project's `settings.local.json`
 
-An actual, working allowlist for this 10BASE-T1S firmware project:
+The actual, in-use allowlist for this 10BASE-T1S firmware project (after consolidation — see section 11):
 
 ```json
 {
@@ -216,21 +224,53 @@ An actual, working allowlist for this 10BASE-T1S firmware project:
     "allow": [
       "Bash(git *)",
       "Bash(git -C /c/work/ptp/check/net_10base_t1s *)",
-      "Bash(git -C * add *)",
-      "Bash(git -C * commit *)",
-      "Bash(git -C * push *)",
-      "Bash(git commit *)",
-      "Bash(git push *)",
-      "Bash(./build.bat)",
+      "Bash(cd /c/work/ptp/check/net_10base_t1s && git *)",
+
+      "Bash(cmd.exe //c \"build.bat *\")",
       "Bash(cmd.exe //c \"build.bat\")",
-      "Bash(cmd.exe //c \"build.bat incremental\")",
+      "Bash(./build.bat *)",
+      "Bash(./build.bat)",
+      "Bash(/c/work/ptp/check/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/build.bat *)",
+      "Bash(cd /c/work/ptp/check/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X && ./build.bat *)",
+
       "Bash(python /c/work/ptp/check/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/flash.py)",
       "Bash(python /c/work/ptp/check/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/smoke_test.py)",
-      "Bash(python /c/work/ptp/check/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/smoke_test.py --no-reset)"
+      "Bash(python /c/work/ptp/check/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/smoke_test.py --no-reset)",
+
+      "Bash(python ptp_drift_compensate_test.py *)",
+      "Bash(python -u ptp_offset_capture.py *)",
+      "Bash(python saleae_high_phase.py *)",
+      "Bash(python -c \"import ast; ast.parse*\")",
+
+      "Bash(ls *)",
+      "Bash(stat *)",
+      "Bash(touch *)",
+      "Bash(find /c/work/ptp/check/net_10base_t1s *)",
+      "Bash(xargs grep *)",
+      "Bash(rm /c/work/ptp/check/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/out/*)",
+      "WebFetch(domain:onlinedocs.microchip.com)",
+
+      "Skill(update-config)",
+      "Skill(update-config:*)"
+    ],
+    "deny": [
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean -f*)",
+      "Bash(rm -rf *)",
+      "Bash(rm -r *)"
     ]
   }
 }
 ```
+
+Notes on the shape:
+
+- **Path duplication by design.** `Bash(./build.bat *)`, the absolute `/c/work/…/build.bat *` form, and the `cd … && ./build.bat *` compound are all listed because the agent's current working directory varies between calls. Covering all three shapes is cheaper than one prompt interrupt.
+- **Test scripts use wildcard args** (`ptp_drift_compensate_test.py *`, `saleae_high_phase.py *`) so the allowlist doesn't need an update every time `--duration` or `--gm-port` changes.
+- **`Skill(update-config)`** is allowlisted so the agent can edit `settings.local.json` itself when asked — keeps the configuration loop autonomous too.
 
 With this allowlist + auto-accept-edits mode, the agent can run the full refactor loop:
 
@@ -252,6 +292,28 @@ For each module in [lan_regs, ptp, sw_ntp, tfuture, loop_stats, ptp_rx]:
 
 Zero confirmation prompts during the 20-30 minutes this loop takes. That's the target.
 
+## 11. Keep the allowlist tidy
+
+Allowlists grow fast. Every time the agent runs a slightly-different command shape — a new flag, a different COM-port, a one-off `python -c "..."` — you either approve it once (gone after the session) or add it to `settings.local.json` (permanent). The second path is the one that makes the next run smoother, but it's also the one that produces a 60-line file of near-duplicates within a few weeks.
+
+Symptoms that it's time to consolidate:
+
+- Multiple entries differ only in a literal flag value (`--duration 3` vs `--duration 5`, `--gm-port COM8` vs `--gm-port COM9`).
+- Many entries are just specific `git` subcommands already covered by a broader `Bash(git *)`.
+- Several `python -c "import ast; ast.parse(open('foo.py').read())"` entries, one per test file.
+- Several variants of `build.bat` that only differ in quoting, path shape, or the presence of `cd`.
+
+Pattern for cleanup:
+
+1. **Read the current file.** Note which entries are covered by a broader existing pattern.
+2. **Collapse flag-literal entries** to a trailing wildcard: `Bash(python foo.py --port COM8)` + `--port COM9` + `--port COM10` → `Bash(python foo.py *)`.
+3. **Drop any entry already covered by a broader one.** `Bash(git add *)`, `Bash(git commit *)`, `Bash(git push *)` are all redundant when `Bash(git *)` is present.
+4. **Add a `deny` block** (see section 7) so the broad `Bash(git *)` doesn't accidentally cover force-push / hard-reset.
+5. **Validate the JSON** (`python -c "import json; json.load(open('.claude/settings.local.json'))"`). A broken settings file silently disables ALL rules from that file.
+6. **Commit the cleanup** — it's personal, so it goes to `settings.local.json` (gitignored by default); if you want the team to share it, move the non-personal parts to `settings.json`.
+
+A good heuristic: if the allowlist is longer than ~35 lines for a single project, you can probably halve it without losing any autonomy. The one we ship here (section 10) went from 54 entries to 33 in a single consolidation pass, and the autonomous loop hasn't prompted once since.
+
 ---
 
-**Bottom line:** Autonomy is not about giving up control — it's about **telling the system in advance which operations are known-safe for this project**, so the agent doesn't have to ask about them a thousand times. A 50-line `settings.local.json` is the difference between watching the agent work and babysitting it.
+**Bottom line:** Autonomy is not about giving up control — it's about **telling the system in advance which operations are known-safe for this project**, so the agent doesn't have to ask about them a thousand times. A 30-40 line `settings.local.json` with a proper `deny` block is the difference between watching the agent work and babysitting it.

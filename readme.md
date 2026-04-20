@@ -93,7 +93,8 @@ is not present in the original.
   - [5.9 Hardware-Timestamp Offset Capture](#59-hardware-timestamp-offset-capture--ptp_offset_capturepy)
   - [5.10 Software NTP vs HW-PTP Comparison](#510-software-ntp-vs-hw-ptp-comparison--sw_ntp_vs_ptp_testpy)
   - [5.11 tfuture Coordinated Firing + Crystal Deviation Analysis](#511-tfuture-coordinated-firing--crystal-deviation-analysis--tfuture_sync_testpy--tfuture_quick_checkpy)
-  - [5.12 Cyclic GPIO Toggle — cyclic_fire](#512-cyclic-gpio-toggle--cyclic_fire-module--pb22-rectangle)
+  - [5.12 Cyclic GPIO Toggle — cyclic_fire](#512-cyclic-gpio-toggle--cyclic_fire-module--pd10-rectangle)
+  - [5.13 Standalone PD10 rectangle generator — blink](#513-standalone-pd10-rectangle-generator--blink)
 - [6. Hardware & Build Setup](#6-hardware--build-setup)
   - [6.1 Hardware Configuration](#61-hardware-configuration)
   - [6.2 Build Infrastructure](#62-build-infrastructure)
@@ -330,8 +331,10 @@ roles, switchable at runtime via CLI.
 | `src/sw_ntp.c/.h` | Minimal software-NTP (UDP) master + follower using SW timestamps from `PTP_CLOCK_GetTime_ns()`. Measurement-only; does not discipline the clock. See [README_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md). |
 | `src/sw_ntp_offset_trace.c/.h` | 1024-entry int64 ring buffer for SW-NTP offsets. Used by `sw_ntp_vs_ptp_test.py` (§5.10). |
 | `src/tfuture.c/.h` | Coordinated single-shot firing at an absolute PTP_CLOCK time. Hybrid precision (main-loop poll + runtime-configurable tight-spin). 256-entry ring buffer. Post-fire callback hook for periodic re-arming. See [README_tfuture.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture.md) and §5.11. |
-| `src/cyclic_fire.c/.h` | PTP-synchronous periodic GPIO toggle on `PB22` at a configurable `period_us` (default 500 µs → 1 kHz rectangle). Uses the `tfuture` callback hook. See §5.12. |
+| `src/cyclic_fire.c/.h` | PTP-synchronous periodic GPIO toggle on `PD10` at a configurable `period_us` (default 500 µs → 1 kHz rectangle). Uses the `tfuture` callback hook. See §5.12. |
 | `src/cyclic_fire_cli.c/.h` | CLI wrapper for `cyclic_fire` — registers `cyclic_start` / `cyclic_stop` / `cyclic_status`. |
+| `src/pd10_blink.c/.h` | Standalone main-loop rectangle generator on `PD10` at a configurable frequency. Independent of PTP and `tfuture`; pure `SYS_TIME_Counter64Get` service. See §5.13. |
+| `src/pd10_blink_cli.c/.h` | CLI wrapper for `pd10_blink` — registers the `blink` command. |
 | `src/lan_regs_cli.c/.h` | CLI adapter + async state machine for `lan_read` / `lan_write` LAN865x register access (extracted from `app.c`). |
 | `src/ptp_cli.c/.h` | CLI adapter for all 14 PTP / clock / offset-trace commands (extracted from `app.c`). |
 | `src/sw_ntp_cli.c/.h` | CLI adapter for all 6 SW-NTP commands + IP parser (extracted from `app.c`). |
@@ -581,9 +584,10 @@ Added `APP_STATE_IDLE` to the `APP_STATES` enumeration.
 | `tfuture_drift on\|off` | Diagnostic: enable/disable drift correction in `compute_target_tick` |
 | `ptp_gm_delay [<ns>]` | Diagnostic: add signed ns to GM anchor_wc at PTP_CLOCK_Update |
 | `clk_set_drift [<ppb>]` | Diagnostic: manually force PTP_CLOCK `drift_ppb` |
-| `cyclic_start [<period_us> [<anchor_ns>]]` | Start periodic GPIO toggle on `PB22` at `period_us` (default 500 µs); shared `anchor_ns` makes GM and FOL edges phase-aligned. See §5.12. |
-| `cyclic_stop` | Stop cyclic firing and drive `PB22` low |
+| `cyclic_start [<period_us> [<anchor_ns>]]` | Start periodic GPIO toggle on `PD10` at `period_us` (default 500 µs); shared `anchor_ns` makes GM and FOL edges phase-aligned. See §5.12. |
+| `cyclic_stop` | Stop cyclic firing and drive `PD10` low |
 | `cyclic_status` | Show running flag, period, cycle count, miss count |
+| `blink [<hz>\|stop]` | Standalone `PD10` rectangle generator: no arg → 1000 Hz, `<hz>` any positive integer, `0` or `stop` halts. Not PTP-synchronised. See §5.13. |
 
 ### 1.5 Console Output Format
 
@@ -1883,12 +1887,12 @@ they must live in the same directory.
 
 ---
 
-### 5.12 Cyclic GPIO Toggle — `cyclic_fire` module + PB22 rectangle
+### 5.12 Cyclic GPIO Toggle — `cyclic_fire` module + PD10 rectangle
 
 §5.12 extends §5.11's single-shot firing into a **periodic** GPIO toggle on
-**PB22** of both boards, scheduled entirely from the PTP wallclock.  Given
+**PD10** of both boards, scheduled entirely from the PTP wallclock.  Given
 two PTP-locked boards armed with the same `period_us` and `phase_anchor_ns`,
-both boards toggle their PB22 pins at identical PTP moments — scope-verifiable
+both boards toggle their PD10 pins at identical PTP moments — scope-verifiable
 synchronous rectangle signals across the link.
 
 Default period: **500 µs callback rate → 1 kHz rectangle** (500 µs high,
@@ -1897,7 +1901,7 @@ Default period: **500 µs callback rate → 1 kHz rectangle** (500 µs high,
 Firmware (`src/cyclic_fire.c`, `src/cyclic_fire_cli.c`):
 
 - Uses `tfuture_set_fire_callback()` to register a post-fire hook.
-- Each hook call: `SYS_PORT_PinToggle(PB22)`, then `tfuture_arm_at_ns(target + period)` to schedule the next edge at absolute PTP-wallclock time.
+- Each hook call: `SYS_PORT_PinToggle(PD10)`, then `tfuture_arm_at_ns(target + period)` to schedule the next edge at absolute PTP-wallclock time.
 - Lowers `tfuture_set_spin_threshold_us()` to 100 µs on start (and restores on stop) so PTP / TCP-IP still get CPU between fires at sub-ms periods.
 - Counts cycles + missed slots for diagnostics.
 
@@ -1929,8 +1933,8 @@ Verification path:
 - **Firmware-only regression** — `smoke_test.py` Phase 3 starts cyclic on
   both boards for 2 s and checks that cycles accumulate (no callback-dead
   bug) and misses stay low (no main-loop starvation).
-- **Physical verification** — requires a 2-channel oscilloscope on GM-PB22
-  and FOL-PB22.  Both rectangles should share edges within a few hundred ns
+- **Physical verification** — requires a 2-channel oscilloscope on GM-PD10
+  and FOL-PD10.  Both rectangles should share edges within a few hundred ns
   (limited by tfuture's firing precision from §5.11).
 
 **Known caveat**: a scale-invariant ~1.7× rate factor is observed (see
@@ -1939,6 +1943,55 @@ mechanism works reliably, the two boards are PTP-locked to each other,
 but the absolute firing rate is offset from the configured `period_us`.
 The rectangles are synchronous between boards; only the period differs
 from the nominal configuration.
+
+---
+
+### 5.13 Standalone PD10 rectangle generator — `blink`
+
+A **simple, PTP-independent** rectangle generator on the same `PD10` pin
+used by `cyclic_fire`.  No tfuture callback, no spin-wait, no servo —
+just `SYS_TIME_Counter64Get()` + `SYS_PORT_PinToggle()` scheduled from
+the main loop.  Useful for:
+
+- **Scope-probe / wiring verification** after a fresh flash — enable
+  `blink`, confirm edges appear on your probe, then disable it again.
+- **Quick frequency checks** of the MCU-local timer path without
+  needing two boards or PTP to be locked.
+- **Background reference** while measuring other subsystems — e.g.
+  run `blink 1` on GM to produce a 1 Hz tick you can cross-correlate
+  with log events.
+
+Firmware (`src/pd10_blink.c/.h`, `src/pd10_blink_cli.c/.h`): the module
+stays silent on boot; the pin is output-enabled + driven LOW in
+`APP_Initialize`, no further activity until the CLI enables it.
+
+CLI:
+
+| Command | Effect |
+| ------- | ------ |
+| `blink` | Start at the default 1000 Hz rectangle on `PD10`. |
+| `blink <hz>` | Start / retune to `<hz>` Hz (any positive integer). |
+| `blink 0` *or* `blink stop` | Stop; `PD10` goes LOW. |
+
+Example scope-check run (requires Saleae):
+
+```
+# on one board, via its serial console:
+> blink
+blink: running on PD10 at 1000 Hz
+
+# then on the host:
+python saleae_freq_check.py --duration 5 --nominal-hz 1000
+```
+
+Because `blink` uses only the MCU's `SYS_TIME` and is **not** disciplined
+by PTP, its frequency will sit ~1000 ppm off nominal due to the SAME54
+quartz drift (the crystal-deviation analysis in §5.11 quantifies this).
+That offset is exactly what `saleae_freq_check.py` will report.
+
+**Relation to `cyclic_fire`** (§5.12): both generate rectangles on
+`PD10`, but only `cyclic_fire` is PTP-synchronised across boards.  Do
+not run both simultaneously — the last one started wins the pin.
 
 ---
 
