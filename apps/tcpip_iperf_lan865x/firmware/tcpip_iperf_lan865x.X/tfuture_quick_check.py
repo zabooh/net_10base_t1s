@@ -55,7 +55,7 @@ LEAD_MS = 2000
 CLOCK_CYCLE_NS_NOMINAL = 40.0
 
 # LAN8651 CLOCK_INCREMENT register addresses (from
-# firmware/src/PTP_FOL_task.h: MAC_TI / MAC_TISUBN).
+# firmware/src/ptp_fol_task.h: MAC_TI / MAC_TISUBN).
 MAC_TI_ADDR     = 0x00010077
 MAC_TISUBN_ADDR = 0x0001006F
 
@@ -86,10 +86,10 @@ def read_clock_increment(ser, log):
 
 def decode_clock_increment_ppm(ti: int, tisubn_raw: int) -> float:
     """Decode the LAN8651 CLOCK_INCREMENT register pair as written by
-    PTP_FOL_task.c into the effective ns-per-tick value, and return the
+    ptp_fol_task.c into the effective ns-per-tick value, and return the
     deviation from nominal 40 ns in ppm.
 
-    Firmware packing (PTP_FOL_task.c):
+    Firmware packing (ptp_fol_task.c):
         calcSubInc_uint = ((calcSubInc_uint >> 8) & 0xFFFF) | ((calcSubInc_uint & 0xFF) << 24)
     Reversing: the original 24-bit unsigned fraction counter is
         orig = ((raw_low24) << 8) | (raw_high8)

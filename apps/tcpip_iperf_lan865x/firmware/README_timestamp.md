@@ -76,7 +76,7 @@ Wobei $\delta_{\text{ppb}}$ die gemessene Abweichung des MCU-Kristalls gegenübe
  *   wallclock_ns : PTP-Wallclock-Wert in Nanosekunden
  *   sys_tick     : SYS_TIME_Counter64Get() zum exakt gleichen Zeitpunkt
  *
- * Wird von PTP_FOL_task.c (processFollowUp) und ptp_gm_task.c (TTSCAL-Callback)
+ * Wird von ptp_fol_task.c (processFollowUp) und ptp_gm_task.c (TTSCAL-Callback)
  * automatisch aufgerufen — kein manuelles Aufrufen erforderlich.
  */
 void     PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick);
@@ -186,7 +186,7 @@ g_ptp_raw_rx.pending     = true;
 Der Tick wird **im selben Funktionsaufruf** und damit quasi-atomar mit dem RTSA-Wert
 gespeichert. Der zeitliche Abstand beider Messungen ist < 10 Maschinenzyklen (~80 ns bei 120 MHz).
 
-### `PTP_FOL_task.c` — Anker in `processFollowUp()` setzen
+### `ptp_fol_task.c` — Anker in `processFollowUp()` setzen
 
 Direkt nach der Berechnung von `t2`, vor der Servo-Logik:
 
@@ -314,7 +314,7 @@ src/
   ptp_clock.h           ← NEU: API-Header
   ptp_clock.c           ← NEU: Implementierung
   ptp_ts_ipc.h          ← GEÄNDERT: +sysTickAtRx in PTP_RxFrameEntry_t
-  PTP_FOL_task.c        ← GEÄNDERT: PTP_CLOCK_Update() in processFollowUp()
+  ptp_fol_task.c        ← GEÄNDERT: PTP_CLOCK_Update() in processFollowUp()
   ptp_gm_task.c         ← GEÄNDERT: PTP_CLOCK_Update() in GM_STATE_WAIT_TTSCA_L
   config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c
                         ← GEÄNDERT: sysTickAtRx in TC6_CB_OnRxEthernetPacket()

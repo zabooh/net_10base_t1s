@@ -18,7 +18,7 @@ endforeach()
 set(tcpip_iperf_lan865x_default_default_XC32_FILE_TYPE_compile
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/app.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/filters.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/PTP_FOL_task.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_fol_task.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_gm_task.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_clock.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/config/default/crypto/src/crypto.c"

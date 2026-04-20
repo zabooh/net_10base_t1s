@@ -282,7 +282,7 @@ def main():
                 log.info("    → Sweet spot found but far from prediction.  Re-examine model.")
         else:
             log.info(f"  ✗ No clear sweet spot — |FOL bias| stays > 600 us for all tested drifts.")
-            log.info(f"    → Model needs revision.  Look deeper at PTP_FOL_task.c anchor path.")
+            log.info(f"    → Model needs revision.  Look deeper at ptp_fol_task.c anchor path.")
 
         # Also report the bias at the predicted sweet spot if we tested it exactly
         for r in results:

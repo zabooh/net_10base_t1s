@@ -453,9 +453,9 @@ def _lan_read_value(ser, addr: int, log) -> int:
 
 def _decode_clock_inc_ppm(ti_reg: int, tisubn_raw: int) -> float:
     """Decode the LAN8651 CLOCK_INCREMENT register pair as written by
-    PTP_FOL_task.c into a ppm deviation from the nominal 40 ns period.
+    ptp_fol_task.c into a ppm deviation from the nominal 40 ns period.
 
-    Firmware packing (see PTP_FOL_task.c):
+    Firmware packing (see ptp_fol_task.c):
       calcSubInc_uint = ((calcSubInc_uint >> 8) & 0xFFFF) | ((calcSubInc_uint & 0xFF) << 24)
     Reversing:  orig = (tisubn_raw_low24 << 8) | tisubn_raw_high8
     """

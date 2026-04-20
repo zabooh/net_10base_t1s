@@ -159,7 +159,7 @@ erneut MATCHFREQ, obwohl der Korrekturfaktor schon bekannt ist. Führt das nur
 zu unnötig verzögertem Wiedereinrasten, oder gibt es einen inhaltlichen Grund,
 TISUBN jedes Mal neu zu schätzen?
 
-**Antwort finden:** `resetSlaveNode()` in `PTP_FOL_task.c` lesen: der Fast-Reset-Pfad (`calibratedTI_value != 0u`) springt direkt nach MATCHFREQ und überspringt die 16-Frame-Neuberechnung. Die Frage ist damit im Code beantwortet — MATCHFREQ wird wiederverwendet, aber die Messung wird nicht neu durchgeführt. Empirisch: Servo nach erstem Lock stromlos machen, neu starten und Konvergenzzeit messen; sollte kürzer sein als der initiale UNINIT-Durchlauf.
+**Antwort finden:** `resetSlaveNode()` in `ptp_fol_task.c` lesen: der Fast-Reset-Pfad (`calibratedTI_value != 0u`) springt direkt nach MATCHFREQ und überspringt die 16-Frame-Neuberechnung. Die Frage ist damit im Code beantwortet — MATCHFREQ wird wiederverwendet, aber die Messung wird nicht neu durchgeführt. Empirisch: Servo nach erstem Lock stromlos machen, neu starten und Konvergenzzeit messen; sollte kürzer sein als der initiale UNINIT-Durchlauf.
 
 ---
 
@@ -192,7 +192,7 @@ Sync-Frame). Hat der GM Codepfade, die `PTP_CLOCK_GetTime_ns()` intern
 verwenden, oder dient die Software-Uhr auf dem GM ausschließlich der
 Observability über den `clk_get` CLI-Befehl?
 
-**Antwort finden:** `grep -rn "PTP_CLOCK_GetTime_ns" firmware/src/` ausführen; alle Call-Sites auflisten. Falls nur `PTP_FOL_task.c` (t3-Erfassung) und ggf. `app.c` (CLI) Call-Sites vorhanden sind, nutzt der GM die Software-Uhr nicht für interne PTP-Berechnungen.
+**Antwort finden:** `grep -rn "PTP_CLOCK_GetTime_ns" firmware/src/` ausführen; alle Call-Sites auflisten. Falls nur `ptp_fol_task.c` (t3-Erfassung) und ggf. `app.c` (CLI) Call-Sites vorhanden sind, nutzt der GM die Software-Uhr nicht für interne PTP-Berechnungen.
 
 ---
 
@@ -396,7 +396,7 @@ bei einem Rückfall aus FINE weiterhin Pulse aus, die zeitlich nicht mehr
 mit dem GM synchronisiert sind? Das könnte externe Systeme, die auf dem
 1PPS aufbauen, stören.
 
-**Antwort finden:** In `PTP_FOL_task.c` alle PPSCTL-Write-Stellen suchen (`grep -n "PPSCTL" PTP_FOL_task.c`). Falls kein Write mit 0x0000 bei Rückfall auf COARSE/HARDSYNC/UNINIT vorhanden ist, ist der 1PPS permanent aktiv. Praktisch: 1PPS-Ausgang mit Oszilloskop messen während durch `ptp_interval` änderung ein FINE→UNINIT-Rückfall provoziert wird.
+**Antwort finden:** In `ptp_fol_task.c` alle PPSCTL-Write-Stellen suchen (`grep -n "PPSCTL" ptp_fol_task.c`). Falls kein Write mit 0x0000 bei Rückfall auf COARSE/HARDSYNC/UNINIT vorhanden ist, ist der 1PPS permanent aktiv. Praktisch: 1PPS-Ausgang mit Oszilloskop messen während durch `ptp_interval` änderung ein FINE→UNINIT-Rückfall provoziert wird.
 
 ---
 
@@ -421,7 +421,7 @@ dauert das 2 s. Bei sehr kurzem Interval (z.B. 10 ms) sind es nur 160 ms.
 Sind FIR-Filter-Länge und Servo-Schwellenwerte auf kurze Intervalle
 ausgelegt, oder gibt es Stabilitätsprobleme?
 
-**Antwort finden:** `FIR_FILER_SIZE`, `MATCHFREQ_RESET_THRESHOLD`, `HARDSYNC_THRESHOLD` und `HARDSYNC_FINE_THRESHOLD` in `PTP_FOL_task.h` prüfen. Bei `ptp_interval 10` testen: Konvergenzzeit messen und servo-Zustand im Log verfolgen. Falls der Servo zwischen HARDSYNC und COARSE pendelt statt FINE zu erreichen, sind die Schwellen nicht auf kurze Intervalle ausgelegt.
+**Antwort finden:** `FIR_FILER_SIZE`, `MATCHFREQ_RESET_THRESHOLD`, `HARDSYNC_THRESHOLD` und `HARDSYNC_FINE_THRESHOLD` in `ptp_fol_task.h` prüfen. Bei `ptp_interval 10` testen: Konvergenzzeit messen und servo-Zustand im Log verfolgen. Falls der Servo zwischen HARDSYNC und COARSE pendelt statt FINE zu erreichen, sind die Schwellen nicht auf kurze Intervalle ausgelegt.
 
 ---
 
@@ -451,7 +451,7 @@ Wäre ein zeitbasiertes Timeout (statt Frame-Count) robuster?
 
 ---
 
-## Quellcode-Analyse (ptp_gm_task.c / PTP_FOL_task.c / ptp_clock.c / filters.c)
+## Quellcode-Analyse (ptp_gm_task.c / ptp_fol_task.c / ptp_clock.c / filters.c)
 
 ### R14 — SeqID-Wrap-Bug: Spurioser FOL-Reset alle ~2,28 Stunden ✅ BEHOBEN (commit `8594070`)
 
@@ -511,7 +511,7 @@ ist (`gm_state == GM_STATE_IDLE`).
 
 ### R17 — PTP_FOL_Init() schreibt Initialisierungsregister fire-and-forget
 
-**Fundstelle:** `PTP_FOL_task.c`, `PTP_FOL_Init()`:
+**Fundstelle:** `ptp_fol_task.c`, `PTP_FOL_Init()`:
 ```c
 DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMCTL,  0x00000000u, true, NULL, NULL);
 DRV_LAN865X_WriteRegister(0u, FOL_OA_TXMLOC,  30u,         true, NULL, NULL);
@@ -841,7 +841,7 @@ aktuell **keine** Anzeichen dafür — das bestätigt R24.
 
 ### F14 — processDelayResp() liest TS_SYNC direkt — möglicherweise durch neueren Sync überschrieben?
 
-**Fundstelle:** `PTP_FOL_task.c`, `processDelayResp()` (nicht-deferred Pfad):
+**Fundstelle:** `ptp_fol_task.c`, `processDelayResp()` (nicht-deferred Pfad):
 ```c
 int64_t t1_ns = (int64_t)tsToInternal(&TS_SYNC.origin);
 int64_t t2_ns = (int64_t)tsToInternal(&TS_SYNC.receipt);

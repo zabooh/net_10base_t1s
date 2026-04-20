@@ -16,7 +16,7 @@ Key differences vs. the noIP reference:
 #include <string.h>
 #include <stdint.h>
 #include "ptp_gm_task.h"
-#include "PTP_FOL_task.h"
+#include "ptp_fol_task.h"
 #include "ptp_clock.h"
 #include "system/time/sys_time.h"
 #include "config/default/driver/lan865x/drv_lan865x.h"

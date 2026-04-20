@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "PTP_FOL_task.h"
+#include "ptp_fol_task.h"
 #include "ptp_gm_task.h"
 #include "ptp_clock.h"
 #include "ptp_offset_trace.h"

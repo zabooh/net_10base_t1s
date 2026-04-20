@@ -125,7 +125,7 @@ State machine covers UNINIT → MATCHFREQ → HARD_SYNC → COARSE → FINE.
 
 **Dependencies** — LAN865x driver API (`DRV_LAN865X_*`), `ptp_clock`, `filters`, `ptp_log`, `ptp_offset_trace`, `ptp_ts_ipc`.
 
-**API** — [PTP_FOL_task.h](PTP_FOL_task.h)
+**API** — [ptp_fol_task.h](ptp_fol_task.h)
 
 ```c
 void      PTP_FOL_Init(void);

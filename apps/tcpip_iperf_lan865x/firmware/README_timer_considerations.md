@@ -260,7 +260,7 @@ Test procedure (`hw_timer_sync_test.py`):
 | `src/ptp_clock.c` | New file — implementation |
 | `src/ptp_ts_ipc.h` | Added `sysTickAtRx` field |
 | `src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c` | FollowUp-guard fix |
-| `src/PTP_FOL_task.c` | `PTP_CLOCK_Update()` call |
+| `src/ptp_fol_task.c` | `PTP_CLOCK_Update()` call |
 | `src/ptp_gm_task.c` | `PTP_CLOCK_Update()` call + verbose mode |
 | `src/ptp_gm_task.h` | `PTP_GM_SetVerbose()` declaration |
 | `src/app.c` | `ptp_time` CLI command |

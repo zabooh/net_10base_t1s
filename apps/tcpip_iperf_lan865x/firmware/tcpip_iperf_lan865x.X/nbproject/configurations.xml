@@ -540,7 +540,7 @@
       <itemPath>../src/app.h</itemPath>
       <itemPath>../src/ptp_clock.h</itemPath>
       <itemPath>../src/ptp_gm_task.h</itemPath>
-      <itemPath>../src/PTP_FOL_task.h</itemPath>
+      <itemPath>../src/ptp_fol_task.h</itemPath>
       <itemPath>../src/filters.h</itemPath>
       <itemPath>../src/ptp_ts_ipc.h</itemPath>
       <itemPath>../src/ptp_log.h</itemPath>
@@ -872,7 +872,7 @@
       <itemPath>../src/main.c</itemPath>
       <itemPath>../src/ptp_clock.c</itemPath>
       <itemPath>../src/ptp_gm_task.c</itemPath>
-      <itemPath>../src/PTP_FOL_task.c</itemPath>
+      <itemPath>../src/ptp_fol_task.c</itemPath>
       <itemPath>../src/filters.c</itemPath>
       <itemPath>../src/ptp_log.c</itemPath>
     </logicalFolder>

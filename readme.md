@@ -132,12 +132,12 @@ is not present in the original.
 | Area | Changed / New File(s) | Purpose |
 |------|-----------------------|---------|
 | PTP hardware timestamping | `drv_lan865x_api.c`, `drv_lan865x.h`, `tc6.c` | TX/RX timestamps for PTP Sync/FollowUp |
-| PTP state machines | `ptp_gm_task.c/.h`, `PTP_FOL_task.c/.h`, `filters.c/.h`, `ptp_ts_ipc.h` | Grandmaster + Follower roles |
+| PTP state machines | `ptp_gm_task.c/.h`, `ptp_fol_task.c/.h`, `filters.c/.h`, `ptp_ts_ipc.h` | Grandmaster + Follower roles |
 | PTP software clock | `ptp_clock.c/.h` | ns-resolution wallclock via TC0 |
 | Application integration | `app.c`, `app.h` | PTP services, packet handler, CLI |
 | **Bug fix** — TX timestamp | `drv_lan865x_api.c` | `DELAY_UNLOCK_EXT` 100 ms → 5 ms; fixes missed timestamps |
-| **Bug fix** — role-swap | `ptp_gm_task.c`, `PTP_FOL_task.c/.h` | −3.13 ms stuck offset after GM↔FOL swap |
-| **IEEE 1588 compliance fixes** | `ptp_gm_task.c`, `PTP_FOL_task.c` | 5 fixes: `twoStepFlag`, `tsmt` bytes, sequence-ID verification, TXMPATL pattern |
+| **Bug fix** — role-swap | `ptp_gm_task.c`, `ptp_fol_task.c/.h` | −3.13 ms stuck offset after GM↔FOL swap |
+| **IEEE 1588 compliance fixes** | `ptp_gm_task.c`, `ptp_fol_task.c` | 5 fixes: `twoStepFlag`, `tsmt` bytes, sequence-ID verification, TXMPATL pattern |
 | MAC randomisation | `initialization.c` | Unique MAC addresses via hardware TRNG |
 | LAN865x register CLI | `app.c` | `lan_read` / `lan_write` without a debugger |
 | Build tooling | `build.bat`, `setup_compiler.py`, `setup_flasher.py`, `setup_debug.py`, `flash.py`, `build_summary.py`, `user.cmake` | Reproducible one-command builds; `setup_debug.py` fixes a DFP tool-pack bug that prevents VS Code debugging |
@@ -323,7 +323,7 @@ roles, switchable at runtime via CLI.
 | File | Description |
 |------|-------------|
 | `src/ptp_gm_task.c/.h` | PTP Grandmaster state machine. Sends Sync + FollowUp frames at a configurable interval, arms the LAN865x TX-Match hardware for TX timestamp capture. |
-| `src/PTP_FOL_task.c/.h` | PTP Follower state machine. Receives Sync/FollowUp, computes clock offset with FIR low-pass filter, and slaves the local time. |
+| `src/ptp_fol_task.c/.h` | PTP Follower state machine. Receives Sync/FollowUp, computes clock offset with FIR low-pass filter, and slaves the local time. |
 | `src/ptp_clock.c/.h` | TC0-based nanosecond software wallclock. See [§3](#3-ptp-software-clock). |
 | `src/ptp_ts_ipc.h` | Shared IPC header: `PTP_RxTimestampEntry_t` struct + `g_ptp_rx_ts` extern declaration. |
 | `src/filters.c/.h` | FIR low-pass filter and exponential low-pass filter used by the Follower servo. |
@@ -346,7 +346,7 @@ Three source files added to the CMake build in `cmake/.../CMakeLists.txt`:
 
 ```cmake
 "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/filters.c"
-"${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/PTP_FOL_task.c"
+"${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_fol_task.c"
 "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/ptp_gm_task.c"
 ```
 
@@ -489,7 +489,7 @@ timestamp attribution in multi-instance configurations.
 ```c
 #include <string.h>
 #include "ptp_ts_ipc.h"
-#include "PTP_FOL_task.h"
+#include "ptp_fol_task.h"
 #include "ptp_gm_task.h"
 #define TCPIP_THIS_MODULE_ID  TCPIP_MODULE_MANAGER
 #include "library/tcpip/tcpip.h"
@@ -614,7 +614,7 @@ uint32_t s = sec % 60u;
 SYS_CONSOLE_PRINT("[GM] #%u  t1=%02lu:%02lu:%02lu.%09lu\r", ...);
 ```
 
-#### Follower verbose mode (`PTP_FOL_task.c`)
+#### Follower verbose mode (`ptp_fol_task.c`)
 
 Activated with `ptp_mode follower v`. One overwriting line per received Sync:
 
@@ -638,7 +638,7 @@ PTP_LOG("\r\nPTP FINE    offset=%d\r\n", (int)offset);
 #### `PTP_FOL_SetVerbose()` API
 
 ```c
-void PTP_FOL_SetVerbose(bool verbose);  // PTP_FOL_task.h
+void PTP_FOL_SetVerbose(bool verbose);  // ptp_fol_task.h
 ```
 
 Called from `ptp_mode_cmd()` in `app.c`:
@@ -778,7 +778,7 @@ error within a 125 ms window for a crystal running at ±500 ppm is at most
 
 | Board role | Called from | Hardware event |
 |-----------|-------------|----------------|
-| Follower | `PTP_FOL_task.c` via `PTP_CLOCK_Update()` | RX timestamp from RTSA footer (stripped by TC6 driver) on every Sync/FollowUp |
+| Follower | `ptp_fol_task.c` via `PTP_CLOCK_Update()` | RX timestamp from RTSA footer (stripped by TC6 driver) on every Sync/FollowUp |
 | Grandmaster | `ptp_gm_task.c` via `PTP_CLOCK_Update()` | TX timestamp from TTSCAH/AL registers after Sync frame sent (TTSCAA bit) |
 
 In both cases `PTP_CLOCK_Update(wallclock_ns, sys_tick)` stores the pair:
@@ -885,10 +885,10 @@ observed by the PTP servo (in parts per billion):
 
 ```c
 int32_t PTP_CLOCK_GetDriftPPB(void);    // read — used by clk_get CLI
-void    PTP_CLOCK_SetDriftPPB(int32_t); // written by PTP_FOL_task.c after each FIR update
+void    PTP_CLOCK_SetDriftPPB(int32_t); // written by ptp_fol_task.c after each FIR update
 ```
 
-Updated in `PTP_FOL_task.c` at every Sync frame in COARSE or FINE:
+Updated in `ptp_fol_task.c` at every Sync frame in COARSE or FINE:
 
 ```c
 PTP_CLOCK_SetDriftPPB((int32_t)((rateRatioFIR - 1.0) * 1e9));
@@ -2197,7 +2197,7 @@ project metadata; MPLAB X generates the required `Makefile-impl.mk` and
 
 - The XC32 toolchain version configured in MPLAB X must match the version used
   by `setup_compiler.py` / `build.bat` to ensure identical compiler flags
-- All PTP source files (`ptp_clock.c`, `ptp_gm_task.c`, `PTP_FOL_task.c`,
+- All PTP source files (`ptp_clock.c`, `ptp_gm_task.c`, `ptp_fol_task.c`,
   `filters.c`) are registered in `nbproject/configurations.xml` and will appear
   in the MPLAB X project tree automatically
 - MPLAB X uses its own intermediate build directory (inside `build/`) — this is
@@ -2316,7 +2316,7 @@ The **environment already exists** in this project:
 
 | Environment step | Tool already present |
 |------------------|----------------------|
-| Edit firmware    | `PTP_FOL_task.h`, `filters.h` (plain `#define` values) |
+| Edit firmware    | `ptp_fol_task.h`, `filters.h` (plain `#define` values) |
 | Build            | `build.bat` (one-command, reproducible) |
 | Flash            | `flash.py` (one-command, automatic port detection) |
 | Measure          | `ptp_reproducibility_test.py` (structured JSON output) |
@@ -2386,12 +2386,12 @@ The servo has several numeric constants that are good candidates for automated o
 
 | Parameter | Location | Current value | Effect |
 |-----------|----------|---------------|--------|
-| `PTP_SYNC_INTERVAL` | `PTP_FOL_task.h:80` | 500 ms | Sync message period; lower = faster reaction, higher = smoother frequency estimate |
+| `PTP_SYNC_INTERVAL` | `ptp_fol_task.h:80` | 500 ms | Sync message period; lower = faster reaction, higher = smoother frequency estimate |
 | `FIR_FILER_SIZE` | `filters.h:40` | 16 taps | Rate-ratio FIR smoothing; larger = less noise, more lag |
 | `FIR_FILER_SIZE_FINE` | `filters.h:41` | 3 taps | Offset FIR in COARSE/FINE state; trades jitter vs. responsiveness |
-| `HARDSYNC_COARSE_THRESHOLD` | `PTP_FOL_task.h:86` | 300 ns | Offset boundary HARDSYNC→COARSE; too small = coarse never reached; too large = noise triggers coarse |
-| `HARDSYNC_FINE_THRESHOLD` | `PTP_FOL_task.h:87` | 150 ns | Offset boundary COARSE→FINE; governs when TISUBN fine-tuning activates |
-| `MATCHFREQ_RESET_THRESHOLD` | `PTP_FOL_task.h:83` | 100 000 000 ns | Safety guard: offset above this resets to MATCHFREQ |
+| `HARDSYNC_COARSE_THRESHOLD` | `ptp_fol_task.h:86` | 300 ns | Offset boundary HARDSYNC→COARSE; too small = coarse never reached; too large = noise triggers coarse |
+| `HARDSYNC_FINE_THRESHOLD` | `ptp_fol_task.h:87` | 150 ns | Offset boundary COARSE→FINE; governs when TISUBN fine-tuning activates |
+| `MATCHFREQ_RESET_THRESHOLD` | `ptp_fol_task.h:83` | 100 000 000 ns | Safety guard: offset above this resets to MATCHFREQ |
 
 Parameters interact non-linearly: a smaller `HARDSYNC_FINE_THRESHOLD` makes FINE reachable faster but requires a correspondingly small `FIR_FILER_SIZE_FINE` to avoid oscillation. This coupling is exactly why manual hand-tuning is tedious and RL is attractive.
 
@@ -2643,8 +2643,8 @@ message flow, and annotated pseudo-code.
 |------|------|
 | `src/ptp_gm_task.c` | GM state machine — sends Sync/FollowUp, reads TX timestamps |
 | `src/ptp_gm_task.h` | GM public API, register macros, timing constants |
-| `src/PTP_FOL_task.c` | FOL message processing, clock servo algorithm |
-| `src/PTP_FOL_task.h` | FOL public API, all PTP wire-format structs |
+| `src/ptp_fol_task.c` | FOL message processing, clock servo algorithm |
+| `src/ptp_fol_task.h` | FOL public API, all PTP wire-format structs |
 | `src/ptp_clock.c/.h` | Software PTP wallclock (ns resolution, TC0 interpolation) |
 | `src/ptp_ts_ipc.h` | IPC structs for HW RX-timestamps between driver and app |
 | `src/app.c` | Application state machine — service dispatcher for GM and FOL |
@@ -2748,7 +2748,7 @@ uint8_t gm_followup_buf[90];   // 14 (ETH) + 76 (followUpMsg_t)
 
 `PTP_FOL_Init()` is called from `APP_STATE_IDLE` on first entry (`app.c:412`)
 and again from `resetSlaveNode()` on every follower reset
-(`PTP_FOL_task.c:638`):
+(`ptp_fol_task.c:638`):
 
 ```
 PTP_FOL_Init()
@@ -2760,7 +2760,7 @@ PTP_FOL_Init()
 
 Follower operation starts when `PTP_FOL_SetMode(PTP_SLAVE)` is called
 (e.g. `ptp_mode follower` CLI command, `app.c:170`), which in turn calls
-`resetSlaveNode()` (`PTP_FOL_task.c:663–668`).
+`resetSlaveNode()` (`ptp_fol_task.c:663–668`).
 
 #### Sync Reception Path
 
@@ -2779,22 +2779,22 @@ LAN865x SPI footer carries the RTSA timestamp
 app.c:505  (APP_STATE_IDLE polling loop)
   → PTP_FOL_OnFrame(data, length, rxTimestamp)
 
-PTP_FOL_OnFrame()   [PTP_FOL_task.c:688]
+PTP_FOL_OnFrame()   [ptp_fol_task.c:688]
   → extracts sec/nsec from rxTimestamp
   → handlePtp(pData, len, sec, nsec)
 
-handlePtp()         [PTP_FOL_task.c:614]
+handlePtp()         [ptp_fol_task.c:614]
   → parses messageType = ptpHeader.tsmt & 0x0F
   → MSG_SYNC      → processSync()  + stores TS_SYNC.receipt = {sec, nsec}
   → MSG_FOLLOW_UP → processFollowUp()  (servo core)
 ```
 
-`processSync()` (`PTP_FOL_task.c:369`) validates the sequence ID and stores t2
+`processSync()` (`ptp_fol_task.c:369`) validates the sequence ID and stores t2
 (the RTSA hardware receive timestamp) in `TS_SYNC.receipt`.
 
 #### FollowUp Processing and Servo
 
-`processFollowUp()` (`PTP_FOL_task.c:392`) is the clock-servo core:
+`processFollowUp()` (`ptp_fol_task.c:392`) is the clock-servo core:
 
 ```c
 // t1 — precise GM send time from FollowUp frame
@@ -2824,7 +2824,7 @@ offset = t2 - t1   // positive: follower is ahead; negative: follower lags
 
 #### Servo State Machine
 
-(`PTP_FOL_task.c:485–572`)
+(`ptp_fol_task.c:485–572`)
 
 | State | Entry condition | Action |
 |-------|----------------|--------|
@@ -2839,13 +2839,13 @@ offset = t2 - t1   // positive: follower is ahead; negative: follower lags
 
 When `hardResync == 1` the follower writes `t1` directly into `MAC_TSL` /
 `MAC_TN` to hard-set the LAN865x hardware clock
-(`FOL_ACTION_HARD_SYNC`, `PTP_FOL_task.c:421–426`).
+(`FOL_ACTION_HARD_SYNC`, `ptp_fol_task.c:421–426`).
 
 #### Register-Write State Machine
 
 `PTP_FOL_Service()` is called every 1 ms (`app.c:496`).  It serialises all
 LAN865x SPI writes through the `fol_pending_action` flag
-(`PTP_FOL_task.c:143–291`):
+(`ptp_fol_task.c:143–291`):
 
 | Action | Registers written | Effect |
 |--------|-----------------|--------|
@@ -2864,7 +2864,7 @@ LAN865x SPI writes through the `fol_pending_action` flag
 
 ```
 GRANDMASTER                                  FOLLOWER
-(ptp_gm_task.c)                              (PTP_FOL_task.c / drv_lan865x_api.c)
+(ptp_gm_task.c)                              (ptp_fol_task.c / drv_lan865x_api.c)
 │                                                        │
 │   ── every 125 ms ──                                   │
 │                                                        │
@@ -3112,7 +3112,7 @@ FUNCTION PTP_CLOCK_GetTime_ns():
 
 ### 9.6 Key Data Structures
 
-**`ptpSync_ct`** (`PTP_FOL_task.h:222–228`) — follower timestamp store:
+**`ptpSync_ct`** (`ptp_fol_task.h:222–228`) — follower timestamp store:
 ```c
 typedef struct {
     timeStamp_t origin;       // t1: GM send time (from FollowUp)
@@ -3133,7 +3133,7 @@ typedef struct {
 } PTP_RxFrameEntry_t;
 ```
 
-**`syncMsg_t` / `followUpMsg_t`** (`PTP_FOL_task.h:183–198`) — PTP wire formats:
+**`syncMsg_t` / `followUpMsg_t`** (`ptp_fol_task.h:183–198`) — PTP wire formats:
 ```c
 typedef struct {
     ptpHeader_t    header;

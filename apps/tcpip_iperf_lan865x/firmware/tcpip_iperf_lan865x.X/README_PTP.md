@@ -49,7 +49,7 @@ bus segment.
 
 The implementation is **fully compliant with IEEE 1588-2008** (PTPv2). All mandatory
 header fields, flag bits, message type encodings, and sequence-ID verification rules are
-correctly implemented in `ptp_gm_task.c` and `PTP_FOL_task.c`. No auto-generated
+correctly implemented in `ptp_gm_task.c` and `ptp_fol_task.c`. No auto-generated
 Harmony files were modified.
 
 #### Verification Test (April 16, 2026)
@@ -328,7 +328,7 @@ without requiring an Ethernet analyser.
 | Module | File | Role |
 |---|---|---|
 | Grandmaster | `src/ptp_gm_task.c` | Sends Sync + FollowUp, captures t1 from LAN865x HW |
-| Follower | `src/PTP_FOL_task.c` | Receives t1/t2, runs servo, writes LAN865x clock registers |
+| Follower | `src/ptp_fol_task.c` | Receives t1/t2, runs servo, writes LAN865x clock registers |
 | Software Clock | `src/ptp_clock.c` | Anchor-based interpolation using TC0 @ 60 MHz |
 | RX Timestamp IPC | `src/ptp_ts_ipc.h` | `g_ptp_raw_rx` — bridge from driver callback to application |
 | Deferred PTP Logging | `src/ptp_log.c` / `src/ptp_log.h` | Serializes GM/FOL console output and avoids interleaved log lines |
@@ -818,7 +818,7 @@ gm_ts_nsec = Read(OA_TTSCAL);  // Register 0x00000011
 // drv_lan865x_api.c, TC6_CB_OnRxEthernetPacket():
 g_ptp_raw_rx.rxTimestamp = rxTimestamp;  // from SPI footer
 
-// PTP_FOL_task.c, handlePtp() → processSync():
+// ptp_fol_task.c, handlePtp() → processSync():
 TS_SYNC.receipt.secondsLsb  = rxTimestamp >> 32;
 TS_SYNC.receipt.nanoseconds = rxTimestamp & 0xFFFFFFFF;
 ```
@@ -831,7 +831,7 @@ TS_SYNC.receipt.nanoseconds = rxTimestamp & 0xFFFFFFFF;
 (`fol_t3_ns`) is still set as fallback directly before TX.
 
 ```c
-// PTP_FOL_task.c, FOL_TTSCA_WAIT_TXMCTL:
+// ptp_fol_task.c, FOL_TTSCA_WAIT_TXMCTL:
 fol_t3_ns = PTP_CLOCK_GetTime_ns();              // SW fallback
 DRV_LAN865X_SendRawEthFrame(..., tsc=1, ...);    // arm HW capture
 
@@ -854,7 +854,7 @@ fol_t3_hw_valid = true;
 // ptp_gm_task.c — receives Delay_Req, builds Delay_Resp:
 // t4 = rxTimestamp from SPI footer → DelayResp.receiveTimestamp
 
-// PTP_FOL_task.c, processDelayResp():
+// ptp_fol_task.c, processDelayResp():
 fol_t4_ns = htonl(ptpPkt->receiveTimestamp.secondsLsb) * 1e9
           + htonl(ptpPkt->receiveTimestamp.nanoseconds);
 ```

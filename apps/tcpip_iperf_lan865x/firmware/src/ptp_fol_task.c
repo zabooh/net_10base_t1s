@@ -18,7 +18,7 @@ Key differences vs. the noIP version:
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
-#include "PTP_FOL_task.h"
+#include "ptp_fol_task.h"
 #include "filters.h"
 #include "ptp_clock.h"
 #include "ptp_ts_ipc.h"

@@ -13,7 +13,7 @@
  *   No additional SPI transfers or hardware timers are needed at query time.
  *
  * Anchor sources:
- *   FOL: TC6_CB_OnRxEthernetPacket()  → PTP_FOL_task.c → PTP_CLOCK_Update()
+ *   FOL: TC6_CB_OnRxEthernetPacket()  → ptp_fol_task.c → PTP_CLOCK_Update()
  *   GM : GM_STATE_WAIT_TTSCA_L        → ptp_gm_task.c  → PTP_CLOCK_Update()
  */
 
@@ -29,7 +29,7 @@
  * @param wallclock_ns  PTP wallclock value in nanoseconds (from RTSA or TTSCAL)
  * @param sys_tick      SYS_TIME_Counter64Get() captured at the same moment
  *
- * Called automatically by PTP_FOL_task.c and ptp_gm_task.c — no manual call
+ * Called automatically by ptp_fol_task.c and ptp_gm_task.c — no manual call
  * required from application code.
  */
 void     PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick);
@@ -53,7 +53,7 @@ int32_t  PTP_CLOCK_GetDriftPPB(void);
 /**
  * Update the reported crystal drift value.
  *
- * Called by PTP_FOL_task.c whenever rateRatioFIR is recalculated.
+ * Called by ptp_fol_task.c whenever rateRatioFIR is recalculated.
  * @param drift_ppb  (rateRatioFIR - 1.0) * 1e9, rounded to int32_t
  */
 void     PTP_CLOCK_SetDriftPPB(int32_t drift_ppb);
