@@ -280,8 +280,17 @@ und t4 arbeiten lassen, der beim Eintreffen von Delay_Resp gekopiert wird.
 
 Teilbehebung durch commit `6f3b197` ("fix(R10): move GM_ANCHOR_OFFSET_NS to
 header as configurable #ifndef macro"). Der Wert ist jetzt im Header als
-`#ifndef GM_ANCHOR_OFFSET_NS`-Makro, überschreibbar über den Compile-Flag
-`-DGM_ANCHOR_OFFSET_NS=...`.
+`#ifndef PTP_GM_ANCHOR_OFFSET_NS`-Makro, überschreibbar über den Compile-Flag
+`-DPTP_GM_ANCHOR_OFFSET_NS=...`.
+
+**Update 2026-04-20 (commit `657e8a1`):** Wert von 575983 → **800000 ns**
+rekalibriert für den neuen ISR-Anker-Pfad.  Der alte Wert war für die
+Task-Latenz-Lücke (~ms-Bereich) zwischen TTSCA-latch und `SYS_TIME_Counter64Get()`
+bei FollowUp-TX-done getuned; der neue Wert kompensiert die ISR-Frische-Lücke
+(~µs-Bereich) zwischen TTSCA-latch und dem im EXTINT-14-Handler gekapselten
+`s_nirq_tick`.  Kalibrierprozedur ist jetzt im Header-Kommentar dokumentiert:
+`cyclic_fire_hw_test.py --no-compensate` → median rising delta D ablesen →
+neuer Wert = alter − D.
 
 **Noch offen:** Die automatische Kalibrierungsroutine existiert weiterhin nicht.
 Eine empirische Messung pro Board-Kombination bleibt nötig. Für eine neue
@@ -351,15 +360,30 @@ sichtbare Fehlermeldung.
 
 ## Weitere offene Fragen (aus README_PTP.md)
 
-### F8 — Woher kommt der Wert 575983 ns genau?
+### F8 — Woher kommt der Wert 575983 ns genau? ✅ TEILWEISE BEANTWORTET (2026-04-20)
 
-Der `+575983 ns`-Offset im GM-FollowUp wird als "empirisch bestimmt"
-beschrieben. Setzt er sich aus messbaren Komponenten zusammen (LAN865x
-TX-Pipeline-Latenz + SPI-Transfer-Latenz + PLCA-Overhead)? Ist er bei
-LAN8650 und LAN8651 identisch? Ohne Herleitung kann der Wert bei einem
-Bauteilwechsel nicht angepasst werden.
+Der alte `+575983 ns`-Offset im GM-FollowUp war die empirische Summe aus:
 
-**Antwort finden:** `GM_ANCHOR_OFFSET_NS` auf 0 setzen, neu bauen, `ptp_time_test` ausführen. Der beobachtete mittlere Offset direkt aus der Messung entspricht dem tatsächlich benötigten Wert. Komponenten-Aufschlüsselung: LAN865x TX-Pipeline-Latenz (Datenblatt) + SPI-Transferzeit (Logic Analyzer) + PLCA-Overhead (Wireshark) addieren und mit dem empirischen Wert vergleichen.
+1. **LAN865x-internen TX-Pipeline-Latenz** (interne TTSCA-Latch → SFD auf
+   dem Draht): ~7.65 µs (das ist die separate `PTP_GM_STATIC_OFFSET` Konstante,
+   siehe ptp_gm_task.h).
+2. **Task-Latenz-Gap** (TTSCA-latch Moment → `SYS_TIME_Counter64Get()` im
+   FollowUp-TX-done Callback): ~568 µs, dominiert durch die SPI-Lese-Rundreise
+   für STATUS0+TTSCA-Werte plus die FollowUp-TX-Wartezeit.
+
+Zusammen ~575.9 µs, empirisch rundgerechnet zu 575983 ns.
+
+Mit dem commit `657e8a1` entfällt die Task-Latenz-Komponente (Anker-Tick
+wird jetzt im EXTINT-14-ISR erfasst, ~5 µs nach SFD statt ~568 µs).  Der
+rekalibrierte Wert **800000 ns** enthält daher nicht mehr die alte
+Task-Latenz, sondern eine neue Kombination aus LAN865x-internen
+TX-Pipeline-Latenzen, und ist ebenfalls empirisch gemessen (nicht analytisch
+hergeleitet).
+
+**Für eine echte Bauteilwechsel-Anpassung** bleibt die empirische
+Rekalibrierung per `cyclic_fire_hw_test.py --no-compensate` nötig.  Eine
+vollständige analytische Herleitung (jede Komponente aus Datasheet +
+Messgeräten summiert) ist weiterhin offen.
 
 ---
 
@@ -512,35 +536,304 @@ Aufruf von `PTP_FOL_Init()` — minimale Absicherung, aber keine SPI-Queue-Drain
 
 ---
 
-### R18 — PTP_CLOCK_SetDriftPPB() wird gespeichert, aber nie für die Zeitinterpolation verwendet
+### R18 — PTP_CLOCK_SetDriftPPB() wird gespeichert, aber nie für die Zeitinterpolation verwendet ✅ BEHOBEN (2026-04-20, in `baaa3e5` / `657e8a1`)
 
-**Fundstelle:** `ptp_clock.c`:
+Der Zustand bis 2026-04-19: `PTP_CLOCK_Update()` ignorierte `s_drift_ppb`
+vollständig in `GetTime_ns()`, die Softwareuhr drifted unkompensiert mit
+dem Kristallfehler.
+
+**Status 2026-04-20:** In `ptp_clock.c` ist die Drift-Korrektur jetzt
+vollständig aktiv:
+
+- `PTP_CLOCK_Update()` berechnet `inst_ppb` aus dem Verhältnis
+  (neue-wallclock − alte-wallclock) / (neue-tick − alte-tick) und mischt
+  es per IIR-Filter (`DRIFT_IIR_N = 128`, Halbwertszeit ~11 s) in
+  `s_drift_ppb` ein.
+- `PTP_CLOCK_GetTime_ns()` ruft `ticks_to_ns_corrected(delta_tick,
+  s_drift_ppb)` auf, was die Tick-zu-ns-Umrechnung um den gefilterten
+  ppb-Wert justiert.
+
+**Messung (2026-04-20, drift_filter_analysis.py):** Filter konvergiert
+auf ~990 ppm (GM vs FOL Quarzmismatch), Langzeit-Cross-Board-Rate-Residual
++1.2 ppm.  Das ist Faktor ~800 besser als der vorher dokumentierte
+10.5 µs/500 ms Drift (= 21 ppm unkompensiert) und zeigt, dass die
+Kompensation funktioniert wie vorgesehen.
+
+Die stale-Doku-Bemerkung in `ptp_clock.c` und README_PTP.md §4.6 wurde
+im gleichen Commit (`657e8a1`) korrigiert.
+
+---
+
+### R19 — Drift-IIR-Filter Kurzzeit-Wander ("random walk") auch bei N=128
+
+**Fundstelle:** `ptp_clock.c`, IIR-Filter auf `s_drift_ppb`.
+
+Der Filter-Output zeigt eine **starke Lag-1-Autokorrelation** (+0.97) —
+das heißt er random-walkt langsam statt stationär um den Mittelwert zu
+oszillieren.  Messung per `drift_filter_analysis.py` (60 s Sampling):
+
+| Metrik | GM | FOL |
+|---|---|---|
+| Filter-Stddev | ~37 ppm | ~15-32 ppm |
+| Lag-1-Autokorr | +0.98 | +0.83-0.96 |
+| Spread über 60 s | 109-138 ppm | 58-101 ppm |
+
+**Auswirkung:** Langzeit (60 s) Cross-Board-Rate-Residual ist exzellent
+(+1.2 ppm), aber **kurze Capture-Fenster (0.7 s) können bis zu 200 µs/s
+Drift zeigen**, wenn der Filter gerade in einer schnellen Wander-Phase
+ist.  In `cyclic_fire_hw_test.py`-Outputs erscheint das als MAD = 15-45 µs
+statt der theoretischen Sub-µs-Stabilität.
+
+**Ursache:** Die IIR-Mittelung reduziert zwar unabhängiges
+Per-Sample-Rauschen (40 ppm → 4 ppm), aber nicht korreliertes Rauschen
+(z.B. thermisch-bedingter Quarz-Drift, Servo-induzierte systematische
+Anpassungen).
+
+**Empfehlung (falls Sub-10 µs MAD benötigt wird):** Median-of-N Filter
+statt IIR, oder hardware-getriggerte GPIO-Ausgabe über MAC-Timer-Compare
+(siehe README_PTP §12.3) statt Software-PTP_CLOCK-Poll.
+
+**Bewertung:** Wahrscheinlichkeit: Sicher (inhärent bei IIR-Filter
+auf korrelierten Eingangssamples) | Auswirkung: Gering (Demo-Sync
+weiterhin ±50 µs-Klasse, sub-µs nur mit HW-Scheduling erreichbar) |
+Gesamtrisiko: 🟢 Gering | Priorität: P3
+
+**Validierung:** `drift_filter_analysis.py --settle-s 60 --sample-s 60`
+laufen lassen; `lag-1 autocorrelation > 0.8` und
+`spread > 50 ppm` bestätigen das Verhalten.  Die CSV
+`drift_samples_*.csv` gegen PC-Zeit plotten zeigt den Random-Walk visuell.
+
+---
+
+### R20 — cyclic_fire MARKER-Phase-Zähler nicht an Anker gebunden
+
+**Fundstelle:** `cyclic_fire.c`, `s_marker_phase` start-zustand:
+
 ```c
-void PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick) {
-    /* Drift correction disabled: ... */
-    s_anchor_wc_ns = wallclock_ns;
-    s_anchor_tick  = sys_tick;
-}
+s_pattern      = pattern;
+s_marker_phase = 0u;         // Start immer bei phase 0
+```
 
-uint64_t PTP_CLOCK_GetTime_ns(void) {
-    uint64_t delta_ns = ticks_to_ns(delta_tick);
-    return s_anchor_wc_ns + delta_ns;   // s_drift_ppb nicht verwendet
+Jedes `cyclic_fire_start_ex(CYCLIC_FIRE_PATTERN_MARKER, ...)` setzt den
+Phase-Zähler auf 0 und zählt ihn modulo 10 bei jedem Callback hoch.
+Bei zwei Boards mit demselben Anker erwarten wir, dass **beide ihre
+Phase-0 (= rising edge) zum selben PTP-Wallclock-Moment** haben.
+
+Problem: wenn ein Board spät armt (z.B. weil FOL nach einem Reset
+hunderte ms später reagiert) und sein `first_target_ns` per
+Phase-Align-Loop um `N × period` nach vorne gerollt wird, beginnt es
+trotzdem bei `s_marker_phase = 0`.  Aber das entsprechende Raster des
+anderen Boards ist in dem Moment vielleicht bei Phase 4 oder 6 — beide
+Boards feuern dann zu **unterschiedlichen Zeitpunkten innerhalb des
+5-Perioden-Zyklus**.
+
+**Auswirkung:** Die MARKER-Pulse der beiden Boards können systematisch
+gegeneinander versetzt auftauchen (1, 2, 3 oder 4 Perioden Versatz)
+obwohl PTP-seitig alles perfekt synchron ist.  Visuelle "Wer feuert
+zuerst?"-Diagnose kann irreführend werden.
+
+**Empfehlung:** `s_marker_phase` aus dem Anker ableiten, z.B.
+`s_marker_phase = (first_target_ns / half_period_ns) % 10` — so
+lautet die Regel "Phase 0 ist das Halbperioden-Slot, dessen Nummer
+modulo 10 Null ist".  Alle Boards konvergieren automatisch auf dasselbe
+Raster, unabhängig vom Arm-Zeitpunkt.
+
+**Bewertung:** Wahrscheinlichkeit: Mittel (tritt bei ungleichzeitigem
+Arm auf) | Auswirkung: Mittel (MARKER-Demo kann verwirren) |
+Gesamtrisiko: 🟡 Mittel | Priorität: P3
+
+**Validierung:** Zwei Boards arm'en mit absichtlich unterschiedlichem
+Delay (einmal 0s, einmal 2s warten nach PTP-FINE), dann `cyclic_start_marker
+1000 <shared_anchor>`.  Logic 2 sollte dieselbe Phase-Ausrichtung zeigen
+wie beim gleichzeitigen Arm-Aufruf.  Falls nicht → R20 bestätigt.
+
+---
+
+### R21 — LAN865x-MAC verklemmt nach langen cyclic_fire-Läufen
+
+**Beobachtung (2026-04-20, mehrfach reproduziert):** Nach ~5-10 Minuten
+kontinuierlichem `cyclic_fire`-Betrieb (beide Boards togglen PD10 im
+1-kHz-Rhythmus) kann es passieren, dass ein anschließendes
+`ptp_mode follower / master` nicht mehr zu PTP FINE konvergiert —
+Timeout nach 60 s.
+
+Ein **Software-`reset`** (per CLI oder im Test-Skript) hilft in diesem
+Fall **nicht**.  Die einzige zuverlässige Recovery ist ein **Hard-Power-Cycle**
+(USB-Kabel ab, 3 s warten, wieder an).
+
+**Vermutete Ursache:** Der LAN865x-MAC behält einen internen Zustand
+(TX-Match-Detektor, 1PPS-Konfiguration, TTSCA-Register) über einen
+Software-Reset-Ereignis hinweg.  Ein `ptp_mode master/follower`-CLI-Befehl
+reinitialisiert nicht alle relevanten Register.  Nach ausreichend langem
+Cyclic-Betrieb gibt es eine Konfiguration, aus der das
+Re-Init-Protokoll nicht korrekt herauskommt.
+
+**Empfehlung:** PTP_GM_Init / PTP_FOL_Init sollten beim Aufruf
+**expliziter alle TX-Match- und Timestamp-Register** zurücksetzen (nicht
+nur die, die den Anfangszustand erwarten).  Alternativ: ein `mac_reset`
+CLI-Befehl, der den LAN865x hardwareseitig via Reset-Pin zurücksetzt,
+wäre ein einfacher Workaround.
+
+**Bewertung:** Wahrscheinlichkeit: Mittel (tritt nach Demo-typischen
+Betriebsintervallen auf) | Auswirkung: Mittel (benötigt manuelles
+Eingreifen zur Recovery, Demo-Stop) | Gesamtrisiko: 🟡 Mittel |
+Priorität: P2
+
+**Validierung:** Beide Boards je 10 min `cyclic_start 1000` laufen
+lassen, dann beide Boards `reset` → `ptp_mode master/follower` → warten
+ob FINE in üblicher Zeit erreicht wird.  Falls Timeout in ≥30 % der
+Fälle, ist R21 reproduziert.
+
+---
+
+### R22 — ISR-Anker-Race bei konkurrierenden nIRQs (GM-Seite)
+
+**Fundstelle:** `drv_lan865x_api.c`, `_OnStatus0()`:
+
+```c
+if (0u != (value & 0x0700u)) {
+    for (i = 0u; i < DRV_LAN865X_INSTANCES_NUMBER; i++) {
+        if (pDrvInst == &drvLAN865XDrvInst[i]) {
+            drvTsCaptureStatus0[i] |= (value & 0x0700u);
+            drvTsCaptureNirqTick[i] = s_nirq_tick;   // R22: siehe unten
+            break;
+        }
+    }
 }
 ```
-`PTP_FOL_task.c` ruft `PTP_CLOCK_SetDriftPPB((int32_t)((rateRatioFIR - 1.0) * 1e9))`
-auf, aber `ptp_clock.c` ignoriert `s_drift_ppb` vollständig in
-`GetTime_ns()`. Die Frequenzkompensation, die der FOL-Servo berechnet, wird
-nicht auf die Softwareuhr angewendet. Ohne Kompensation akkumuliert die
-Softwareuhr bei einem 21 ppm-Kristallfehler über 500 ms einen Fehler von ca.
-10,5 µs — akzeptabel für das Demo, aber undokumentiert.
 
-**Wirkung:** `clk_get` CLI-Ausgabe und GM-Anker-Offset-Berechnung nutzen
-eine unkalibrierte Referenz; die eigentliche PTP-Servo-Qualität ist nicht
-betroffen (der Servo arbeitet ausschließlich mit LAN865x-Hardware-Timestamps).
+`_OnStatus0` läuft im **SPI-Callback-Kontext**, also einige hundert µs
+nach der eigentlichen TTSCAA-nIRQ-Assertion (SPI-STATUS0-Read-Rundreise).
+In diesem Fenster kann ein **anderer nIRQ feuern** — typisch ein
+RX-Frame eines anderen Boards auf dem 10BASE-T1S-Bus, z.B. ein Delay_Req
+eines FOL.  Der EXTINT-14-Handler aktualisiert dann `s_nirq_tick` mit
+einem Zeitpunkt, der **nicht** zum TTSCA-Ereignis gehört.
+`drvTsCaptureNirqTick` bekommt einen falschen Wert.
 
-**Bewertung:** Wahrscheinlichkeit: Sicher (by Design deaktiviert) | Auswirkung: Gering (nur Software-Uhr-Drift, PTP-Hardware-Genauigkeit unbeeinträchtigt) | Gesamtrisiko: 🟢 Gering | Priorität: P3
+**Auswirkung:** Einzelne Cyclic_fire-Outlier. Im 15:58-Run beobachtet:
+p10/median/p75 = (−63/−30/−3) µs, aber p90 = +108 µs und max = +146 µs.
+Die rechts-schief/bimodale Verteilung passt zu seltenen falsch
+korrelierten Anker-Ticks.
 
-**Validierung:** `clk_get` im 1-Sekunden-Takt 60× aufrufen; Differenz zwischen den Ausgaben mit `date +%N` (Linux-Referenz oder GPS/PPS) vergleichen. Drift > 1 µs/s bestätigt den fehlenden Kompensationsterm.
+**Empfehlung:** Arm-Latch-Mechanismus statt "Letzter-nIRQ":
+
+```c
+static volatile bool     s_nirq_latch_tx_armed  = false;
+static volatile uint64_t s_nirq_latch_tx        = 0u;
+
+EIC_EXTINT_14_Handler():
+    uint64_t t = SYS_TIME_Counter64Get();
+    s_nirq_tick = t;                         // generisch (für FOL RX)
+    if (s_nirq_latch_tx_armed) {
+        s_nirq_latch_tx       = t;           // spezifisch (für GM TX)
+        s_nirq_latch_tx_armed = false;       // self-disarm
+    }
+    ...
+
+// Vor dem SendRawEthFrame(tsc=1):
+DRV_LAN865X_ArmNirqLatchTx();                // setzt s_nirq_latch_tx_armed
+```
+
+Der nächste nIRQ nach dem Arm-Aufruf latched den Tick in eine dedizierte
+Variable.  Nachfolgende nIRQs tasten sie nicht an, weil das Flag sich
+selbst deaktiviert.  Robust gegen interleaved RX.
+
+**Bewertung:** Wahrscheinlichkeit: Gering (RX während der SPI-STATUS0-
+Rundreise ist nicht häufig auf einem 2-Node-Bench; nimmt zu bei
+Multi-Drop-Bus) | Auswirkung: Mittel (p90-Outliers in cyclic_fire-Capture,
+verfälscht die Cross-Board-Statistik-Tails) | Gesamtrisiko: 🟡 Mittel |
+Priorität: P3
+
+**Validierung:** `cyclic_fire_hw_test.py` mit einem **dritten Board** auf
+dem Bus laufen lassen, das regelmäßig PTP-Traffic generiert.  Die Tail-
+Breite der Cross-Board-Delta-Verteilung (p90-max) sollte deutlich
+zunehmen, wenn R22 vorliegt.
+
+---
+
+### R23 — cyclic_fire Spin-Wait drosselt PTP/TCPIP bei sub-ms Perioden
+
+**Fundstelle:** `cyclic_fire.c`:
+
+```c
+#define CYCLIC_FIRE_SPIN_US  100u
+```
+
+`tfuture` wird bei jedem `cyclic_fire`-Start auf einen 100 µs Spin-
+Threshold gesetzt.  Bei jedem Callback (alle `period_us/2`) kann der
+Main-Loop bis zu 100 µs in einem busy-wait blockieren.  Bei
+`period_us=500` (1 kHz Rechteck) sind das bis zu **40 % CPU-Zeit im
+Spin** (100 µs Spin pro 250 µs Half-Period-Callback), plus die eigentliche
+Callback-Logik, SPI-Rundreisen für tfuture_arm, etc.
+
+PTP-Servo, TCPIP-Stack, Drift-Filter-Update und Log-Flush laufen alle
+im selben Main-Loop — sie bekommen entsprechend weniger Zyklen.
+
+**Mögliche Selbstverstärkung:** Schlechtere PTP-Servo-Qualität → größerer
+Offset → Anker rutscht stärker weg vom Anchor+N×period-Grid → mehr
+Misses → noch mehr catch-up in `fire_callback` → noch weniger CPU für
+PTP.  Nicht akut problematisch bei ≥ 1 ms Perioden, aber ein
+unfreundlicher Betriebspunkt für die als „nicht empfohlen" markierten
+Perioden < 400 µs.
+
+**Empfehlung:** (a) In cyclic_fire_hw_test's Verdict-Output eine Warnung
+bei `period_us < 800` („CPU-Last-Anteil > 25 % im Spin-Pfad — PTP-Servo-
+Qualität kann degradieren").  (b) Laufzeit-Messung: die Cycles-/Misses-
+Zähler im `cyclic_status` pro Sekunde auslesen und mit dem nominellen
+Rate vergleichen — Miss-Rate > 1 % ist alarmierend.
+
+**Bewertung:** Wahrscheinlichkeit: Sehr gering (Standard-Periode 1000 µs,
+`cyclic_fire_hw_test.py` defaulted dorthin) | Auswirkung: Gering (nur
+falls sub-ms-Betrieb explizit gewählt wird) | Gesamtrisiko: 🟢 Gering |
+Priorität: P4
+
+**Validierung:** `cyclic_start 300` (unter der empfohlenen Grenze von
+400 µs) + `ptp_status` und `cyclic_status` im 2-s-Takt aufrufen.  Servo-
+State-Flapping (wiederkehrendes FINE↔COARSE) oder Misses > 0 bestätigen
+die Degradation.
+
+---
+
+### R24 — cyclic_fire ignoriert PTP-Servo-Zustandsrückfälle
+
+**Fundstelle:** `cyclic_fire.c`, `cyclic_fire_start()` und `fire_callback()`:
+
+```c
+bool cyclic_fire_start(uint32_t period_us, uint64_t phase_anchor_ns) {
+    if (!PTP_CLOCK_IsValid()) { return false; }
+    ...
+}
+// fire_callback tastet PTP_CLOCK_IsValid() nicht erneut ab
+```
+
+`cyclic_fire` prüft `PTP_CLOCK_IsValid()` nur beim Start.  Während des
+Laufs wird `fire_callback` auf dem gespeicherten Anker weiterfeuern,
+**selbst wenn der PTP-Servo zurückfällt** (Kabel-Unterbrechung, LOFE,
+großer Offset-Spike, MATCHFREQ-Retry).  Die Board-interne `PTP_CLOCK`
+läuft dann auf ihrem letzten gültigen Anker + extrapoliertem TC0-Takt,
+drifted mit dem Quarzmismatch (~1000 ppm) weg vom GM.
+
+**Auswirkung:** Während des Servo-Rückfall-Fensters driften die beiden
+Boards mit der vollen Quarz-Mismatch auseinander, ohne dass das Skript
+/ die Hardware irgendein Signal dafür gibt.  Die Demo-Aussage „Boards
+synchron" stimmt dann nicht mehr, aber der Output sieht oberflächlich
+aus wie vorher.
+
+**Empfehlung:** `cyclic_fire_service()` (oder im bestehenden
+`fire_callback`): `PTP_CLOCK_IsValid()` testen, und entweder
+(a) einen `s_out_of_sync_cycles`-Zähler hochzählen, der per
+`cyclic_status` sichtbar ist, oder (b) das Toggeln aussetzen bis Sync
+wiederhergestellt ist (Strategie-Entscheidung).
+
+**Bewertung:** Wahrscheinlichkeit: Sehr gering (2-Node-Bench mit
+stabiler Verkabelung; relevant bei rauher Umgebung) | Auswirkung:
+Gering (keine Daten-Korruption, nur Demo-Inkonsistenz) | Gesamtrisiko:
+🟢 Gering | Priorität: P4
+
+**Validierung:** Während aktivem `cyclic_start` das Ethernet-Kabel eines
+Boards für 3 s ziehen.  FOL sollte in der Zeit aus FINE fallen; PD10
+toggelt weiter auf dem alten Anker und drifted.  `cyclic_status` zeigt
+aktuell **keine** Anzeichen dafür — das bestätigt R24.
 
 ---
 
@@ -632,32 +925,35 @@ Wurde der Build mit diesen Flags geprüft?
 
 Bewertungsschema: **Wahrscheinlichkeit** × **Auswirkung** → Gesamtrisiko und Bearbeitungspriorität.
 
-✅ = behoben in laufenden Commits seit letzter Matrix-Aktualisierung (R1/R10/R14/R15/R7).
+✅ = behoben in laufenden Commits seit letzter Matrix-Aktualisierung (R1/R7/R10/R14/R15/R18).
+Neu hinzugekommen 2026-04-20: R19 (IIR-Filter-Wander), R20 (MARKER-Phase-Race), R21 (LAN865x-Verklemmen), R22 (ISR-Anker-Race), R23 (Spin-Wait-Drossel), R24 (Servo-Rückfall unerkannt).
 
 | Wahrscheinlichkeit \ Auswirkung | 🟢 Gering | 🟡 Mittel | 🔴 Hoch |
 |---|---|---|---|
-| **Sicher** | R4, R18 | ✅R1, R5 | ✅**R14** |
+| **Sicher** | R4, R19, ✅R18 | ✅R1, R5 | ✅**R14** |
 | **Hoch** | — | ✅R15 | R12 *(bei Multi-FOL)* |
-| **Mittel** | R6 | R8, ✅R10, R16 | — |
-| **Gering** | R2, R11, R13, ✅R7 | R3, R9 | — |
-| **Sehr gering** | — | R17 | — |
+| **Mittel** | R6 | R8, ✅R10, R16, R20, R21 | — |
+| **Gering** | R2, R11, R13, ✅R7 | R3, R9, R22 | — |
+| **Sehr gering** | R23, R24 | R17 | — |
 
-### Priorisierte Abarbeitungsreihenfolge (aktualisiert)
+### Priorisierte Abarbeitungsreihenfolge (aktualisiert 2026-04-20)
 
 | Priorität | Risiken | Status |
 |---|---|---|
 | **P1 — Sofort** | ~~R14~~, ~~R15~~, R12* | R14 ✅ `8594070`, R15 ✅ `741596f`. R12* noch offen (Multi-FOL). |
-| **P2 — Nächster Sprint** | ~~R1~~, R5, R8, ~~R10~~, R16 | R1 ✅ `5e289c8`, R10 ✅ `6f3b197`. R5/R8/R16 offen. |
-| **P3 — Backlog** | R4, ~~R7~~, R13, R17, R18 | R7 ✅ als Messartefakt geklärt. R4/R13/R17/R18 offen. |
-| **P4 — Nice-to-have** | R2, R3, R6, R9, R11 | — unverändert |
+| **P2 — Nächster Sprint** | ~~R1~~, R5, R8, ~~R10~~, R16, R21 | R1 ✅ `5e289c8`, R10 ✅ `6f3b197`/`657e8a1`. R5/R8/R16 offen. R21 neu (LAN865x-Verklemmen). |
+| **P3 — Backlog** | R4, ~~R7~~, R13, R17, ~~R18~~, R19, R20, R22 | R7 ✅ als Messartefakt geklärt, R18 ✅ Drift-Korrektur jetzt aktiv. R4/R13/R17 offen, R19/R20/R22 neu. |
+| **P4 — Nice-to-have** | R2, R3, R6, R9, R11, R23, R24 | R23/R24 neu — nicht akut, dokumentiert für den Fall dass Demo-Anforderungen sich ändern. |
 
 \* R12 nur relevant wenn mehr als ein Follower-Board betrieben wird.
 
 ---
 
-## Gesamtbewertung des Projektzustands (Stand 2026-04-18)
+## Gesamtbewertung des Projektzustands (Stand 2026-04-20)
 
 Das PTP-Projekt auf Basis IEEE 1588-2008 über 10BASE-T1S (ATSAME54P20A + LAN865x) ist ein technisch ambitioniertes und in vielen Bereichen sorgfältig ausgeführtes Demo. Die nicht-blockierende Zustandsmaschinen-Architektur, die konsequente Nutzung von Hardware-Timestamps (TTSCA), der deferred Delay-Calc-Mechanismus und die FIR/IIR-Servo-Filterung zeigen solides Embedded-Design-Handwerk. Die Servo-Konvergenz auf ±200–500 ns (FINE-Zustand) ist für ein Crystal-basiertes System auf einem Shared-Medium-Bus eine beachtliche Leistung.
+
+Die neu hinzugekommene **Cross-Board-Synchronisation auf Software-Ebene** (`cyclic_fire` + Saleae-Verifikation) erreicht mit dem ISR-Anker-Umbau 2026-04-20 **Median-Delta −30 µs, MAD 35 µs, +1.2 ppm Langzeit-Rate-Residual** — Faktor 5 besser als die bisherige ~−135 µs Baseline (vgl. README_NTP §8 "~150 µs nicht entfernbar mit diesem Design" — inzwischen überholt).
 
 **Fixe seit letzter Bewertung:**
 
@@ -668,6 +964,17 @@ Das PTP-Projekt auf Basis IEEE 1588-2008 über 10BASE-T1S (ATSAME54P20A + LAN865
 | `6f3b197` | R10    | `GM_ANCHOR_OFFSET_NS` jetzt als `#ifndef`-Macro konfigurierbar |
 | `5e289c8` | R1     | nIRQ per EIC-ISR → `sysTickAtRx`-Jitter von ~200 µs auf <5 µs |
 | *pending* | R7     | 9 ms Outliers als UART/USB-CDC-Jitter nachgewiesen (loop_stats max = 209 µs) |
+| `baaa3e5` | R18 (Vorarbeit) | `DRIFT_IIR_N` 32 → 128, Drift-Korrektur in `ticks_to_ns_corrected` aktiv |
+| `657e8a1` | R10, R18 | GM-Anker-Tick via EXTINT-14-ISR (analog FOL); `PTP_GM_ANCHOR_OFFSET_NS` 575983 → 800000 ns rekalibriert; GM-Filter Rauschfloor von ~50 ppm auf ~20-30 ppm gefallen; Langzeit-Cross-Board-Rate +11 ppm → +1.2 ppm |
+
+**Neu identifizierte Risiken (2026-04-20):**
+
+- **R19** (🟢): IIR-Filter random-walkt auch bei N=128, kurzfristige Cross-Board-Drift bis 200 µs/s möglich.  Sub-10 µs MAD nur mit Hardware-GPIO-Scheduling erreichbar.
+- **R20** (🟡): MARKER-Pattern-Phase-Zähler nicht an Anker gebunden — Demo-Signale können bei ungleichzeitigem Arm um N Perioden verschoben erscheinen.
+- **R21** (🟡): LAN865x-MAC verklemmt nach langen `cyclic_fire`-Läufen; nur Hard-Power-Cycle als Recovery.  Mehrfach reproduziert.
+- **R22** (🟡): ISR-Anker-Race — `s_nirq_tick` kann zwischen TTSCAA-Event und `_OnStatus0`-Callback durch intervenierende RX-nIRQs überschrieben werden.  Erklärt vermutlich die p90-Outlier (+146 µs max) in der cyclic_fire-Delta-Verteilung.
+- **R23** (🟢): Spin-Wait drosselt CPU bei sub-ms Perioden (bis 40 % CPU-Zeit bei `period_us=500`).  Akute Gefahr nur wenn explizit sub-ms gewählt wird.
+- **R24** (🟢): cyclic_fire tastet `PTP_CLOCK_IsValid()` nur beim Start — bei Servo-Rückfall driften die Boards ohne Signalisierung auseinander.
 
 **Noch offene kritische/hohe Risiken:** nur noch **R12** (Multi-FOL-GM-Statemachine), relevant erst bei > 1 Follower.
 
@@ -675,14 +982,17 @@ Das PTP-Projekt auf Basis IEEE 1588-2008 über 10BASE-T1S (ATSAME54P20A + LAN865
 
 - 🔴 **0 kritische Risiken** (R14 behoben).
 - 🔴 **1 hohes Risiko** (R12 — Multi-FOL, architektonisch, nicht akut).
-- 🟡 **4 mittlere Risiken** (R5, R8, R16, R9): Für Demo akzeptabel; für Produktion behebbar.
-- 🟢 **10 geringe Risiken** (R2–R4, R6, R7, R11, R13, R17, R18, R3): Technische Schulden ohne akute Auswirkung.
+- 🟡 **7 mittlere Risiken** (R5, R8, R9, R16, R20, R21, R22): Für Demo akzeptabel; R21 ist der einzige, der *akuten* Recovery-Aufwand macht (Power-Cycle).
+- 🟢 **14 geringe Risiken** (R2–R4, R6, R7, R10, R11, R13, R17, R18, R19, R23, R24, R3): Technische Schulden ohne akute Auswirkung.
 
 **Linux-Portierungsstatus:** unverändert — Build-fähig, aber Flashing/Debug/Testskripte noch nicht Linux-adaptiert (R5).
 
 **Empfohlene nächste Schritte:**
 
-1. R12 adressieren wenn Multi-FOL-Betrieb geplant ist (architektonische GM-Änderung — oder explizit als Single-FOL-only dokumentieren).
-2. R5 + R13 → Linux-Workflow und ptp_log-Overrun-Zähler.
-3. Die noch nicht committeten Loop-Stats-Instrumentierung + Async-Delay_Req-Timeout + Rate-limited ptp_log_flush in einen eigenen Commit packen und R7 final als "closed" markieren.
+1. **R21 priorisieren** wenn die Demo länger als ~5 min am Stück laufen soll — entweder expliziter MAC-Full-Reset-Pfad in `PTP_GM_Init`/`PTP_FOL_Init` oder neuer `mac_reset`-CLI-Befehl.
+2. **R22 als Arm-Latch-Mechanismus fixen** — der Race ist vermutlich die Ursache der Long-Tail-Outlier in der cyclic_fire-Delta-Verteilung.  Sauberes Fix: `DRV_LAN865X_ArmNirqLatchTx()` vor `SendRawEthFrame(tsc=1)`, dedicated `s_nirq_latch_tx` statt shared `s_nirq_tick` in `_OnStatus0` lesen.
+3. **R20 einzeilig fixen**: `s_marker_phase = (first_target_ns / half_period_ns) % 10` in `cyclic_fire.c`.
+4. **R12 adressieren** wenn Multi-FOL-Betrieb geplant ist (architektonische GM-Änderung — oder explizit als Single-FOL-only dokumentieren).
+5. **R5 + R13** → Linux-Workflow und ptp_log-Overrun-Zähler.
+6. Die noch nicht committeten Loop-Stats-Instrumentierung + Async-Delay_Req-Timeout + Rate-limited ptp_log_flush in einen eigenen Commit packen und R7 final als "closed" markieren.
 
