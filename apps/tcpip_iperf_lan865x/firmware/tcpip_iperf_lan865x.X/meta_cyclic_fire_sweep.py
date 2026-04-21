@@ -69,6 +69,14 @@ DEFAULT_SETTLE_S   = 15.0
 PER_RUN_TIMEOUT_S  = 300.0   # subprocess hard-kill after this
 ABORT_ON_N_CONSECUTIVE_FAILS = 5
 
+# --quick: one representative period per regime, MARKER only, shorter settle +
+# capture.  Used for "does the fix hold?" spot-checks — ~2 min total vs the
+# ~25 min full sweep.
+QUICK_PERIODS_US   = [500, 1000, 5000, 20000]
+QUICK_MODES        = ["marker"]
+QUICK_DURATION_S   = 5.0
+QUICK_SETTLE_S     = 8.0
+
 
 # ---------------------------------------------------------------------------
 # Log-parsing patterns — must match cyclic_fire_hw_test.py output
@@ -303,18 +311,27 @@ class TeeLog:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--periods",  nargs="+", type=int, default=DEFAULT_PERIODS_US)
+    p.add_argument("--periods",  nargs="+", type=int, default=None)
     p.add_argument("--modes",    nargs="+", choices=["square", "marker"],
-                   default=DEFAULT_MODES)
+                   default=None)
     p.add_argument("--reps",     type=int, default=DEFAULT_REPS_PER_CONFIG)
-    p.add_argument("--duration-s", type=float, default=DEFAULT_DURATION_S)
-    p.add_argument("--settle-s",   type=float, default=DEFAULT_SETTLE_S)
+    p.add_argument("--duration-s", type=float, default=None)
+    p.add_argument("--settle-s",   type=float, default=None)
+    p.add_argument("--quick",    action="store_true",
+                   help="short sweep for spot-checks (~2 min): "
+                        "4 representative periods × MARKER × 5 s capture × 8 s settle")
     p.add_argument("--script",   type=Path,
                    default=Path(__file__).parent / "cyclic_fire_hw_test.py")
     p.add_argument("--phase2-only", type=Path, default=None,
                    help="skip Phase 1; aggregate from this directory's "
                         "cyclic_fire_hw_* subdirs (use '.' for current dir)")
     args = p.parse_args()
+
+    # Fill in defaults, honouring --quick if set.
+    if args.periods    is None: args.periods    = QUICK_PERIODS_US if args.quick else DEFAULT_PERIODS_US
+    if args.modes      is None: args.modes      = QUICK_MODES      if args.quick else DEFAULT_MODES
+    if args.duration_s is None: args.duration_s = QUICK_DURATION_S if args.quick else DEFAULT_DURATION_S
+    if args.settle_s   is None: args.settle_s   = QUICK_SETTLE_S   if args.quick else DEFAULT_SETTLE_S
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = Path(f"meta_sweep_{ts}")

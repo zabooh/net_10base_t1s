@@ -97,13 +97,15 @@ DEFAULT_ANCHOR_LEAD_MS = 2000          # firing starts this far after clk_get;
                                        # (which can happen right after FINE
                                        # before the drift filter is settled)
 
-# Verdict gates.  Tuned for 10BASE-T1S without explicit PTP path-delay
-# correction: a constant ~100-200 µs offset (= one-way path delay) is
-# expected and does NOT indicate a sync problem.  Sub-50 µs jitter on top
-# of that is what we want to see.  If the gates are exceeded, something
-# real is broken (e.g. drift filter not converged, or boards not actually
-# PTP-locked).
-GATE_PHASE_ABS_US  = 250.0             # |median(FOL-GM)| edge delta
+# Verdict gates.  Product requirement: cross-board edge delta must be within
+# a ±100 µs window so any time-slot boundary ≥100 µs can be reliably serviced
+# on both boards.  Median + MAD together approximate a worst-case bound
+# (|median| + MAD covers ~75 % of samples for a unimodal distribution,
+# |median| + 3·MAD covers the long-tail p99 region).  Gate chosen so the
+# 100 µs budget is split between a steady-state bias (GATE_PHASE_ABS_US)
+# and per-sample jitter (GATE_PHASE_MAD_US): 50 µs each leaves margin for
+# a few-sigma outlier while still keeping the p99 inside the window.
+GATE_PHASE_ABS_US  = 50.0              # |median(FOL-GM)| edge delta
 GATE_PHASE_MAD_US  = 50.0              # robust stdev of deltas
 
 
