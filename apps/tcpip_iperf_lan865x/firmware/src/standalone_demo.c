@@ -108,10 +108,12 @@ static uint64_t         s_last_reset_tick  = 0u;
 #define WATCHDOG_MS                 500u
 static uint64_t         s_wd_last_check_tick   = 0u;
 static uint64_t         s_wd_last_cycles       = 0u;
-/* Which button was pressed — lets the decimator pick the right LED2
- * brightness in DEMO_SYNCED (master = solid ON, follower = PWM-dimmed
- * so the two boards are visually distinguishable at a glance). */
+/* Which role the operator chose — lets the decimator pick the right
+ * LED2 brightness in DEMO_SYNCED (master = solid ON, follower =
+ * PWM-dimmed).  Also tells the SW2 handler whether a press means "turn
+ * master on" or "turn master off" (SW2 is a toggle in the master role). */
 static bool             s_is_follower      = false;
+static bool             s_is_master        = false;
 
 /* No per-LED counters any more — LED phase is computed stateless from
  * target_ns inside the decimator (see LED1_SLOT_NS / LED2_SLOT_NS). */
@@ -335,10 +337,21 @@ void standalone_demo_service(uint64_t current_tick)
              * frames.  Forgetting GM_Init() leaves the master silent —
              * the follower then never converges and its LED2 keeps
              * blinking forever. */
+            s_is_master = true;
             PTP_FOL_SetMode(PTP_MASTER);
             PTP_GM_Init();
             enter_state(DEMO_SYNCING_GM, current_tick);
         }
+    } else if (s_is_master && sw2_pressed
+               && (s_state == DEMO_SYNCING_GM || s_state == DEMO_SYNCED)) {
+        /* SW2 acts as a toggle on the master board: another press
+         * disables the master, so the follower loses Sync (its LED2
+         * goes dark via the existing sync-loss timeout) and the whole
+         * demo returns to the FREE state.  Pressing SW2 once more
+         * re-enables the master and the follower recovers. */
+        s_is_master = false;
+        PTP_FOL_SetMode(PTP_DISABLED);
+        enter_state(DEMO_FREE, current_tick);
     }
 
     /* Progress check: move SYNCING → SYNCED when the local sync criterion
