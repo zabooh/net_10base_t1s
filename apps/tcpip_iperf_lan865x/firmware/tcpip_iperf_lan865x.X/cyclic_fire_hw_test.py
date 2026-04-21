@@ -62,6 +62,7 @@ except ImportError:
 
 from ptp_drift_compensate_test import (  # noqa: E402
     Logger, open_port, send_command, wait_for_pattern,
+    reset_and_wait_for_boot, sleep_with_countdown,
     RE_IP_SET, RE_FINE, RE_MATCHFREQ, RE_HARD_SYNC, RE_COARSE,
     DEFAULT_GM_IP, DEFAULT_FOL_IP, DEFAULT_NETMASK,
     DEFAULT_CONV_TIMEOUT,
@@ -341,11 +342,22 @@ def robust(vs: List[float]) -> Tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 def setup_ptp(args, ser_gm, ser_fol, log: Logger) -> bool:
-    """Reset both boards, configure IPs, enable PTP, wait for FINE."""
+    """Reset both boards, confirm boot via build-banner, configure IPs,
+    enable PTP, wait for FINE.  Aborts immediately if either board fails
+    to emit '[APP] Build:' within 8 s of the reset command — the typical
+    cause is a wedged LAN865x state that needs a hard power-cycle (R21)."""
     log.info("\n--- Reset + IP + PTP to FINE ---")
-    send_command(ser_gm,  "reset", 3.0, log)
-    send_command(ser_fol, "reset", 3.0, log)
-    time.sleep(8.0)
+    try:
+        gm_build  = reset_and_wait_for_boot(ser_gm,  "GM ", timeout=8.0, log=log)
+        fol_build = reset_and_wait_for_boot(ser_fol, "FOL", timeout=8.0, log=log)
+    except RuntimeError as exc:
+        log.info(f"  ERROR: {exc}")
+        log.info(f"  Aborting test — hard power-cycle both boards "
+                 f"(USB unplug → 3 s wait → plug) and retry.")
+        return False
+    if gm_build != fol_build:
+        log.info(f"  WARN: build mismatch — GM={gm_build} FOL={fol_build}  "
+                 f"(test continues, but both boards should be flashed with the same firmware)")
     send_command(ser_gm,  f"setip eth0 {args.gm_ip} {args.netmask}", 3.0, log)
     send_command(ser_fol, f"setip eth0 {args.fol_ip} {args.netmask}", 3.0, log)
     send_command(ser_fol, "ptp_mode follower", 3.0, log)
@@ -361,7 +373,9 @@ def setup_ptp(args, ser_gm, ser_fol, log: Logger) -> bool:
         log.info(f"  PTP FINE not reached in {elapsed:.1f} s — aborting")
         return False
     log.info(f"  PTP FINE reached after {elapsed:.1f} s")
-    time.sleep(args.settle_s)
+    sleep_with_countdown(args.settle_s,
+                         label="settling before capture (drift-filter convergence)",
+                         log=log)
     return True
 
 
@@ -374,13 +388,15 @@ def main() -> int:
     p.add_argument("--fol-ip",         default=DEFAULT_FOL_IP)
     p.add_argument("--netmask",        default=DEFAULT_NETMASK)
     p.add_argument("--conv-timeout",   default=DEFAULT_CONV_TIMEOUT, type=float)
-    p.add_argument("--settle-s",       default=30.0, type=float,
+    p.add_argument("--settle-s",       default=15.0, type=float,
                    help="seconds to wait after PTP FINE before arming "
-                        "cyclic_fire — needed for the drift-IIR filter "
-                        "(half-life ~3 s) to converge so the FOL clock "
-                        "agrees with GM at the anchor moment.  Otherwise "
-                        "FOL may rebase to anchor + N×period and start "
-                        "many cycles late.")
+                        "cyclic_fire — gives the drift-IIR filter "
+                        "(half-life ~11 s with N=128) time to partially "
+                        "converge.  Empirically 15 s is enough for the "
+                        "cross-board MAD to stabilise (~88 %% of full "
+                        "convergence, indistinguishable from 60 s in the "
+                        "Saleae output).  Set higher only when explicitly "
+                        "characterising the filter.")
     p.add_argument("--no-reset",       action="store_true",
                    help="skip boot+FINE; assume PTP already running")
     p.add_argument("--period-us",      default=DEFAULT_PERIOD_US, type=int,
@@ -525,8 +541,13 @@ def main() -> int:
             capture.close()
             return 1
 
-        # Wait for capture to finish (duration_s is handled internally).
-        log.info("  capturing ...")
+        # Wait for capture to finish (duration_s is handled internally by the
+        # Saleae timed-capture mode).  We sleep with a visible countdown on
+        # the host, then call capture.wait() as a belt-and-braces no-op that
+        # returns immediately once the timed capture is done.
+        sleep_with_countdown(args.duration_s,
+                             label="capturing",
+                             log=log)
         capture.wait()
 
         # Intentionally NOT sending cyclic_stop here — both boards keep

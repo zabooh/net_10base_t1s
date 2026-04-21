@@ -42,6 +42,7 @@ except ImportError:
 
 from ptp_drift_compensate_test import (  # noqa: E402
     Logger, open_port, send_command, wait_for_pattern,
+    reset_and_wait_for_boot, sleep_with_countdown,
     RE_FINE, RE_MATCHFREQ, RE_HARD_SYNC, RE_COARSE,
     DEFAULT_GM_IP, DEFAULT_FOL_IP, DEFAULT_NETMASK,
     DEFAULT_CONV_TIMEOUT,
@@ -241,11 +242,21 @@ def analyse_cross_board(gm_rows, fol_rows, log: Logger):
 
 
 def setup_ptp(args, ser_gm, ser_fol, log: Logger) -> bool:
-    """Reset both boards, configure IPs, enable PTP, wait for FINE."""
+    """Reset both boards, confirm boot via build-banner, configure IPs,
+    enable PTP, wait for FINE.  Aborts immediately if either board fails
+    to emit '[APP] Build:' within 8 s of the reset command."""
     log.info("\n--- Reset + IP + PTP to FINE ---")
-    send_command(ser_gm,  "reset", 3.0, log)
-    send_command(ser_fol, "reset", 3.0, log)
-    time.sleep(8.0)
+    try:
+        gm_build  = reset_and_wait_for_boot(ser_gm,  "GM ", timeout=8.0, log=log)
+        fol_build = reset_and_wait_for_boot(ser_fol, "FOL", timeout=8.0, log=log)
+    except RuntimeError as exc:
+        log.info(f"  ERROR: {exc}")
+        log.info(f"  Aborting test — hard power-cycle both boards "
+                 f"(USB unplug → 3 s wait → plug) and retry.")
+        return False
+    if gm_build != fol_build:
+        log.info(f"  WARN: build mismatch — GM={gm_build} FOL={fol_build}  "
+                 f"(test continues, but both boards should be flashed with the same firmware)")
     send_command(ser_gm,  f"setip eth0 {args.gm_ip} {args.netmask}", 3.0, log)
     send_command(ser_fol, f"setip eth0 {args.fol_ip} {args.netmask}", 3.0, log)
     send_command(ser_fol, "ptp_mode follower", 3.0, log)
@@ -333,7 +344,9 @@ def main() -> int:
 
         log.info("")
         log.info(f"--- Settle {args.settle_s:.0f} s (IIR filter convergence) ---")
-        time.sleep(args.settle_s)
+        sleep_with_countdown(args.settle_s,
+                             label="IIR filter convergence",
+                             log=log)
 
         log.info("")
         log.info(f"--- Rapid clk_get sampling for {args.sample_s:.0f} s ---")

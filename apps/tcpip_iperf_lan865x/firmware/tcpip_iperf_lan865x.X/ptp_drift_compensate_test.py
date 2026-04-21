@@ -159,6 +159,116 @@ def send_command(ser: serial.Serial, cmd: str,
     return "".join(parts)
 
 
+# ----------------------------------------------------------------------------
+# Boot-confirmation helper — app.c prints "[APP] Build: <DATE> <TIME>" on
+# first entry into APP_STATE_INIT.  Seeing this line is proof that the board
+# actually restarted after a reset command (not just an ignored command that
+# leaves stale firmware state running).  The timestamp also identifies the
+# firmware version, so it lands in every test log for provenance.
+# ----------------------------------------------------------------------------
+
+RE_APP_BUILD = re.compile(
+    r"\[APP\]\s+Build:\s+([A-Za-z]{3}\s+\d+\s+\d{4})\s+(\d{2}:\d{2}:\d{2})"
+)
+
+
+def reset_and_wait_for_boot(ser: serial.Serial,
+                            label: str = "board",
+                            timeout: float = 8.0,
+                            log: Logger = None
+                            ) -> Tuple[str, str]:
+    """Send `reset`, then poll the serial port for the firmware's startup
+    banner "[APP] Build: <DATE> <TIME>" (emitted from app.c's APP_STATE_INIT).
+    Returns (build_date, build_time) on success so the caller can log the
+    firmware version.
+
+    Raises RuntimeError if the banner doesn't appear within `timeout`
+    seconds (default 8 s) — typically means the reset command was ignored
+    or the board is stuck in a state where APP_Tasks isn't running.  The
+    caller should abort the test in that case (hard power-cycle is usually
+    the only fix).
+
+    While waiting, a per-second countdown is logged so the user sees
+    progress and, on failure, exactly how long it waited.
+    """
+    ser.reset_input_buffer()
+    ser.write(b"reset\r\n")
+    if log:
+        log.info(f"  {label}: reset sent, waiting for '[APP] Build:' banner "
+                 f"(timeout {timeout:.0f} s)")
+    buffer      = ""
+    t_start     = time.monotonic()
+    deadline    = t_start + timeout
+    next_tick   = t_start + 1.0
+    last_rem    = int(timeout)
+    while time.monotonic() < deadline:
+        chunk = ser.read(512)
+        if chunk:
+            buffer += chunk.decode("ascii", errors="replace")
+            m = RE_APP_BUILD.search(buffer)
+            if m:
+                elapsed = time.monotonic() - t_start
+                build_date, build_time = m.group(1), m.group(2)
+                if log:
+                    log.info(f"  {label} booted after {elapsed:.2f} s "
+                             f"— Build: {build_date} {build_time}")
+                # Post-banner settle: the [APP] Build: line is printed very
+                # early in APP_STATE_INIT, before the TCP/IP stack, CLI task,
+                # and PTP driver are fully up.  Give them 2 s to finish
+                # initialising before the caller starts issuing setip /
+                # ptp_mode commands, otherwise early commands can be lost.
+                if log:
+                    log.info(f"  {label}: banner seen, settling 2 s for "
+                             f"CLI / TCP-IP / PTP task init")
+                time.sleep(2.0)
+                return (build_date, build_time)
+        else:
+            time.sleep(0.05)
+        # per-second countdown tick (only when the remaining-seconds bucket
+        # changes, so we don't spam the log)
+        now = time.monotonic()
+        if now >= next_tick:
+            remaining = int(deadline - now + 0.999)
+            if remaining != last_rem and remaining >= 0 and log:
+                log.info(f"  {label}: waiting for boot banner ... "
+                         f"{remaining} s remaining")
+                last_rem = remaining
+            next_tick = now + 1.0
+    raise RuntimeError(
+        f"{label}: NO '[APP] Build:' banner within {timeout:.1f} s — "
+        f"reset command was apparently ignored, or APP_Tasks is stuck. "
+        f"Hard power-cycle the board and retry. "
+        f"Last serial chunk: {buffer[-200:]!r}"
+    )
+
+
+def sleep_with_countdown(seconds: float, label: str = "waiting",
+                         log: Logger = None, tick_s: float = 1.0):
+    """Block for `seconds` seconds while logging a countdown so the user
+    sees progress during long silent waits (PTP drift-filter settle,
+    Saleae capture, etc.).  Ticks at 1 s intervals by default — set
+    `tick_s=5` or similar for very long waits to reduce log spam."""
+    if seconds <= 0:
+        return
+    t_start  = time.monotonic()
+    deadline = t_start + seconds
+    if log:
+        log.info(f"  {label} ({seconds:.0f} s)")
+    last_tick_reported = -1
+    while True:
+        now = time.monotonic()
+        remaining = deadline - now
+        if remaining <= 0:
+            break
+        # Bucket the remaining time to `tick_s`-sized ticks so we only
+        # emit a log line when the bucket changes (no spam, no races).
+        tick = int(remaining / tick_s + 0.999)
+        if tick != last_tick_reported and log:
+            log.info(f"  {label}: {int(remaining + 0.5)} s remaining")
+            last_tick_reported = tick
+        time.sleep(min(0.2, remaining))
+
+
 def wait_for_pattern(ser: serial.Serial, pattern: re.Pattern,
                      timeout: float, log: Logger = None,
                      extra_patterns: dict = None,

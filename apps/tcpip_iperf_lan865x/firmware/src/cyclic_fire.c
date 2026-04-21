@@ -128,7 +128,19 @@ bool cyclic_fire_start_ex(uint32_t period_us, uint64_t phase_anchor_ns,
 
     s_period_us       = period_us;
     s_pattern         = pattern;
-    s_marker_phase    = 0u;
+    /* Derive the MARKER phase counter from the absolute first_target tick
+     * so all boards using the same anchor land on the same MARKER cycle
+     * slot regardless of when their fire_callback first runs.  Without
+     * this, a board armed N periods later (via the phase_align loop's
+     * roll-forward above) would start s_marker_phase at 0 but be on a
+     * different absolute MARKER slot — visible as a constant N×period_us
+     * offset between two PTP-synced boards.  See R20 in readme_risks.md.
+     * For SQUARE pattern the value is unused, so the calculation is
+     * harmless either way. */
+    {
+        uint64_t half_period_ns = (uint64_t)period_us * 500ULL;
+        s_marker_phase = (uint32_t)((first_target_ns / half_period_ns) % 10ULL);
+    }
     s_cycles          = 0u;
     s_misses          = 0u;
     s_last_target_ns  = first_target_ns;

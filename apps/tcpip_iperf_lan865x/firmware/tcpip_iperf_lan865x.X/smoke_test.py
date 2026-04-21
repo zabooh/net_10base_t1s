@@ -37,6 +37,7 @@ except ImportError:
 
 from ptp_drift_compensate_test import (  # noqa: E402
     Logger, open_port, send_command, wait_for_pattern,
+    reset_and_wait_for_boot,
     RE_IP_SET, RE_FINE, RE_MATCHFREQ, RE_HARD_SYNC, RE_COARSE,
     DEFAULT_GM_PORT, DEFAULT_FOL_PORT,
     DEFAULT_GM_IP, DEFAULT_FOL_IP, DEFAULT_NETMASK,
@@ -186,9 +187,17 @@ def phase1_boot_and_fine(run: SmokeRunner, args):
               lambda: expect(run.ser_fol, "ptp_mode", re.compile(r"PTP mode:"), log, 3.0))
 
     log.info("  Issuing reset on both boards...")
-    send_command(run.ser_gm,  "reset", 3.0, log)
-    send_command(run.ser_fol, "reset", 3.0, log)
-    time.sleep(8.0)
+    try:
+        gm_build  = reset_and_wait_for_boot(run.ser_gm,  "GM ", timeout=8.0, log=log)
+        fol_build = reset_and_wait_for_boot(run.ser_fol, "FOL", timeout=8.0, log=log)
+    except RuntimeError as exc:
+        log.info(f"  ERROR: {exc}")
+        log.info(f"  Aborting smoke test — hard power-cycle both boards "
+                 f"(USB unplug → 3 s wait → plug) and retry.")
+        return 1
+    if gm_build != fol_build:
+        log.info(f"  WARN: build mismatch — GM={gm_build} FOL={fol_build}  "
+                 f"(test continues, but both boards should be flashed with the same firmware)")
 
     run.check("GM setip",
               lambda: expect(run.ser_gm,  f"setip eth0 {args.gm_ip} {args.netmask}",
