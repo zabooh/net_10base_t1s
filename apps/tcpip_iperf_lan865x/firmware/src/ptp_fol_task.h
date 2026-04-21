@@ -98,6 +98,34 @@ Adapted from noIP-SAM-E54-Curiosity-PTP-Follower/ptp_task.h for Harmony TCP/IP b
 #define PTP_SYNC_INTERVAL       500u
 #define PTP_ANNOUNCE_INTERVAL   1000u
 
+/* -------------------------------------------------------------------------
+ * RX-pipeline latency compensation for the software PTP_CLOCK anchor on FOL.
+ *
+ * The (t2, sysTickAtRx) anchor pair fed to PTP_CLOCK_Update() pairs:
+ *   t2          = MAC RX timestamp captured by LAN865x at SFD-on-wire
+ *   sysTickAtRx = host TC0 tick captured by EIC EXTINT-14 ISR at nIRQ-assert
+ *
+ * The LAN865x asserts its RX-related nIRQ ~10 ms AFTER SFD-on-wire (verified
+ * empirically via clk_get bracketing: FOL's PTP_CLOCK_GetTime_ns() lagged
+ * GM's by 10.0 ± 4 ms before this offset was applied).  Without compensation
+ * the pair is mismatched and PTP_CLOCK_GetTime_ns() on FOL returns wallclock
+ * values that lag the true GM-synced clock by exactly that delta — visible
+ * in cyclic_fire_hw_test as a constant +10 ms cross-board edge offset.
+ *
+ * PTP_FOL_ANCHOR_OFFSET_NS is added to t2 so the resulting anchor wallclock
+ * corresponds to the moment sysTickAtRx was captured (= SFD + δ_rx), giving
+ * a consistent pair.  Calibration procedure mirrors PTP_GM_ANCHOR_OFFSET_NS:
+ *   run cyclic_fire_hw_test --no-compensate, observe median rising delta D,
+ *   new value = old + D  (positive D means FOL fires after GM — increase
+ *   FOL's offset to bring it forward in time and match GM).
+ *
+ * Override at build time via:
+ *   add_compile_definitions(PTP_FOL_ANCHOR_OFFSET_NS=10000000ULL)
+ */
+#ifndef PTP_FOL_ANCHOR_OFFSET_NS
+#define PTP_FOL_ANCHOR_OFFSET_NS  10000000ULL    /* 10 ms */
+#endif
+
 #define MATCHFREQ_RESET_THRESHOLD   100000000
 #define HARDSYNC_RESET_THRESHOLD    0x3FFFFFFFu
 #define HARDSYNC_THRESHOLD          0xFFFFFF

@@ -1472,7 +1472,10 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
                     /* Use the tick captured in the EIC ISR at nIRQ assertion
                      * time rather than the current tick.  This reduces the
                      * sysTickAtRx error from ~200 µs (poll latency + SPI time)
-                     * to < 5 µs (fixed LAN865x RX-pipeline delay after SFD). */
+                     * to < 5 µs (fixed LAN865x RX-pipeline delay after SFD).
+                     * The remaining ~10 ms SFD-to-nIRQ delay of the LAN865x
+                     * itself is compensated in PTP_FOL processFollowUp() via
+                     * PTP_FOL_ANCHOR_OFFSET_NS. */
                     g_ptp_raw_rx.sysTickAtRx = (s_nirq_tick != 0u)
                                              ? s_nirq_tick
                                              : SYS_TIME_Counter64Get();

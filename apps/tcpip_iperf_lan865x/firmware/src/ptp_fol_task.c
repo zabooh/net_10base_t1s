@@ -1003,11 +1003,18 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
         return;
     }
 
-    /* Update software PTP clock anchor: t2 is the RTSA wallclock, sysTickAtRx
-     * was captured atomically alongside it in TC6_CB_OnRxEthernetPacket(). */
+    /* Update software PTP clock anchor.  t2 is the LAN865x RTSA hardware RX
+     * timestamp (wallclock at SFD-on-wire); sysTickAtRx is the host TC0 tick
+     * captured by the EIC EXTINT-14 ISR at nIRQ assertion.  The LAN865x
+     * asserts the RX nIRQ ~10 ms after SFD on this MAC-PHY, so the raw pair
+     * (t2, sysTickAtRx) refers to two different real moments — without
+     * compensation PTP_CLOCK_GetTime_ns() would lag GM by exactly that
+     * delta.  PTP_FOL_ANCHOR_OFFSET_NS shifts t2 forward to the moment
+     * sysTickAtRx was captured, making the pair self-consistent. */
     if (g_ptp_raw_rx.sysTickAtRx != 0u)
     {
-        PTP_CLOCK_Update(t2, g_ptp_raw_rx.sysTickAtRx);
+        PTP_CLOCK_Update(t2 + (uint64_t)PTP_FOL_ANCHOR_OFFSET_NS,
+                         g_ptp_raw_rx.sysTickAtRx);
     }
 
     if (TS_SYNC.receipt_prev.secondsLsb != 0u) {
