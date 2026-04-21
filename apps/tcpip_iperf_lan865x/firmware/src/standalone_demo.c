@@ -352,6 +352,16 @@ void standalone_demo_service(uint64_t current_tick)
         s_is_master = false;
         PTP_FOL_SetMode(PTP_DISABLED);
         enter_state(DEMO_FREE, current_tick);
+    } else if (s_is_follower && sw1_pressed
+               && (s_state == DEMO_SYNCING_FOL
+                   || s_state == DEMO_SYNCED
+                   || s_state == DEMO_LOST)) {
+        /* SW1 symmetric toggle on the follower board: another press
+         * disables the follower servo and returns to FREE.  Pressing
+         * SW1 once more re-enables the follower. */
+        s_is_follower = false;
+        PTP_FOL_SetMode(PTP_DISABLED);
+        enter_state(DEMO_FREE, current_tick);
     }
 
     /* Progress check: move SYNCING → SYNCED when the local sync criterion
