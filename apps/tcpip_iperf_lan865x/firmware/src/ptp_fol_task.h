@@ -323,6 +323,11 @@ void PTP_FOL_GetOffset(int64_t *pOffset, uint64_t *pOffsetAbs);
 /** Reset follower servo to UNINIT state (same effect as SetMode(PTP_SLAVE)). */
 void PTP_FOL_Reset(void);
 
+/** Return current servo state.  Values: UNINIT(0), MATCHFREQ(1),
+ *  HARDSYNC(2), COARSE(3), FINE(4).  Returns UNINIT when not in
+ *  follower mode. */
+uint8_t PTP_FOL_GetServoState(void);
+
 /**
  * Return the calibrated clock increment values saved by the last UNINIT->MATCHFREQ
  * transition.  Both outputs are zero when no calibration has been performed yet.

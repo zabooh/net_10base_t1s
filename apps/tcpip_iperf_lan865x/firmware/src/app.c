@@ -40,7 +40,7 @@
 #include "cyclic_fire_cli.h"
 #include "pd10_blink.h"
 #include "pd10_blink_cli.h"
-#include "button_led.h"
+#include "standalone_demo.h"
 #include "ptp_rx.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
@@ -111,7 +111,7 @@ void APP_Initialize ( void )
     sw_ntp_init();
     tfuture_init();
     pd10_blink_init();
-    button_led_init();
+    standalone_demo_init();
 }
 
 
@@ -195,8 +195,8 @@ void APP_Tasks ( void )
             /* === PD10 rectangle generator — enabled via `blink` CLI === */
             pd10_blink_service(current_tick);
 
-            /* === SW1/SW2 → LED1/LED2 toggle (debounced main-loop poll) === */
-            button_led_service(current_tick);
+            /* === PTP-standalone demo: SW1/SW2 select role, LEDs visualise === */
+            standalone_demo_service(current_tick);
 
             /* === Manual LAN865x register access service === */
             LAN_REGS_CLI_Service(current_tick, ticks_per_ms);

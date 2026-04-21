@@ -27,6 +27,7 @@ static uint64_t              s_misses             = 0u;
 static uint32_t              s_saved_spin_us      = 0u;
 static cyclic_fire_pattern_t s_pattern            = CYCLIC_FIRE_PATTERN_SQUARE;
 static uint32_t              s_marker_phase       = 0u;   /* 0..9, MARKER pattern */
+static cyclic_fire_user_cb_t s_user_cb            = NULL; /* optional decimator hook */
 
 static void fire_callback(uint64_t target_ns, uint64_t actual_ns)
 {
@@ -40,7 +41,9 @@ static void fire_callback(uint64_t target_ns, uint64_t actual_ns)
      * (= 5 full period) cycle, leaving the signal LOW for 4 out of 5
      * periods.  This produces isolated rising edges that are unambiguous
      * to compare across two boards on a scope. */
-    if (s_pattern == CYCLIC_FIRE_PATTERN_SQUARE) {
+    if (s_pattern == CYCLIC_FIRE_PATTERN_SILENT) {
+        /* Intentionally no pin op — caller drives the pin via user_cb. */
+    } else if (s_pattern == CYCLIC_FIRE_PATTERN_SQUARE) {
         SYS_PORT_PinToggle(CYCLIC_FIRE_PIN);
     } else {
         /* MARKER:
@@ -78,8 +81,29 @@ static void fire_callback(uint64_t target_ns, uint64_t actual_ns)
     }
 
     s_last_target_ns = next_target_ns;
-    (void)tfuture_arm_at_ns(next_target_ns);
+    /* Notify any registered higher-level decimator before re-arming.  Kept
+     * after the pin op + miss-catchup so the user sees the actual scheduled
+     * tick (target_ns) and consistent miss accounting. */
+    if (s_user_cb != NULL) {
+        s_user_cb(target_ns);
+    }
+    /* Robust re-arm: if tfuture refuses the next target (e.g. because a
+     * PTP_CLOCK anchor jump at role-change made next_target_ns inconsistent
+     * with the new PTP_CLOCK domain), fall back to "now + half_period" so
+     * the callback chain doesn't silently die.  Each retry bumps s_misses
+     * so the stuck condition is visible via cyclic_status. */
+    if (!tfuture_arm_at_ns(next_target_ns)) {
+        next_target_ns   = PTP_CLOCK_GetTime_ns() + half_period_ns;
+        s_last_target_ns = next_target_ns;
+        s_misses++;
+        (void)tfuture_arm_at_ns(next_target_ns);
+    }
     s_cycles++;
+}
+
+void cyclic_fire_set_user_callback(cyclic_fire_user_cb_t cb)
+{
+    s_user_cb = cb;
 }
 
 bool cyclic_fire_start(uint32_t period_us, uint64_t phase_anchor_ns)

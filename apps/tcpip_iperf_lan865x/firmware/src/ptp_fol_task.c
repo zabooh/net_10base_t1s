@@ -1333,6 +1333,16 @@ void PTP_FOL_Reset(void)
     resetSlaveNode();
 }
 
+uint8_t PTP_FOL_GetServoState(void)
+{
+    /* When not in follower mode the servo state is meaningless to the
+     * caller — report UNINIT for predictable behaviour. */
+    if (ptpMode != PTP_SLAVE) {
+        return UNINIT;
+    }
+    return syncStatus;
+}
+
 void PTP_FOL_SetMac(const uint8_t *pMac)
 {
     if (pMac != NULL) {

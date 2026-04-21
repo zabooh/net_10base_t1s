@@ -44,6 +44,12 @@
 typedef enum {
     CYCLIC_FIRE_PATTERN_SQUARE = 0,
     CYCLIC_FIRE_PATTERN_MARKER = 1,
+    /* SILENT: skip all pin operations on CYCLIC_FIRE_PIN.  Intended for
+     * callers that register a user callback (cyclic_fire_set_user_callback)
+     * and want to drive the pin themselves — the native 250 µs toggle
+     * would otherwise race with the user's pin writes and produce sub-µs
+     * glitches the user's decimator cannot fully suppress. */
+    CYCLIC_FIRE_PATTERN_SILENT = 2,
 } cyclic_fire_pattern_t;
 
 bool     cyclic_fire_start(uint32_t period_us, uint64_t phase_anchor_ns);
@@ -55,5 +61,13 @@ bool     cyclic_fire_is_running(void);
 uint32_t cyclic_fire_get_period_us(void);
 uint64_t cyclic_fire_get_cycle_count(void);
 uint64_t cyclic_fire_get_missed_count(void);
+
+/* Optional user callback — invoked once per fire_callback() (every
+ * half-period) AFTER the GPIO toggle and BEFORE the next-fire re-arm.
+ * Lets a higher-level module decimate the cyclic_fire rate (e.g. drive
+ * an on-board LED at a slow visible rate) without having to schedule
+ * its own tfuture timer.  Pass NULL to disable. */
+typedef void (*cyclic_fire_user_cb_t)(uint64_t target_ns);
+void cyclic_fire_set_user_callback(cyclic_fire_user_cb_t cb);
 
 #endif /* CYCLIC_FIRE_H */
