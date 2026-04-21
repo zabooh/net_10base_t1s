@@ -22,10 +22,17 @@ connected through a 10BASE-T1S link.  On each board:
 | LED2 (yellow) | PA16 | State indicator (see §3)                          |
 | PD10          | —    | Saleae probe pin mirroring LED1 (active-high)     |
 
-| Button | Pin  | Action                                                |
-|--------|------|-------------------------------------------------------|
-| SW1    | PD00 | Make this board the PTP **follower**                  |
-| SW2    | PD01 | Make this board the PTP **master**                    |
+Button semantics are **context-dependent** — each button's meaning
+depends on the board's current role:
+
+| Button | in **FREE** role         | on **master** board         | on **follower** board       |
+|--------|--------------------------|-----------------------------|------------------------------|
+| SW1    | become PTP **follower**  | toggle **iperf TCP server** | toggle follower off → FREE   |
+| SW2    | become PTP **master**    | toggle master off → FREE    | toggle **iperf TCP client**  |
+
+In short: whichever button picked the role is the "role off" toggle for
+that role.  The *opposite* button on each role runs the iperf payload
+(server on master, client on follower).  See §7 for the iperf flow.
 
 Before PTP is active the two boards run off independent TC0 crystals
 (~100 ppm mismatch) — their 1 Hz LED1 rectangles visibly drift apart
@@ -57,9 +64,15 @@ drifting — the whole point of PTP.
    and do not drift apart over time.
 
 Order of SW1 / SW2 doesn't have to be exact — as long as one board ends
-up as follower and the other as master, the demo works.  Subsequent
-button presses are ignored (so you can't accidentally break the demo by
-pressing again).  To reset, power-cycle both boards.
+up as follower and the other as master, the demo works.
+
+**Role toggles**: pressing the same button that picked the role a
+second time disables that role and returns the board to the FREE
+state (master press SW2 again → master off; follower press SW1 again
+→ follower off).  The follower also self-recovers on sync loss — see §8.
+
+**iperf payload**: once synchronised, the master's SW1 toggles an iperf
+TCP server and the follower's SW2 toggles an iperf TCP client.  See §7.
 
 ---
 
@@ -73,20 +86,26 @@ DEMO_FREE         OFF           boot; buttons unpressed
 DEMO_SYNCING_FOL  2 Hz blink    follower servo converging
   │ PTP_FOL_GetServoState()==FINE
   ▼
-DEMO_SYNCED       50 % PWM      PTP lock achieved — follower = DIMMED
+DEMO_SYNCED       ~6 % PWM      PTP lock — follower = DIMMED
+  │ no Sync for 1000 ms
+  ▼
+DEMO_LOST         OFF           GM silent (cable / reset / power off)
+  │ Sync arrives again       → back to DEMO_SYNCED
 ```
 
 ```
-DEMO_SYNCING_GM   2 Hz blink    master active, follower probably still converging
+DEMO_SYNCING_GM   2 Hz blink    master active
   │ 2 s elapsed  (fixed, matches follower lock time for visual symmetry)
   ▼
 DEMO_SYNCED       SOLID ON      master = FULL brightness
 ```
 
-In the final `DEMO_SYNCED` state the two boards are visually distinct at
-a glance: **master LED2 full brightness, follower LED2 at ~50 %** (PWM
-driven at 2 kHz from the decimator — well above flicker threshold, so
-the eye sees a uniformly dimmer LED, not a blink).
+In `DEMO_SYNCED` the two boards are visually distinct at a glance:
+**master LED2 full brightness, follower LED2 at ~6 %** (~1-in-16 slot
+PWM at ~250 Hz from the decimator — far above flicker threshold, so
+the eye sees a uniformly dimmer LED, not a blink).  If the master
+disappears the follower LED2 goes dark (DEMO_LOST); when the master
+returns the follower automatically recovers.
 
 ---
 
@@ -144,17 +163,24 @@ cyclic_fire fire_callback every 250 µs (half-period of 500 µs)
    Without it, the decimator's PD10 writes race with cyclic_fire's own
    250 µs toggle, producing ~100 ns glitches that Saleae captures as
    spurious 4 kHz edges.  SILENT gives a clean 1 Hz rectangle on PD10.
-3. **`PTP_FOL_GetServoState()`** — new accessor returning `UNINIT` (0)
-   through `FINE` (4).  Used by the demo to know when the follower has
-   locked.
+3. **`PTP_FOL_GetServoState()`** / **`PTP_FOL_GetLastSyncTick()`** —
+   accessors returning the servo state and the tick latched on the last
+   received Sync frame.  Used by the demo to know when the follower has
+   locked and to detect GM silence (DEMO_LOST).
 4. **Robust `cyclic_fire` re-arm** — if `tfuture_arm_at_ns()` refuses
    the next target (because the PTP_CLOCK anchor jumped at role change
    and the computed `next_target_ns` is inconsistent with the new
    PTP_CLOCK domain), fall back to `PTP_CLOCK_GetTime_ns() +
-   half_period` and try again.  Prevents the callback chain from
-   silently dying mid-demo.
-5. **Stateless LED phase** — `target_ns / SLOT_NS & 1` replaces per-board
+   half_period` and try again.
+5. **`cyclic_fire` watchdog in demo_service** — if the cycles counter
+   doesn't advance for 500 ms (typically after a PTP_CLOCK backward jump
+   armed tfuture far in the future), stop + restart cyclic_fire with a
+   fresh anchor.  Keeps LED1 blinking through any role change.
+6. **Stateless LED phase** — `target_ns / SLOT_NS & 1` replaces per-board
    divider counters; see §4.
+7. **Sync-loss detection + recovery** — see §8.
+8. **iperf payload** — `iperf_control` module lets the demo
+   programmatically start / stop Harmony's iperf TCP server/client; see §7.
 
 ---
 
@@ -221,3 +247,85 @@ Each run produces `standalone_demo_<ts>/`:
 - `run_<ts>.log` — full tee'd log of prose + dumps + captures
 - `free/digital.csv`, `synced/digital.csv` — raw Saleae CSVs
 - `summary.csv` — one row per phase: n, median_ms, max_abs_ms, min/max
+
+---
+
+## 7. iperf payload (TCP throughput over the synchronised link)
+
+Once both boards are in `DEMO_SYNCED` the demo exposes iperf over the
+10BASE-T1S link — lets you visualise "PTP sync enables data payload on
+the same wires".
+
+Button mapping recap:
+
+| Board role | Button | Action                                                  |
+|------------|--------|---------------------------------------------------------|
+| master     | SW1    | set IP 192.168.0.10/24, start iperf TCP server on :5001 |
+| master     | SW1 again | stop iperf server                                    |
+| follower   | SW2    | set IP 192.168.0.20/24, start iperf TCP client → 192.168.0.10:5001 |
+| follower   | SW2 again | stop iperf client                                    |
+
+The client is rate-capped at **4 Mbps** via `-b 4000000` so the
+10BASE-T1S PLCA doesn't backpressure the MAC and flood the console with
+`TCPIPStack_Assert` warnings.  4 Mbps is inside the observed 4-6 Mbps
+sustainable goodput on this PHY.
+
+### Typical UART output
+
+Master after SW1 press:
+```
+[IPERF] IP set to 192.168.0.10 / 255.255.255.0
+[IPERF] starting TCP server on :5001
+iperf: Starting session instance 0
+iperf: Server listening on TCP port 5001
+```
+
+Follower after SW2 press:
+```
+[IPERF] IP set to 192.168.0.20 / 255.255.255.0
+[IPERF] connecting TCP client to 192.168.0.10:5001 (cap 4 Mbps)
+iperf: instance 0 started ...
+    - Local  192.168.0.20 port 1024 connected with
+    - Remote 192.168.0.10 port 5001
+    - Target rate = 4000000 bps, period = 2 ms
+[ 0.0-10.0 sec] 5.01 MBytes 4.01 Mbits/sec
+```
+
+### Implementation
+
+- `config/default/library/tcpip/src/iperf.c` — `CommandIperfStart` and
+  `CommandIperfStop` made non-static (4 single-word edits) so higher
+  layers can invoke them directly instead of going through the
+  SYS_CMD console parser.
+- `src/iperf_control.{c,h}` — stub `SYS_CMD_DEVICE_NODE` whose output
+  API routes iperf's banner / BW reports to `SYS_CONSOLE_PRINT`, plus
+  a `TCPIP_STACK_NetAddressSet()` helper.  Exposes three entry points:
+  `iperf_control_server_start()`, `iperf_control_client_start(const char
+  *ip)`, `iperf_control_stop()`.
+- `src/standalone_demo.c` — new opposite-role button-press handling;
+  `s_iperf_running` tracks the toggle state per board; disabling a
+  role via its primary button also tears down any running iperf
+  session it owns.
+
+---
+
+## 8. Sync-loss detection on the follower (DEMO_LOST)
+
+Once in `DEMO_SYNCED` the follower polls `PTP_FOL_GetLastSyncTick()`
+each main-loop iteration.  If no Sync has arrived for
+`SYNC_LOSS_TIMEOUT_MS` (1 s = 8 missed Syncs at the default 125 ms
+interval), the demo moves to `DEMO_LOST`:
+
+- `LED2` goes dark (visual cue to the operator that the link is down)
+- `PTP_FOL_Reset()` is called so `ptp_sync_sequenceId` drops back to
+  `-1` — that way whatever the new master's starting sequence-id is
+  (typically 0 after a power-cycle) will be accepted on the very first
+  incoming Sync instead of tripping the "Large sequence mismatch" guard
+  inside `processSync()`.
+- Every `SYNC_LOST_RETRY_MS` (3 s) the reset is re-issued in case the
+  master was still booting at the first reset.
+
+When the GM comes back, the next incoming Sync updates
+`s_last_sync_tick` (at the top of `processSync()`, before any
+sequence-id decision).  The demo detects the freshness and returns to
+`DEMO_SYNCED`; LED2 resumes the dimmed-PWM state.

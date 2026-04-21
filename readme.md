@@ -29,6 +29,17 @@ by-product that reports the ppm deviations of all four crystals in the system
 
 **[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_tfuture.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture.md)**
 
+For the **standalone demo** — two-board self-contained PTP sync demo
+driven entirely by the on-board SW1/SW2 buttons and LED1/LED2 indicators
+(no PC required during the demo).  Branches `ptp-standlone-demo` and
+`iperf-payload-test` add a decimated 1 Hz visible blink that visually
+drifts apart before PTP is activated and snaps back into lock-step once
+the SW1/SW2 role-selection is made, plus an iperf TCP server/client
+toggle on the opposite button of each role that exchanges payload over
+the synchronised link:
+
+**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_standalone\_demo.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_standalone_demo.md)**
+
 ---
 
 ### Origin
