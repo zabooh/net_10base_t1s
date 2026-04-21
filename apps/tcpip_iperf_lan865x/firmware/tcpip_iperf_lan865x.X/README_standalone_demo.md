@@ -67,21 +67,26 @@ pressing again).  To reset, power-cycle both boards.
 
 ```
 DEMO_FREE         OFF           boot; buttons unpressed
-  │ SW1 pressed → DEMO_SYNCING_FOL
-  │ SW2 pressed → DEMO_SYNCING_GM
+  │ SW1 pressed → DEMO_SYNCING_FOL    (this board = follower)
+  │ SW2 pressed → DEMO_SYNCING_GM     (this board = master)
   ▼
 DEMO_SYNCING_FOL  2 Hz blink    follower servo converging
   │ PTP_FOL_GetServoState()==FINE
   ▼
-DEMO_SYNCED       SOLID ON      PTP lock achieved
+DEMO_SYNCED       50 % PWM      PTP lock achieved — follower = DIMMED
 ```
 
 ```
 DEMO_SYNCING_GM   2 Hz blink    master active, follower probably still converging
   │ 2 s elapsed  (fixed, matches follower lock time for visual symmetry)
   ▼
-DEMO_SYNCED       SOLID ON      master treats itself as "done"
+DEMO_SYNCED       SOLID ON      master = FULL brightness
 ```
+
+In the final `DEMO_SYNCED` state the two boards are visually distinct at
+a glance: **master LED2 full brightness, follower LED2 at ~50 %** (PWM
+driven at 2 kHz from the decimator — well above flicker threshold, so
+the eye sees a uniformly dimmer LED, not a blink).
 
 ---
 

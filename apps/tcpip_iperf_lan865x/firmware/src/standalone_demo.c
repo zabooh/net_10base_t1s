@@ -53,6 +53,12 @@
 #define LED1_SLOT_NS                500000000ULL   /* 500 ms half-period → 1 Hz */
 #define LED2_SLOT_NS                250000000ULL   /* 250 ms half-period → 2 Hz */
 
+/* Dimmer-PWM for LED2 in the SYNCED-follower state.  Each "slot" is one
+ * fire_callback (250 µs).  LED2 is ON for slot index 0 and OFF for the
+ * remaining (N-1) slots, so duty = 1/N.  Must be a power of two so the
+ * mask trick works.  16 → 6.25 % duty, ~250 Hz refresh. */
+#define LED2_DIM_PERIOD_SLOTS       16u
+
 #define DEBOUNCE_MS                 20u
 
 /* Master-side "fake sync" time before LED2 goes solid.  The master's
@@ -75,6 +81,10 @@ typedef enum {
 static demo_state_t     s_state = DEMO_FREE;
 static uint64_t         s_state_enter_tick = 0u;
 static uint64_t         s_ticks_per_ms     = 0u;
+/* Which button was pressed — lets the decimator pick the right LED2
+ * brightness in DEMO_SYNCED (master = solid ON, follower = PWM-dimmed
+ * so the two boards are visually distinguishable at a glance). */
+static bool             s_is_follower      = false;
 
 /* No per-LED counters any more — LED phase is computed stateless from
  * target_ns inside the decimator (see LED1_SLOT_NS / LED2_SLOT_NS). */
@@ -138,13 +148,30 @@ static void demo_decimator(uint64_t target_ns)
         SYS_PORT_PinClear(PD10_MIRROR_PIN);
     }
 
-    /* LED2 blinks at 2 Hz while in either SYNCING state; otherwise its
-     * state is controlled by enter_state() (OFF in FREE, solid ON in
-     * SYNCED) and we leave it alone. */
+    /* LED2:
+     *   SYNCING_*     → 2 Hz blink (both master and follower look the same)
+     *   SYNCED master → solid ON (full brightness)
+     *   SYNCED follower → 50 % duty PWM at 4 kHz (half brightness — the
+     *                     decimator fires every 250 µs, far above flicker
+     *                     threshold, so the eye sees a uniformly dimmed
+     *                     LED and the two roles become visually
+     *                     distinguishable at a glance).
+     *   FREE          → controlled by enter_state() (OFF), not touched here.
+     */
     if (s_state == DEMO_SYNCING_FOL || s_state == DEMO_SYNCING_GM) {
         bool led2_on = (((target_ns / LED2_SLOT_NS) & 1ULL) != 0ULL);
         if (led2_on) LED_ON(LED2_PIN);
         else         LED_OFF(LED2_PIN);
+    } else if (s_state == DEMO_SYNCED && s_is_follower) {
+        /* PWM at 1-in-LED2_DIM_PERIOD_SLOTS duty — each "slot" is one
+         * fire_callback = 250 µs.  1/16 gives ~6.25 % duty = clearly
+         * distinct from the master's solid ON while still lit enough to
+         * identify.  Frequency = 1/(16·250µs) = 250 Hz, well above the
+         * flicker-perception threshold. */
+        uint64_t tick_slot = target_ns / (uint64_t)(CYCLIC_PERIOD_US * 500u);
+        bool pwm_on = ((tick_slot & (LED2_DIM_PERIOD_SLOTS - 1u)) == 0u);
+        if (pwm_on) LED_ON(LED2_PIN);
+        else        LED_OFF(LED2_PIN);
     }
 }
 
@@ -167,7 +194,13 @@ static void enter_state(demo_state_t new_state, uint64_t now_tick)
         LED_OFF(LED2_PIN);
         break;
     case DEMO_SYNCED:
-        LED_ON(LED2_PIN);
+        /* For the master we turn LED2 solid ON here; for the follower we
+         * deliberately leave the pin alone — the decimator will start
+         * PWM'ing it at 50 % duty on the very next fire_callback (within
+         * 250 µs), producing a dimmed look. */
+        if (!s_is_follower) {
+            LED_ON(LED2_PIN);
+        }
         break;
     }
 }
@@ -220,6 +253,7 @@ void standalone_demo_service(uint64_t current_tick)
      * re-power-cycle out of. */
     if (s_state == DEMO_FREE) {
         if (sw1_pressed) {
+            s_is_follower = true;
             PTP_FOL_SetMode(PTP_SLAVE);
             enter_state(DEMO_SYNCING_FOL, current_tick);
         } else if (sw2_pressed) {
