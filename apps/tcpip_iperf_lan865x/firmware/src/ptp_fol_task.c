@@ -148,6 +148,10 @@ static ptpMode_t ptpMode          = PTP_DISABLED;
 static int32_t   ptp_sync_sequenceId = -1;
 static uint8_t   syncReceived     = 0;
 static bool      wallClockSet     = false;
+/* Updated every time processSync() accepts a Sync frame.  Callers poll
+ * PTP_FOL_GetLastSyncTick() to detect a stalled GM (no Sync for > N ms
+ * → probably disconnected or de-powered). */
+static volatile uint64_t s_last_sync_tick = 0u;
 
 volatile double rateRatio         = 1.0;
 volatile double rateRatioIIR      = 1.0;
@@ -921,6 +925,10 @@ static void resetSlaveNode(void)
 
 static void processSync(syncMsg_t *ptpPkt)
 {
+    /* Always timestamp the Sync arrival — even if the sequence-id path
+     * below rejects it, for "liveness" purposes we heard from the GM. */
+    s_last_sync_tick = SYS_TIME_Counter64Get();
+
     uint16_t seqId = htons(ptpPkt->header.sequenceID);
     if (ptp_sync_sequenceId < 0) {
         ptp_sync_sequenceId = seqId;
@@ -1341,6 +1349,11 @@ uint8_t PTP_FOL_GetServoState(void)
         return UNINIT;
     }
     return syncStatus;
+}
+
+uint64_t PTP_FOL_GetLastSyncTick(void)
+{
+    return s_last_sync_tick;
 }
 
 void PTP_FOL_SetMac(const uint8_t *pMac)

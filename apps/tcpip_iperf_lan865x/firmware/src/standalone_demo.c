@@ -76,11 +76,38 @@ typedef enum {
     DEMO_SYNCING_FOL  = 1,   /* SW1 pressed: becoming follower, LED2 blink */
     DEMO_SYNCING_GM   = 2,   /* SW2 pressed: becoming master,   LED2 blink */
     DEMO_SYNCED       = 3,   /* lock achieved: LED2 solid on                */
+    DEMO_LOST         = 4,   /* follower only: no Sync for LOST_MS, LED2 off */
 } demo_state_t;
+
+/* Time after the last received Sync before a follower declares "lost".
+ * PTP_GM_SYNC_PERIOD_MS is 125 ms, so 1 s = 8 missed Syncs — well
+ * beyond ordinary jitter but fast enough that a user pulling the cable
+ * gets immediate LED feedback. */
+#define SYNC_LOSS_TIMEOUT_MS        1000u
+
+/* While in DEMO_LOST, retry PTP_FOL_Reset() every RETRY_MS so that if
+ * the master comes back with a freshly-zeroed sequence-id counter (which
+ * is what happens after a physical master reset), the follower's
+ * ptp_sync_sequenceId is already -1 and the new Syncs are accepted
+ * immediately instead of triggering the large-sequence-mismatch path
+ * repeatedly. */
+#define SYNC_LOST_RETRY_MS          3000u
 
 static demo_state_t     s_state = DEMO_FREE;
 static uint64_t         s_state_enter_tick = 0u;
 static uint64_t         s_ticks_per_ms     = 0u;
+/* Last tick we invoked PTP_FOL_Reset() while in DEMO_LOST — used to
+ * rate-limit the retry to SYNC_LOST_RETRY_MS. */
+static uint64_t         s_last_reset_tick  = 0u;
+
+/* Watchdog: cyclic_fire's fire_callback updates the cycle counter
+ * every 250 µs.  If the counter hasn't moved for >= WATCHDOG_MS, the
+ * callback chain has died — typically because a PTP_CLOCK backward
+ * jump armed tfuture far in the future.  We restart cyclic_fire with
+ * a fresh anchor in the current PTP_CLOCK domain. */
+#define WATCHDOG_MS                 500u
+static uint64_t         s_wd_last_check_tick   = 0u;
+static uint64_t         s_wd_last_cycles       = 0u;
 /* Which button was pressed — lets the decimator pick the right LED2
  * brightness in DEMO_SYNCED (master = solid ON, follower = PWM-dimmed
  * so the two boards are visually distinguishable at a glance). */
@@ -202,6 +229,17 @@ static void enter_state(demo_state_t new_state, uint64_t now_tick)
             LED_ON(LED2_PIN);
         }
         break;
+    case DEMO_LOST:
+        /* Follower has lost Sync — LED2 dark until a Sync arrives again.
+         * Reset the follower servo so ptp_sync_sequenceId drops back to
+         * -1; that way whatever the new master's starting sequence-id
+         * is (typically 0 after a power-cycle) will be accepted on the
+         * very first Sync instead of tripping the "Large sequence
+         * mismatch" guard in processSync(). */
+        LED_OFF(LED2_PIN);
+        PTP_FOL_Reset();
+        s_last_reset_tick = now_tick;
+        break;
     }
 }
 
@@ -242,8 +280,42 @@ void standalone_demo_init(void)
     s_state_enter_tick = SYS_TIME_Counter64Get();
 }
 
+/* Watchdog on cyclic_fire's cycle counter — if fire_callback stops
+ * running (e.g. because a PTP_CLOCK backward jump at role change
+ * armed tfuture hours into the future), restart cyclic_fire with a
+ * fresh anchor in the current PTP_CLOCK domain so both LEDs resume. */
+static void cyclic_fire_watchdog(uint64_t current_tick)
+{
+    if (s_wd_last_check_tick == 0u) {
+        s_wd_last_check_tick = current_tick;
+        s_wd_last_cycles     = cyclic_fire_get_cycle_count();
+        return;
+    }
+    if ((current_tick - s_wd_last_check_tick)
+            < (WATCHDOG_MS * s_ticks_per_ms)) {
+        return;
+    }
+    uint64_t cur_cycles = cyclic_fire_get_cycle_count();
+    if (cur_cycles == s_wd_last_cycles) {
+        /* Stuck — restart.  PTP_CLOCK is already valid (either from
+         * our initial ForceSet(0) or from subsequent PTP_CLOCK_Update
+         * calls by master TX / follower Sync RX), so cyclic_fire_start
+         * will pick "now + period" as its first target — which is well
+         * within the current PTP_CLOCK domain and therefore reachable. */
+        cyclic_fire_stop();
+        (void)cyclic_fire_start_ex(CYCLIC_PERIOD_US, 0u,
+                                   CYCLIC_FIRE_PATTERN_SILENT);
+        s_wd_last_cycles = cyclic_fire_get_cycle_count();
+    } else {
+        s_wd_last_cycles = cur_cycles;
+    }
+    s_wd_last_check_tick = current_tick;
+}
+
 void standalone_demo_service(uint64_t current_tick)
 {
+    cyclic_fire_watchdog(current_tick);
+
     bool sw1_pressed = debounce_press_edge(&s_sw1, current_tick);
     bool sw2_pressed = debounce_press_edge(&s_sw2, current_tick);
 
@@ -279,6 +351,34 @@ void standalone_demo_service(uint64_t current_tick)
         uint64_t elapsed_ticks = current_tick - s_state_enter_tick;
         if (elapsed_ticks >= (MASTER_BLINK_DURATION_MS * s_ticks_per_ms)) {
             enter_state(DEMO_SYNCED, current_tick);
+        }
+    } else if (s_state == DEMO_SYNCED && s_is_follower) {
+        /* Detect loss of Sync — if no Sync has arrived for
+         * SYNC_LOSS_TIMEOUT_MS, declare the link lost and let the
+         * operator see it on LED2. */
+        uint64_t last = PTP_FOL_GetLastSyncTick();
+        if (last != 0u
+            && (current_tick - last) > (SYNC_LOSS_TIMEOUT_MS * s_ticks_per_ms)) {
+            enter_state(DEMO_LOST, current_tick);
+        }
+    } else if (s_state == DEMO_LOST) {
+        /* Recovery: a Sync has arrived within the last SYNC_LOSS_TIMEOUT_MS. */
+        uint64_t last = PTP_FOL_GetLastSyncTick();
+        if (last != 0u
+            && (current_tick - last) < (SYNC_LOSS_TIMEOUT_MS * s_ticks_per_ms)) {
+            enter_state(DEMO_SYNCED, current_tick);
+            return;
+        }
+        /* Still lost — retry the servo reset every SYNC_LOST_RETRY_MS.
+         * A single reset at DEMO_LOST entry catches the typical "master
+         * rebooted, fresh seqId=0" case, but if the master is still
+         * coming up (e.g. in APP_STATE_SERVICE_TASKS waiting for link)
+         * when our first reset fires, the later Syncs will again hit a
+         * stale sequence-id state.  Periodic retry recovers from that. */
+        if ((current_tick - s_last_reset_tick)
+                > (SYNC_LOST_RETRY_MS * s_ticks_per_ms)) {
+            PTP_FOL_Reset();
+            s_last_reset_tick = current_tick;
         }
     }
 }

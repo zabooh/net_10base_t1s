@@ -328,6 +328,12 @@ void PTP_FOL_Reset(void);
  *  follower mode. */
 uint8_t PTP_FOL_GetServoState(void);
 
+/** SYS_TIME_Counter64Get() tick latched the last time a Sync frame was
+ *  accepted by processSync().  Zero before the first Sync ever.  Callers
+ *  poll to detect a stalled grandmaster: (now - last) > N ms implies the
+ *  GM is silent (disconnected / de-powered / PTP task wedged). */
+uint64_t PTP_FOL_GetLastSyncTick(void);
+
 /**
  * Return the calibrated clock increment values saved by the last UNINIT->MATCHFREQ
  * transition.  Both outputs are zero when no calibration has been performed yet.
