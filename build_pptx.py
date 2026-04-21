@@ -426,22 +426,188 @@ label(s, 0.3, 7.15, 12.7, 0.35,
       size=11, italic=True, color=GREY)
 
 # ============================================================================
-# 7. Agenda
+# 7. Standalone Demo — iperf Payload Mode
+# ============================================================================
+s = prs.slides.add_slide(L_TITLE_ONLY)
+set_title(s, "Standalone Demo — iperf Payload over Synchronised Link")
+
+# Intro strip
+box(s, 0.3, 1.45, 12.7, 0.5,
+    "After PTP lock, the opposite-role button launches iperf over the T1S link — "
+    "real TCP traffic, no PC needed.",
+    fill=LIGHT, fc=NAVY, size=13, italic=True)
+
+# Two-board mini diagram with IPs and iperf roles
+box(s, 0.5, 2.15, 4.1, 1.7, "Master board\n192.168.0.10/24\niperf TCP server :5001",
+    fill=OK, size=14)
+box(s, 4.9, 2.15, 3.3, 1.7, "10BASE-T1S\nshared pair\nrate-capped 4 Mbps",
+    fill=NAVY, size=13)
+box(s, 8.5, 2.15, 4.1, 1.7, "Follower board\n192.168.0.20/24\niperf TCP client →  .10:5001",
+    fill=ACCENT, size=14)
+line(s, 4.6, 3.0, 4.9, 3.0, color=GREY, width=3)
+line(s, 8.2, 3.0, 8.5, 3.0, color=GREY, width=3)
+
+# Button usage table
+box(s, 0.3, 4.1, 12.7, 0.5,
+    "Button usage after role selection  (primary button already stayed the way it was)",
+    fill=NAVY, size=13)
+usage = [
+    "• Master  (SW2 was pressed first):  SW1 → start iperf server.  SW1 again → stop server.",
+    "• Follower (SW1 was pressed first): SW2 → start iperf client (streams 4 Mbps to .10:5001).  SW2 again → stop client.",
+    "• Pressing the primary button to leave the role also stops any iperf session that role owned.",
+]
+tb = s.shapes.add_textbox(Inches(0.5), Inches(4.7), Inches(12.3), Inches(1.1))
+tf = tb.text_frame; tf.word_wrap = True
+for i, lt in enumerate(usage):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = lt
+    r.font.size = Pt(13); r.font.color.rgb = NAVY
+
+# Why details
+notes = [
+    "• 4 Mbps cap: keeps the client inside the observed 4–6 Mbps sustainable T1S goodput and avoids PLCA back-pressure / TCPIPStack_Assert warnings.",
+    "• iperf banner and bandwidth reports are routed to the same UART as the PTP logs — one console for everything, no second serial window.",
+    "• Proves the sync is not cosmetic: the two boards exchange real, timed TCP payload on the very link PTP disciplined.",
+]
+tb = s.shapes.add_textbox(Inches(0.5), Inches(5.9), Inches(12.3), Inches(1.2))
+tf = tb.text_frame; tf.word_wrap = True
+for i, lt in enumerate(notes):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = lt
+    r.font.size = Pt(12); r.font.color.rgb = NAVY
+
+label(s, 0.3, 7.15, 12.7, 0.35,
+      "Source: src/iperf_control.{c,h}  +  src/standalone_demo.c  (branch: iperf-payload-test, commit e360177)",
+      size=11, italic=True, color=GREY)
+
+# ============================================================================
+# 8. Reproducing the project: Prerequisites & Clone
+# ============================================================================
+s = prs.slides.add_slide(L_TITLE_ONLY)
+set_title(s, "Reproducing the Project — Prerequisites")
+
+# Hardware block
+box(s, 0.5, 1.5, 12.3, 0.55, "Hardware", fill=NAVY, size=14)
+label(s, 0.7, 2.1, 12.0, 0.6,
+      "2 × ATSAME54 Curiosity Ultra  +  2 × LAN865x click board  —  connected pair-to-pair over 10BASE-T1S",
+      size=14, color=NAVY)
+label(s, 0.7, 2.5, 12.0, 0.4,
+      "USB (EDBG) cables from each board to the PC for flashing and for the serial console (115200 8N1).",
+      size=13, color=GREY)
+
+# Software block
+box(s, 0.5, 3.15, 12.3, 0.55, "Software on the PC", fill=NAVY, size=14)
+bullets_notes = [
+    "MPLAB XC32 v4.60 or v5.x  (default path  C:\\Program Files\\Microchip\\xc32\\)",
+    "MPLAB X IDE / MDB  (used by flash.py to program the boards)",
+    "CMake ≥ 4.1  +  Ninja  (both on PATH)",
+    "Python 3.9+   with   pip install pyserial   (plus python-pptx only if you rebuild this deck)",
+    "Two terminal windows — one per board — e.g. PuTTY or Tera Term  (115200 8N1)",
+]
+tb = s.shapes.add_textbox(Inches(0.7), Inches(3.8), Inches(12.0), Inches(2.5))
+tf = tb.text_frame; tf.word_wrap = True
+for i, line_txt in enumerate(bullets_notes):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = "• " + line_txt
+    r.font.size = Pt(14); r.font.color.rgb = NAVY
+
+# Clone block
+box(s, 0.5, 6.05, 12.3, 0.55, "Clone", fill=ACCENT, size=13)
+tb = s.shapes.add_textbox(Inches(0.7), Inches(6.65), Inches(12.0), Inches(0.8))
+tf = tb.text_frame; tf.word_wrap = True
+cmds = [
+    "git clone https://github.com/zabooh/net_10base_t1s.git",
+    "cd net_10base_t1s\\apps\\tcpip_iperf_lan865x\\firmware\\tcpip_iperf_lan865x.X",
+]
+for i, c in enumerate(cmds):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = c
+    r.font.name = "Consolas"; r.font.size = Pt(13); r.font.color.rgb = NAVY
+
+# ============================================================================
+# 8. Reproducing the project: Setup, Build, Flash, Run
+# ============================================================================
+s = prs.slides.add_slide(L_TITLE_ONLY)
+set_title(s, "Reproducing the Project — Setup, Build, Run")
+
+# Quick-path banner — skip the build entirely, just flash the checked-in HEX
+box(s, 0.5, 1.4, 12.3, 0.55,
+    "Quick path — no build required (just run the demo)", fill=OK, size=14)
+quick_lines = [
+    "After  git clone  and  python setup_flasher.py,  simply run:",
+    "    python flash.py",
+    "flash.py finds the newest pre-built HEX under  out/…/image/*.hex  (checked into the repo) "
+    "and programmes it onto both boards — no XC32 / CMake / build step needed.",
+]
+tb = s.shapes.add_textbox(Inches(0.7), Inches(2.0), Inches(12.0), Inches(1.4))
+tf = tb.text_frame; tf.word_wrap = True
+for i, lt in enumerate(quick_lines):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = lt
+    r.font.size = Pt(13); r.font.color.rgb = NAVY
+    if lt.lstrip() != lt:
+        r.font.name = "Consolas"
+
+# Step 1: one-time setup
+box(s, 0.5, 3.35, 12.3, 0.45,
+    "Full rebuild  —  1.  One-time tool setup  (run once per machine)", fill=NAVY, size=13)
+tb = s.shapes.add_textbox(Inches(0.7), Inches(3.85), Inches(12.0), Inches(1.1))
+tf = tb.text_frame; tf.word_wrap = True
+cmds1 = [
+    "python setup_compiler.py      # pick the installed XC32 version",
+    "python setup_flasher.py       # assign Board 1 (GM) and Board 2 (FOL) to their EDBG debuggers",
+    "python setup_debug.py         # fix SAME54_DFP tool-pack (needed for VS Code debugging)",
+]
+for i, c in enumerate(cmds1):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = c
+    r.font.name = "Consolas"; r.font.size = Pt(12); r.font.color.rgb = NAVY
+
+# Step 2: build and flash
+box(s, 0.5, 4.95, 12.3, 0.45, "2.  Build and flash both boards", fill=NAVY, size=13)
+tb = s.shapes.add_textbox(Inches(0.7), Inches(5.45), Inches(12.0), Inches(0.85))
+tf = tb.text_frame; tf.word_wrap = True
+cmds2 = [
+    "build.bat                     # incremental build   (build.bat rebuild for a clean build)",
+    "python flash.py               # flash Board 1 and Board 2 in sequence",
+]
+for i, c in enumerate(cmds2):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = c
+    r.font.name = "Consolas"; r.font.size = Pt(12); r.font.color.rgb = NAVY
+
+# Step 3: run the demo
+box(s, 0.5, 6.30, 12.3, 0.45, "3.  Run the Cyclic Fire demo", fill=ACCENT, size=13)
+tb = s.shapes.add_textbox(Inches(0.7), Inches(6.80), Inches(12.0), Inches(1.1))
+tf = tb.text_frame; tf.word_wrap = True
+demo_lines = [
+    "Open two terminals (115200 8N1).  Wait for PTP state = FINE.  On each:",
+    "    cyclic_start_marker 5000 <anchor_ns>    # or:  python cyclic_fire_hw_test.py --marker --period-us 5000",
+]
+for i, lt in enumerate(demo_lines):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = lt
+    r.font.size = Pt(12); r.font.color.rgb = NAVY
+    if lt.lstrip() != lt:
+        r.font.name = "Consolas"
+
+# ============================================================================
+# 9. Agenda
 # ============================================================================
 add_slide(L_CONTENT, "Agenda", [
     "Part 0 — Overview & standalone button-LED demo",
-    "Part 1 — PTP theory (IEEE 1588)",
+    "Part 1 — Reproduce the demo on your own machine",
+    "Part 2 — PTP theory (IEEE 1588)",
     (1, "Clock model, message exchange, timestamp accuracy, error sources"),
-    "Part 2 — 10BASE-T1S context",
+    "Part 3 — 10BASE-T1S context",
     (1, "Single-pair multidrop PHY, PLCA, implications for PTP"),
-    "Part 3 — LAN8651 specifics",
+    "Part 4 — LAN8651 specifics",
     (1, "SPI MAC-PHY, timestamp engine, SFD-to-IRQ latency"),
-    "Part 4 — Cyclic Fire application",
+    "Part 5 — Cyclic Fire application",
     (1, "Concept, use cases, API and patterns"),
-    "Part 5 — PTP_CLOCK for firmware event logging",
+    "Part 6 — PTP_CLOCK for firmware event logging",
     (1, "API, usage pattern, cross-board correlation"),
-    "Part 6 — Measurement results, open issues & outlook",
-    "Part 7 — Reproducing the project on your own machine",
+    "Part 7 — Measurement results, open issues & outlook",
 ])
 
 # ============================================================================
@@ -892,120 +1058,6 @@ for i, n in enumerate(notes):
 # ============================================================================
 # Results — Cursor Measurement (Picture3)
 # ============================================================================
-# ============================================================================
-# Open issues & outlook
-# ============================================================================
-# ============================================================================
-# Part 7 — Reproducing the project: Prerequisites & Clone
-# ============================================================================
-s = prs.slides.add_slide(L_TITLE_ONLY)
-set_title(s, "Reproducing the Project — Prerequisites")
-
-# Hardware block
-box(s, 0.5, 1.5, 12.3, 0.55, "Hardware", fill=NAVY, size=14)
-label(s, 0.7, 2.1, 12.0, 0.6,
-      "2 × ATSAME54 Curiosity Ultra  +  2 × LAN865x click board  —  connected pair-to-pair over 10BASE-T1S",
-      size=14, color=NAVY)
-label(s, 0.7, 2.5, 12.0, 0.4,
-      "USB (EDBG) cables from each board to the PC for flashing and for the serial console (115200 8N1).",
-      size=13, color=GREY)
-
-# Software block
-box(s, 0.5, 3.15, 12.3, 0.55, "Software on the PC", fill=NAVY, size=14)
-bullets_notes = [
-    "MPLAB XC32 v4.60 or v5.x  (default path  C:\\Program Files\\Microchip\\xc32\\)",
-    "MPLAB X IDE / MDB  (used by flash.py to program the boards)",
-    "CMake ≥ 4.1  +  Ninja  (both on PATH)",
-    "Python 3.9+   with   pip install pyserial   (plus python-pptx only if you rebuild this deck)",
-    "Two terminal windows — one per board — e.g. PuTTY or Tera Term  (115200 8N1)",
-]
-tb = s.shapes.add_textbox(Inches(0.7), Inches(3.8), Inches(12.0), Inches(2.5))
-tf = tb.text_frame; tf.word_wrap = True
-for i, line_txt in enumerate(bullets_notes):
-    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-    r = p.add_run(); r.text = "• " + line_txt
-    r.font.size = Pt(14); r.font.color.rgb = NAVY
-
-# Clone block
-box(s, 0.5, 6.05, 12.3, 0.55, "Clone", fill=ACCENT, size=13)
-tb = s.shapes.add_textbox(Inches(0.7), Inches(6.65), Inches(12.0), Inches(0.8))
-tf = tb.text_frame; tf.word_wrap = True
-cmds = [
-    "git clone https://github.com/zabooh/net_10base_t1s.git",
-    "cd net_10base_t1s\\apps\\tcpip_iperf_lan865x\\firmware\\tcpip_iperf_lan865x.X",
-]
-for i, c in enumerate(cmds):
-    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-    r = p.add_run(); r.text = c
-    r.font.name = "Consolas"; r.font.size = Pt(13); r.font.color.rgb = NAVY
-
-# ============================================================================
-# Part 7 — Reproducing the project: Setup, Build, Flash, Run
-# ============================================================================
-s = prs.slides.add_slide(L_TITLE_ONLY)
-set_title(s, "Reproducing the Project — Setup, Build, Run")
-
-# Quick-path banner — skip the build entirely, just flash the checked-in HEX
-box(s, 0.5, 1.4, 12.3, 0.55,
-    "Quick path — no build required (just run the demo)", fill=OK, size=14)
-quick_lines = [
-    "After  git clone  and  python setup_flasher.py,  simply run:",
-    "    python flash.py",
-    "flash.py finds the newest pre-built HEX under  out/…/image/*.hex  (checked into the repo) "
-    "and programmes it onto both boards — no XC32 / CMake / build step needed.",
-]
-tb = s.shapes.add_textbox(Inches(0.7), Inches(2.0), Inches(12.0), Inches(1.4))
-tf = tb.text_frame; tf.word_wrap = True
-for i, lt in enumerate(quick_lines):
-    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-    r = p.add_run(); r.text = lt
-    r.font.size = Pt(13); r.font.color.rgb = NAVY
-    if lt.lstrip() != lt:
-        r.font.name = "Consolas"
-
-# Step 1: one-time setup
-box(s, 0.5, 3.35, 12.3, 0.45,
-    "Full rebuild  —  1.  One-time tool setup  (run once per machine)", fill=NAVY, size=13)
-tb = s.shapes.add_textbox(Inches(0.7), Inches(3.85), Inches(12.0), Inches(1.1))
-tf = tb.text_frame; tf.word_wrap = True
-cmds1 = [
-    "python setup_compiler.py      # pick the installed XC32 version",
-    "python setup_flasher.py       # assign Board 1 (GM) and Board 2 (FOL) to their EDBG debuggers",
-    "python setup_debug.py         # fix SAME54_DFP tool-pack (needed for VS Code debugging)",
-]
-for i, c in enumerate(cmds1):
-    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-    r = p.add_run(); r.text = c
-    r.font.name = "Consolas"; r.font.size = Pt(12); r.font.color.rgb = NAVY
-
-# Step 2: build and flash
-box(s, 0.5, 4.95, 12.3, 0.45, "2.  Build and flash both boards", fill=NAVY, size=13)
-tb = s.shapes.add_textbox(Inches(0.7), Inches(5.45), Inches(12.0), Inches(0.85))
-tf = tb.text_frame; tf.word_wrap = True
-cmds2 = [
-    "build.bat                     # incremental build   (build.bat rebuild for a clean build)",
-    "python flash.py               # flash Board 1 and Board 2 in sequence",
-]
-for i, c in enumerate(cmds2):
-    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-    r = p.add_run(); r.text = c
-    r.font.name = "Consolas"; r.font.size = Pt(12); r.font.color.rgb = NAVY
-
-# Step 3: run the demo
-box(s, 0.5, 6.30, 12.3, 0.45, "3.  Run the Cyclic Fire demo", fill=ACCENT, size=13)
-tb = s.shapes.add_textbox(Inches(0.7), Inches(6.80), Inches(12.0), Inches(1.1))
-tf = tb.text_frame; tf.word_wrap = True
-demo_lines = [
-    "Open two terminals (115200 8N1).  Wait for PTP state = FINE.  On each:",
-    "    cyclic_start_marker 5000 <anchor_ns>    # or:  python cyclic_fire_hw_test.py --marker --period-us 5000",
-]
-for i, lt in enumerate(demo_lines):
-    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-    r = p.add_run(); r.text = lt
-    r.font.size = Pt(12); r.font.color.rgb = NAVY
-    if lt.lstrip() != lt:
-        r.font.name = "Consolas"
-
 # ============================================================================
 # Open Issues & Outlook
 # ============================================================================
