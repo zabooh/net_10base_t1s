@@ -11,6 +11,7 @@
 #include "ptp_clock.h"
 #include "ptp_fol_task.h"
 #include "ptp_gm_task.h"
+#include "iperf_control.h"
 
 /* ---------------------------------------------------------------------------
  * Pin assignments — SAM E54 Curiosity Ultra (see User's Guide DS70005405A
@@ -114,6 +115,14 @@ static uint64_t         s_wd_last_cycles       = 0u;
  * master on" or "turn master off" (SW2 is a toggle in the master role). */
 static bool             s_is_follower      = false;
 static bool             s_is_master        = false;
+/* iperf control state — whether we've started the iperf server (on the
+ * master board via SW1) or iperf client (on the follower board via SW2).
+ * Each of those buttons is a toggle in this demo. */
+static bool             s_iperf_running    = false;
+
+#define IPERF_MASTER_IP             "192.168.0.10"
+#define IPERF_FOLLOWER_IP           "192.168.0.20"
+#define IPERF_NETMASK               "255.255.255.0"
 
 /* No per-LED counters any more — LED phase is computed stateless from
  * target_ns inside the decimator (see LED1_SLOT_NS / LED2_SLOT_NS). */
@@ -360,8 +369,36 @@ void standalone_demo_service(uint64_t current_tick)
          * disables the follower servo and returns to FREE.  Pressing
          * SW1 once more re-enables the follower. */
         s_is_follower = false;
+        if (s_iperf_running) { iperf_control_stop(); s_iperf_running = false; }
         PTP_FOL_SetMode(PTP_DISABLED);
         enter_state(DEMO_FREE, current_tick);
+    } else if (s_is_master && sw1_pressed
+               && (s_state == DEMO_SYNCING_GM || s_state == DEMO_SYNCED)) {
+        /* SW1 on master board → toggle iperf TCP server on
+         * 192.168.0.10:5001.  Pressing again stops the server. */
+        if (!s_iperf_running) {
+            if (iperf_control_set_ip(IPERF_MASTER_IP, IPERF_NETMASK)) {
+                iperf_control_server_start();
+                s_iperf_running = true;
+            }
+        } else {
+            iperf_control_stop();
+            s_iperf_running = false;
+        }
+    } else if (s_is_follower && sw2_pressed
+               && (s_state == DEMO_SYNCING_FOL
+                   || s_state == DEMO_SYNCED
+                   || s_state == DEMO_LOST)) {
+        /* SW2 on follower board → toggle iperf TCP client → 192.168.0.10 */
+        if (!s_iperf_running) {
+            if (iperf_control_set_ip(IPERF_FOLLOWER_IP, IPERF_NETMASK)) {
+                iperf_control_client_start(IPERF_MASTER_IP);
+                s_iperf_running = true;
+            }
+        } else {
+            iperf_control_stop();
+            s_iperf_running = false;
+        }
     }
 
     /* Progress check: move SYNCING → SYNCED when the local sync criterion

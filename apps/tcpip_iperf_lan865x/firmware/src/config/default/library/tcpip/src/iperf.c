@@ -267,8 +267,10 @@ static int      iperfInitCount = 0;         // iperf module initialization count
 
 static uint32_t sysFreq = 0U; 
 
-static void CommandIperfStart(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv);
-static void CommandIperfStop(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv);
+/* static removed so higher layers can invoke these directly without
+ * going through the SYS_CMD console parser (see iperf_control.h). */
+void CommandIperfStart(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv);
+void CommandIperfStop(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv);
 static void CommandIperfNetIf(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv);
 static void CommandIperfSize(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv);
 // Iperf command table
@@ -2307,7 +2309,7 @@ static tIperfState* GetIperfSession(void)
     return NULL;
 }
 
-static void CommandIperfStart(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv)
+void CommandIperfStart(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv)
 {
     size_t i, len;
     uint8_t tos;
@@ -2603,7 +2605,7 @@ static void CommandIperfStart(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv
     
 }
 
-static void CommandIperfStop(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv)
+void CommandIperfStop(SYS_CMD_DEVICE_NODE* pCmdIO, int argc, char** argv)
 {
     const void* cmdIoParam = pCmdIO->cmdIoParam;
     tIperfState* pIState;   
