@@ -2,6 +2,7 @@
 *.elf
 *.hex
 !**/image/*.hex
+!**/prebuilt/*.hex
 *.map
 *.d
 *.log
