@@ -746,29 +746,33 @@ add_slide(L_CONTENT, "LAN8651 — Device Overview", [
 s = prs.slides.add_slide(L_TITLE_ONLY)
 set_title(s, "LAN8651 — Timestamping Signal Path")
 
-# flow blocks
-box(s, 0.6, 2.1, 2.1, 1.0, "T1S wire\nSFD bit", fill=OK, size=13)
-box(s, 3.0, 2.1, 2.1, 1.0, "LAN8651 PHY\nSFD detect", fill=ACCENT, size=13)
-box(s, 5.4, 2.1, 2.1, 1.0, "LAN8651 MAC\ntimestamp latch", fill=ACCENT, size=13)
-box(s, 7.8, 2.1, 2.1, 1.0, "SPI readout\nto MCU", fill=NAVY, size=13)
-box(s, 10.2, 2.1, 2.1, 1.0, "nIRQ\nto MCU", fill=WARN, size=13)
-for x in [2.7, 5.1, 7.5, 9.9]:
-    line(s, x, 2.6, x+0.3, 2.6, color=GREY, width=2, arrow=True)
+# flow blocks — correct temporal order:
+#   SFD on wire → PHY detect → MAC latch → nIRQ → ISR (SW-TS + signal TC6) → SPI readout
+box(s, 0.35, 2.1, 1.9, 1.0, "T1S wire\nSFD bit",           fill=OK,     size=12)
+box(s, 2.50, 2.1, 2.0, 1.0, "LAN8651 PHY\nSFD detect",     fill=ACCENT, size=12)
+box(s, 4.75, 2.1, 2.0, 1.0, "LAN8651 MAC\ntimestamp latch",fill=ACCENT, size=12)
+box(s, 7.00, 2.1, 1.9, 1.0, "nIRQ\nto MCU",                fill=WARN,   size=12)
+box(s, 9.15, 2.1, 2.2, 1.0, "ISR: SW-TS +\nsignal TC6",    fill=NAVY,   size=12)
+box(s, 11.60, 2.1, 1.4, 1.0, "SPI\nreadout",               fill=NAVY,   size=12)
+for (x1, x2) in [(2.25, 2.50), (4.50, 4.75), (6.75, 7.00),
+                 (8.90, 9.15), (11.35, 11.60)]:
+    line(s, x1, 2.6, x2, 2.6, color=GREY, width=2, arrow=True)
 
 # annotations
 notes = [
-    "• TX path: MCU writes frame over SPI → MAC transmits → SFD on wire = t1 latched",
-    "• RX path: SFD on wire = t2 latched → MAC stores timestamp → nIRQ → MCU reads over SPI",
-    "• TX: ~800 µs from SFD-on-wire to the TX-timestamp-available nIRQ  (pipeline + SPI)",
-    "• RX: ~10 ms from SFD-on-wire to the RX-nIRQ   (LAN8651 behaviour)",
-    "• Both biases must be compensated outside PTP — protocol cannot see them",
+    "• MAC latches the hardware timestamp on the SFD bit — that is the 'ground truth' moment.",
+    "• LAN8651 then asserts nIRQ to the MCU.",
+    "• In the nIRQ ISR the driver captures the internal SW timestamp (SYS_TIME tick) — pairs SFD with MCU time, semi-deterministic.",
+    "• The ISR then signals the TC6 driver layer, which later performs the SPI transfer that carries the frame and the HW timestamp to the host.",
+    "• RX bias: ~10 ms from SFD-on-wire to the RX-nIRQ assertion on the LAN8651 — compensated outside PTP (PTP_FOL_ANCHOR_OFFSET_NS).",
+    "• TX bias: ~800 µs from SFD-on-wire to TX-timestamp nIRQ — compensated via PTP_GM_ANCHOR_OFFSET_NS.",
 ]
-tb = s.shapes.add_textbox(Inches(0.6), Inches(3.4), Inches(12.0), Inches(3.5))
+tb = s.shapes.add_textbox(Inches(0.5), Inches(3.4), Inches(12.3), Inches(3.5))
 tf = tb.text_frame; tf.word_wrap = True
 for i, n in enumerate(notes):
     p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
     r = p.add_run(); r.text = n
-    r.font.size = Pt(16); r.font.color.rgb = NAVY
+    r.font.size = Pt(14); r.font.color.rgb = NAVY
 
 # ============================================================================
 # 11. LAN8651 — Calibrating the biases
