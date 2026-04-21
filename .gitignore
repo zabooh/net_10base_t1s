@@ -2,7 +2,7 @@
 *.elf
 *.hex
 !**/image/*.hex
-!**/prebuilt/*.hex
+!**/out/tcpip_iperf_lan865x/default.hex
 *.map
 *.d
 *.log

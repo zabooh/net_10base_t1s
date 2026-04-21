@@ -4,13 +4,14 @@ flash.py
 --------
 Programs the iperf firmware image onto two boards via MPLAB MDB.
 
+Always programs out/tcpip_iperf_lan865x/default.hex.  That HEX is
+checked in to git so a fresh clone flashes the current demo firmware
+out-of-the-box without needing to build first.  A local build.bat run
+overwrites the HEX in place, so the next flash picks up the new image.
+
 Out-of-the-box after a fresh clone:
   1. python setup_flasher.py      # detect + assign the two debugger COM ports
-  2. python flash.py              # flashes prebuilt/ptp_standalone_demo.hex
-
-After a local build (build.bat), flash.py automatically prefers the
-freshly-built out/tcpip_iperf_lan865x/default.hex instead of the
-checked-in prebuilt image.  Override either default with --hex <path>.
+  2. python flash.py              # programs the checked-in default.hex
 
 Usage:
   python flash.py
@@ -26,17 +27,7 @@ import json
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Default HEX resolution:
-#   1. Fresh build output  (out/tcpip_iperf_lan865x/default.hex) — preferred
-#      when the user has just run build.bat.
-#   2. Prebuilt demo HEX   (prebuilt/ptp_standalone_demo.hex) — checked in
-#      for out-of-the-box experience: after clone + setup_flasher.py,
-#      "python flash.py" immediately programs both boards without needing
-#      an XC32 toolchain + full build.
-# --hex <path> overrides everything.
-HEX_BUILD_OUTPUT = os.path.join(_HERE, r"out\tcpip_iperf_lan865x\default.hex")
-HEX_PREBUILT     = os.path.join(_HERE, r"prebuilt\ptp_standalone_demo.hex")
-HEX_DEFAULT      = HEX_BUILD_OUTPUT if os.path.isfile(HEX_BUILD_OUTPUT) else HEX_PREBUILT
+HEX_DEFAULT = os.path.join(_HERE, r"out\tcpip_iperf_lan865x\default.hex")
 
 CONFIG_FILE = os.path.join(_HERE, "setup_flasher.config")
 
