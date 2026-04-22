@@ -41,6 +41,7 @@
 #include "pd10_blink.h"
 #include "pd10_blink_cli.h"
 #include "standalone_demo.h"
+#include "test_exception_cli.h"
 #include "ptp_rx.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
@@ -86,6 +87,7 @@ static void Command_Init(void) {
     LOOP_STATS_CLI_Register();
     CYCLIC_FIRE_CLI_Register();
     PD10_BLINK_CLI_Register();
+    TEST_EXCEPTION_CLI_Register();
 }
 
 // *****************************************************************************
