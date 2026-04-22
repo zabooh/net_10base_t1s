@@ -164,6 +164,15 @@ FAULT_NAME_PAT = re.compile(r"^Fault\s*:\s*(\S+)", re.MULTILINE)
 
 
 def parse_dump(text):
+    """Pull register-name → value pairs out of the raw dump text.
+    Normalises CRLF to LF and strips zero-width / non-breaking
+    characters that some terminals inject around copy operations."""
+    if not text:
+        return {}, None
+    # Normalise line endings + strip BOM / zero-width clipboard noise.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("﻿", "").replace("​", "")
+
     found = {}
     for m in DUMP_KEY_PAT.finditer(text):
         name, val = m.group(1), m.group(2)
@@ -175,7 +184,7 @@ def parse_dump(text):
     fm = FAULT_NAME_PAT.search(text)
     if fm:
         fault = fm.group(1)
-    return found, fault
+    return found, fault, text
 
 
 def parse_addr(s):
@@ -412,9 +421,29 @@ def main():
             raw = read_file(args.file)
         else:
             raw = read_paste_or_stdin(args.stdin)
-        regs, fault_name = parse_dump(raw)
+        regs, fault_name, normalised = parse_dump(raw)
         if not regs:
-            sys.exit("[ERROR] No recognisable register lines in input.")
+            print("[ERROR] No recognisable register lines in input.", file=sys.stderr)
+            print(f"[DEBUG] Raw length: {len(raw)} chars  "
+                  f"({sum(1 for c in raw if c == chr(10))} LF, "
+                  f"{sum(1 for c in raw if c == chr(13))} CR)",
+                  file=sys.stderr)
+            preview = normalised[:400].replace("\t", "·").replace("\n", "\\n\n")
+            print("[DEBUG] First 400 chars after normalisation:",
+                  file=sys.stderr)
+            print("--------------------------------------------",
+                  file=sys.stderr)
+            print(preview, file=sys.stderr)
+            print("--------------------------------------------",
+                  file=sys.stderr)
+            print("[HINT] Expected lines like 'PC (EXCEPTION ADDRESS) = 0x000249d4'.",
+                  file=sys.stderr)
+            print("       If the clipboard came from a non-text format (e.g. RTF",
+                  file=sys.stderr)
+            print("       from PuTTY's Edit menu), try copying as plain text or",
+                  file=sys.stderr)
+            print("       use --file <path>.", file=sys.stderr)
+            return 3
         print_decoded_dump(regs, fault_name)
         # Resolve PC + stacked LR (LR is "return address" of the
         # function in which the fault happened — the caller).
