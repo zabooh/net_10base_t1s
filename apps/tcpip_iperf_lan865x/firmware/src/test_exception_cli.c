@@ -28,29 +28,7 @@
 
 static void usage(void)
 {
-    SYS_CONSOLE_PRINT(
-        "test_exception <kind>  — deliberately crash the CPU to test the\r\n"
-        "                         fault-dump-and-reset path.\r\n"
-        "\r\n"
-        "Available kinds (type the command shown in the first column):\r\n"
-        "\r\n"
-        "  test_exception null_read    load  from NULL  -> BusFault (PRECISERR)\r\n"
-        "  test_exception null_write   store to   NULL  -> BusFault (PRECISERR)\r\n"
-        "  test_exception unaligned    unaligned 32-bit load -> UsageFault\r\n"
-        "                              (UNALIGNED) once UNALIGN_TRP is set\r\n"
-        "  test_exception undef        execute undefined instr -> UsageFault\r\n"
-        "                              (UNDEFINSTR)\r\n"
-        "  test_exception divzero      integer / 0 -> UsageFault (DIVBYZERO)\r\n"
-        "                              once DIV_0_TRP is set\r\n"
-        "  test_exception svcall       SVC #0 -> SVCall_Handler dump path\r\n"
-        "  test_exception hang         busy-loop, IRQs ON  -> WDT Early-Warning\r\n"
-        "                              fires after ~1 s and dumps 'WatchdogEW'\r\n"
-        "  test_exception hang_irqoff  busy-loop, IRQs OFF -> EW masked,\r\n"
-        "                              hardware WDT reset @ ~2 s (no dump)\r\n"
-        "\r\n"
-        "All faulting kinds dump CFSR/HFSR/MMFAR/BFAR + R0-R3,R12,LR,PC,xPSR\r\n"
-        "via SERCOM1 then issue NVIC_SystemReset(); decode with\r\n"
-        "find_exception.py.\r\n");
+    SYS_CONSOLE_PRINT("test_exception <kind>  kind: null_read|null_write|unaligned|undef|divzero|svcall|hang|hang_irqoff\r\n");
 }
 
 /* Each trigger function is no-inline + volatile-cast to defeat the
@@ -168,7 +146,7 @@ static void test_exception_cmd(SYS_CMD_DEVICE_NODE *p, int argc, char **argv)
 
 static const SYS_CMD_DESCRIPTOR test_exc_cmd_tbl[] = {
     {"test_exception", (SYS_CMD_FNC)test_exception_cmd,
-     ": deliberately trigger a CPU fault (test_exception <kind>)"},
+     ": test_exception <kind>  kind: null_read|null_write|unaligned|undef|divzero|svcall|hang|hang_irqoff"},
 };
 
 void TEST_EXCEPTION_CLI_Register(void)
@@ -176,5 +154,5 @@ void TEST_EXCEPTION_CLI_Register(void)
     (void)SYS_CMD_ADDGRP(test_exc_cmd_tbl,
                          (int)(sizeof(test_exc_cmd_tbl) / sizeof(*test_exc_cmd_tbl)),
                          "test-exception",
-                         ": deliberate-fault trigger commands");
+                         "");
 }
