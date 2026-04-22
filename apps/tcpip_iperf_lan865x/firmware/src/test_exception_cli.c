@@ -28,12 +28,29 @@
 
 static void usage(void)
 {
-    SYS_CONSOLE_PRINT("test_exception <kind>\r\n"
-                      "  null_read  null_write  unaligned\r\n"
-                      "  undef      divzero     svcall\r\n"
-                      "  hang        — busy-loop with IRQs ON  (WDT EW fires)\r\n"
-                      "  hang_irqoff — busy-loop with IRQs OFF (WDT EW masked,\r\n"
-                      "                hardware WDT reset still hits at 2 s)\r\n");
+    SYS_CONSOLE_PRINT(
+        "test_exception <kind>  — deliberately crash the CPU to test the\r\n"
+        "                         fault-dump-and-reset path.\r\n"
+        "\r\n"
+        "Available kinds (type the command shown in the first column):\r\n"
+        "\r\n"
+        "  test_exception null_read    load  from NULL  -> BusFault (PRECISERR)\r\n"
+        "  test_exception null_write   store to   NULL  -> BusFault (PRECISERR)\r\n"
+        "  test_exception unaligned    unaligned 32-bit load -> UsageFault\r\n"
+        "                              (UNALIGNED) once UNALIGN_TRP is set\r\n"
+        "  test_exception undef        execute undefined instr -> UsageFault\r\n"
+        "                              (UNDEFINSTR)\r\n"
+        "  test_exception divzero      integer / 0 -> UsageFault (DIVBYZERO)\r\n"
+        "                              once DIV_0_TRP is set\r\n"
+        "  test_exception svcall       SVC #0 -> SVCall_Handler dump path\r\n"
+        "  test_exception hang         busy-loop, IRQs ON  -> WDT Early-Warning\r\n"
+        "                              fires after ~1 s and dumps 'WatchdogEW'\r\n"
+        "  test_exception hang_irqoff  busy-loop, IRQs OFF -> EW masked,\r\n"
+        "                              hardware WDT reset @ ~2 s (no dump)\r\n"
+        "\r\n"
+        "All faulting kinds dump CFSR/HFSR/MMFAR/BFAR + R0-R3,R12,LR,PC,xPSR\r\n"
+        "via SERCOM1 then issue NVIC_SystemReset(); decode with\r\n"
+        "find_exception.py.\r\n");
 }
 
 /* Each trigger function is no-inline + volatile-cast to defeat the

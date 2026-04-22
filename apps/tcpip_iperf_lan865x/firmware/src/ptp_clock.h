@@ -74,4 +74,26 @@ bool     PTP_CLOCK_IsValid(void);
  */
 void     PTP_CLOCK_ForceSet(uint64_t wallclock_ns);
 
+/**
+ * Get / set the IIR drift filter window.  Larger N → lower
+ * steady-state jitter floor (∝ 1/√N) but slower convergence
+ * (half-life ≈ 0.7 × N samples × 125 ms Sync interval).
+ * Default = 128 (≈ 11 s half-life, ~24 µs per-board servo MAD).
+ * Acceptable range: 8 .. 4096.  Values outside are clamped.
+ */
+int32_t  PTP_CLOCK_GetDriftIIRN(void);
+void     PTP_CLOCK_SetDriftIIRN(int32_t n);
+
+/**
+ * Re-arm the adaptive IIR warm-up ramp without changing the configured
+ * steady-state N.  Use this from test scripts to make settle-time
+ * measurements reproducible — after a reset the next ~N_max samples
+ * will progressively tighten α from 1 down to 1/N_max.
+ *
+ * Has no effect on the current anchor (wallclock_ns, sys_tick), only on
+ * the drift estimator: clears s_drift_valid and the sample counter so
+ * the next PTP_CLOCK_Update() seeds the filter freshly.
+ */
+void     PTP_CLOCK_ResetDriftFilter(void);
+
 #endif /* PTP_CLOCK_H */

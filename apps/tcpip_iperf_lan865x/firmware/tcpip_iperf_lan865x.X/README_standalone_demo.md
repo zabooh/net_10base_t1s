@@ -57,9 +57,11 @@ drifting — the whole point of PTP.
    - LED2 on Board B starts **blinking at 2 Hz**.
    - Board B also begins transmitting PTP Sync frames; Board A's servo
      sees them and begins converging.
-4. **Wait ~2 s.** Both LED2 transition from blinking to **SOLID ON** —
-   Board A when its servo reaches `FINE`, Board B after a fixed 2 s
-   blink window matching Board A's typical lock time.
+4. **Wait ~3 s.** Both LED2 transition from blinking to **SOLID ON** —
+   Board A when its servo reaches `FINE` (typically 2.7 s after SW1, with
+   the adaptive drift filter described in
+   [README_drift_filter.md](README_drift_filter.md)), Board B after a fixed
+   2 s blink window matching Board A's typical lock time.
 5. **Observe LED1**: the two boards' 1 Hz rectangles are now phase-locked
    and do not drift apart over time.
 
@@ -212,7 +214,10 @@ The test guides the operator through three phases:
    for both LED2 solid.
 4. **Step 3** — 6 s post-sync capture.  Expect median cross-board
    rising-edge delta well under 50 ms (the human-visual threshold) and
-   ideally under 1 ms.
+   ideally under 1 ms.  Measured 2026-04-23 with the adaptive drift
+   filter + TC1-ISR cyclic_fire backend: **median −32 µs, MAD 39 µs,
+   0.0 ppm cross-board rate match** on a 60 s capture (full numbers and
+   methodology in [README_drift_filter.md](README_drift_filter.md) §5).
 
 ### Useful flags
 

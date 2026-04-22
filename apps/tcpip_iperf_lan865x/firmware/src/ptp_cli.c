@@ -178,6 +178,26 @@ static void clk_set_drift_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv
     SYS_CONSOLE_PRINT("clk_set_drift: drift_ppb forced to %+ld\r\n", (long)ppb);
 }
 
+static void drift_iir_n_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc < 2) {
+        SYS_CONSOLE_PRINT("drift_iir_n: current = %ld  (default 128, range 8..4096)\r\n",
+                          (long)PTP_CLOCK_GetDriftIIRN());
+        SYS_CONSOLE_PRINT("  larger N -> lower jitter floor (1/sqrt(N)) but slower\r\n"
+                          "  convergence (half-life ~ 0.7*N samples * 125 ms Sync interval)\r\n");
+        return;
+    }
+    int32_t n = (int32_t)strtol(argv[1], NULL, 0);
+    PTP_CLOCK_SetDriftIIRN(n);
+    SYS_CONSOLE_PRINT("drift_iir_n set to %ld\r\n", (long)PTP_CLOCK_GetDriftIIRN());
+}
+
+static void drift_iir_reset_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO; (void)argc; (void)argv;
+    PTP_CLOCK_ResetDriftFilter();
+    SYS_CONSOLE_PRINT("drift_iir_reset: warm-up ramp re-armed (samples=0)\r\n");
+}
+
 static void ptp_gm_delay_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     (void)pCmdIO;
     if (argc < 2) {
@@ -205,6 +225,8 @@ static const SYS_CMD_DESCRIPTOR ptp_cmd_tbl[] = {
     {"ptp_offset_dump",  (SYS_CMD_FNC) ptp_offset_dump_cmd,  ": dump all recorded offsets (one per line, <ns> <status>)"},
     {"ptp_gm_delay",     (SYS_CMD_FNC) ptp_gm_delay_cmd,     ": diagnostic: set extra ns added to GM anchor_wc (ptp_gm_delay [<ns>])"},
     {"clk_set_drift",    (SYS_CMD_FNC) clk_set_drift_cmd,    ": diagnostic: manually set PTP_CLOCK drift_ppb (clk_set_drift [<ppb>])"},
+    {"drift_iir_n",      (SYS_CMD_FNC) drift_iir_n_cmd,      ": get/set PTP_CLOCK drift IIR window N (drift_iir_n [<8..4096>])"},
+    {"drift_iir_reset",  (SYS_CMD_FNC) drift_iir_reset_cmd,  ": re-arm adaptive IIR warm-up (fast convergence with low jitter floor)"},
 };
 
 void PTP_CLI_Register(void) {

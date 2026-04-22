@@ -40,6 +40,14 @@ the synchronised link:
 
 **[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_standalone\_demo.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_standalone_demo.md)**
 
+For the **PTP_CLOCK drift filter** — adaptive single-pole IIR design that
+breaks the usual settle-vs-jitter trade-off (warm-up α=1 → steady-state
+α=1/N_max), runtime CLI tuning, fixed-vs-adaptive measurement comparison
+on the cyclic_fire cross-board edges (~7 µs MAD vs ~25 µs MAD), and
+guidance on choosing N_max for different operating conditions — see:
+
+**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_drift\_filter.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_drift_filter.md)**
+
 ---
 
 ### Origin
@@ -907,6 +915,24 @@ PTP_CLOCK_SetDriftPPB((int32_t)((rateRatioFIR - 1.0) * 1e9));
 
 Observed values: **−19 ppb mean, ±31 ppb stdev** residual after TISUBN correction.
 Resets to 0 on `clk_set 0` (`PTP_CLOCK_ForceSet()`).
+
+The drift estimate inside `ptp_clock.c` is filtered with an **adaptive
+single-pole IIR**: the effective filter window grows from 1 (sample 1) up to
+the configured ceiling `s_drift_iir_n` (default 128) as samples accumulate.
+This breaks the usual single-pole settle-vs-jitter trade-off: warm-up converges
+in sub-second time, while the steady-state jitter floor stays at the 1/√N_max
+level (~7 µs MAD on cyclic_fire cross-board edges, measured 2026-04-23).
+
+Two CLI commands tune the filter at runtime:
+
+| Command | Effect |
+|---------|--------|
+| `drift_iir_n [<8..4096>]` | Get/set the steady-state ceiling N_max (default 128). Larger N → lower jitter floor, longer ramp to that floor. Warm-up speed is unaffected. |
+| `drift_iir_reset` | Re-arm the warm-up ramp (sample counter → 0). Used by test scripts to make settle-time measurements reproducible. |
+
+Full design rationale, measurement methodology, fixed-vs-adaptive comparison,
+and tuning guidance:
+**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_drift\_filter.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_drift_filter.md)**
 
 ### Cross-Board Synchronization
 

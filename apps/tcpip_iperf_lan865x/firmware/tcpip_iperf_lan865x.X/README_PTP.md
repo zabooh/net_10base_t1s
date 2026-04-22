@@ -26,6 +26,7 @@
 - [11. Measured Performance](#11-measured-performance)
 - [12. PTP_CLOCK Accuracy When Used From Application Code](#12-ptp_clock-accuracy-when-used-from-application-code)
 - [13. See Also — Software NTP Companion](#13-see-also--software-ntp-companion)
+- [14. See Also — Drift Filter Design](#14-see-also--drift-filter-design)
 
 ---
 
@@ -659,11 +660,19 @@ PTP_CLOCK_Update(wallclock_ns, sys_tick):
             residual_ns = dwc_ns - expected_ns
             inst_ppb    = -residual_ns × 1e9 / expected_ns
             if |inst_ppb| < DRIFT_SANITY_PPB_ABS (5000 ppm):
-                // IIR blend (α = 1/N, N = 128):
-                // N was 32 until 2026-04-20; raised to 128 after
-                // drift_filter_analysis.py showed ~47 ppm filter stddev
-                // with strong lag-1 autocorrelation (random walk).
-                s_drift_ppb = ((N-1) × s_drift_ppb + inst_ppb) / N
+                // Adaptive IIR blend (α = 1/N_eff):
+                //   N_eff = min(s_drift_samples, s_drift_iir_n)
+                // Warm-up ramp gives α=1 → 1/2 → 1/4 ... in the first
+                // few samples after a fresh lock (sub-second response),
+                // then settles into steady-state α=1/N_max once the
+                // sample counter exceeds the configured ceiling.
+                // Breaks the usual single-pole settle-vs-jitter trade-off.
+                // s_drift_iir_n is runtime-tunable via `drift_iir_n` CLI
+                // (default 128, range 8..4096); `drift_iir_reset` re-arms
+                // the ramp without disturbing the anchor.  See
+                // README_drift_filter.md for the full design rationale.
+                s_drift_ppb = ((N_eff-1) × s_drift_ppb + inst_ppb) / N_eff
+                s_drift_samples++
     anchor_wc_ns = wallclock_ns
     anchor_tick  = sys_tick
     valid = true
@@ -990,7 +999,7 @@ accuracy, because the read happens some distance away from the event of interest
 | 1. Clock value itself | HW-PTP FINE anchor error + drift-corrected TC0 interpolation | ~100 ns – 1 µs |
 | 2. Call-site latency | ISR dispatch, FreeRTOS scheduling, stack processing between event and `GetTime_ns()` call | 200 ns (ISR) – several ms (task under load) |
 | 3. Cross-board SW stamping (2 boards stamp same external event) | Forward/reverse path asymmetry in SPI + TCP/IP stack | ~25 µs (measured, see README_NTP §7) |
-| 4. Cross-board SW firing (2 boards fire GPIO at same PTP-wallclock moment) | Anchor-strategy asymmetry + drift-filter short-term wander + main-loop / tfuture spin latency | ~30 µs median, ~35 µs MAD (measured 2026-04-20 with ISR-captured GM anchor + `DRIFT_IIR_N=128`, via `cyclic_fire_hw_test.py`) |
+| 4. Cross-board SW firing (2 boards fire GPIO at same PTP-wallclock moment) | Anchor-strategy asymmetry + drift-filter short-term wander + main-loop / tfuture spin latency | **~7 µs MAD (10 s capture) / ~39 µs MAD (60 s capture)** — measured 2026-04-23 with TC1-ISR cyclic_fire backend + adaptive IIR drift filter (warm-up α=1 → steady-state α=1/128). 60 s window also shows **0.0 ppm cross-board rate match**. See [README_drift_filter.md](README_drift_filter.md) §5. Previous values with fixed `DRIFT_IIR_N=128`: ~30 µs median, ~35 µs MAD. |
 
 ### 12.2 Practical guidance
 
@@ -1035,3 +1044,27 @@ Among its findings (full results in `README_NTP.md` §7 and §8):
   more accurate but also inherently steadier.
 
 Full documentation: [README_NTP.md](README_NTP.md).
+
+---
+
+## 14. See Also — Drift Filter Design
+
+The PTP_CLOCK software clock relies on a **drift-correction IIR filter** that
+estimates the live ratio between the ATSAME54 TC0 tick rate and the GM PTP
+wallclock. The filter design choices directly determine both the convergence
+time after a fresh PTP lock and the steady-state jitter floor seen by callers
+of `PTP_CLOCK_GetTime_ns()`.
+
+The filter uses an **adaptive single-pole IIR** with an exponential α schedule:
+during warm-up (first ~N_max samples after a fresh lock) the effective N grows
+sample-by-sample so α starts near 1.0 and shrinks toward the configured
+1/N_max — this gives sub-second convergence without sacrificing the
+steady-state jitter floor (~7 µs MAD measured at default N=128).
+
+Two CLI commands expose the filter at runtime:
+
+- `drift_iir_n [<N>]` — get/set steady-state ceiling (8..4096, default 128)
+- `drift_iir_reset` — re-arm the warm-up ramp for reproducible measurements
+
+Full design rationale, measurement methodology, fixed-vs-adaptive comparison,
+and tuning guidance: [README_drift_filter.md](README_drift_filter.md).

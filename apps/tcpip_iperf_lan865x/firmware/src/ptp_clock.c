@@ -37,7 +37,27 @@
  * Per-sample noise from 5 µs sysTickAtRx jitter over a 125 ms interval
  * is ~40 ppm; √N averaging brings the steady-state floor to ~4 ppm
  * within one time constant. */
-#define DRIFT_IIR_N  128
+#define DRIFT_IIR_N_DEFAULT  128
+
+/* Adaptive single-pole IIR with exponential α schedule.
+ *
+ * s_drift_iir_n is the steady-state filter window (the maximum N that
+ * the recurrence ever uses).  At each sample the EFFECTIVE N is
+ *
+ *   N_eff = min(samples_since_reset, s_drift_iir_n)
+ *
+ * so the very first samples after a fresh PTP_CLOCK lock use a small
+ * N (fast convergence: α≈1 → α=1/8 → α=1/64 → ...), then the filter
+ * settles into the configured steady-state α=1/N_max.  This breaks the
+ * usual single-pole trade-off — settle is now bounded by the warm-up
+ * ramp (a few samples = sub-second), while the long-term jitter floor
+ * stays at the 1/√N_max value.
+ *
+ * `drift_iir_n` CLI sets the steady-state ceiling.  `drift_iir_reset`
+ * CLI rewinds the sample counter so the warm-up ramp re-runs (used by
+ * the test scripts to make measurements reproducible). */
+static int32_t  s_drift_iir_n        = DRIFT_IIR_N_DEFAULT;
+static uint32_t s_drift_samples      = 0u;
 
 /* Sanity window for the per-sample instantaneous ppb estimate.
  * Accepts up to ±5000 ppm.  Must cover the combined crystal mismatch
@@ -126,13 +146,25 @@ void PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick)
 
             if (inst_ppb > -DRIFT_SANITY_PPB_ABS && inst_ppb < DRIFT_SANITY_PPB_ABS) {
                 if (s_drift_valid) {
+                    /* Adaptive N: ramp from 1 → s_drift_iir_n.  Effective N
+                     * starts small so the first samples after a fresh lock
+                     * pull the estimate hard toward inst (α≈1), then settles
+                     * into the configured steady-state α=1/N_max once
+                     * s_drift_samples has caught up. */
+                    int32_t n_eff = ((uint32_t)s_drift_iir_n > s_drift_samples)
+                                  ? (int32_t)s_drift_samples
+                                  : s_drift_iir_n;
+                    if (n_eff < 1) n_eff = 1;
                     /* s_drift_ppb = ((N-1)*old + inst) / N   (IIR) */
-                    int64_t blended = ((int64_t)s_drift_ppb * (DRIFT_IIR_N - 1)
-                                       + inst_ppb) / DRIFT_IIR_N;
+                    int64_t blended = ((int64_t)s_drift_ppb * (n_eff - 1)
+                                       + inst_ppb) / n_eff;
                     s_drift_ppb = (int32_t)blended;
                 } else {
                     s_drift_ppb   = (int32_t)inst_ppb;
                     s_drift_valid = true;
+                }
+                if (s_drift_samples < 0xFFFFFFFFu) {
+                    s_drift_samples++;
                 }
             }
             /* Out-of-range sample: silently skip, keep previous estimate. */
@@ -169,8 +201,9 @@ void PTP_CLOCK_SetDriftPPB(int32_t drift_ppb)
     /* Kept for backward compatibility with callers that pushed a rate
      * estimate from the FOL servo.  Overwrites the IIR state; the next
      * PTP_CLOCK_Update() will resume filtering from this new seed. */
-    s_drift_ppb   = drift_ppb;
-    s_drift_valid = true;
+    s_drift_ppb     = drift_ppb;
+    s_drift_valid   = true;
+    s_drift_samples = 0u;     /* re-arm warm-up ramp from this seed */
 }
 
 bool PTP_CLOCK_IsValid(void)
@@ -182,9 +215,35 @@ void PTP_CLOCK_ForceSet(uint64_t wallclock_ns)
 {
     /* Capture tick as close as possible to the moment the caller issues the set */
     uint64_t tick = SYS_TIME_Counter64Get();
-    s_anchor_wc_ns = wallclock_ns;
-    s_anchor_tick  = tick;
-    s_drift_ppb    = 0;
-    s_drift_valid  = false;   /* re-learn rate after a manual set */
-    s_valid        = true;
+    s_anchor_wc_ns  = wallclock_ns;
+    s_anchor_tick   = tick;
+    s_drift_ppb     = 0;
+    s_drift_valid   = false;   /* re-learn rate after a manual set */
+    s_drift_samples = 0u;
+    s_valid         = true;
+}
+
+void PTP_CLOCK_ResetDriftFilter(void)
+{
+    /* Re-arm the warm-up ramp without disturbing the current rate
+     * estimate seed.  The next handful of samples will use small
+     * N (large α) and pull the filter quickly toward the live
+     * crystal drift, then settle into the configured steady state.
+     * Used by test scripts to make settle-time measurements
+     * reproducible across runs. */
+    s_drift_samples = 0u;
+    s_drift_valid   = false;
+    s_drift_ppb     = 0;
+}
+
+int32_t PTP_CLOCK_GetDriftIIRN(void)
+{
+    return s_drift_iir_n;
+}
+
+void PTP_CLOCK_SetDriftIIRN(int32_t n)
+{
+    if (n < 8)    n = 8;
+    if (n > 4096) n = 4096;
+    s_drift_iir_n = n;
 }
