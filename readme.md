@@ -48,6 +48,14 @@ guidance on choosing N_max for different operating conditions — see:
 
 **[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_drift\_filter.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_drift_filter.md)**
 
+For the **exception dump + watchdog + find_exception.py** crash-diagnostics
+subsystem — Cortex-M4 fault handler trampolines + register dump over
+SERCOM1, SAM E54 WDT with Early-Warning catching silent hangs,
+`test_exception` CLI for verifying the dump path, and the Python decoder
+that maps the dumped PC back to the C source line — see:
+
+**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_exception\_dump.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_exception_dump.md)**
+
 ---
 
 ### Origin
