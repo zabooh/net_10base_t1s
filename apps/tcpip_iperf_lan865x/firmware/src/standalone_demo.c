@@ -287,14 +287,15 @@ void standalone_demo_init(void)
      * callback already counts. */
     cyclic_fire_set_user_callback(demo_decimator);
 
-    /* Stick with the main-loop-polled tfuture backend (the TC1 ISR
-     * variant is implemented in cyclic_fire_isr.c and still callable
-     * via cyclic_fire_use_isr_path(true), but enabling it here
-     * pushed PTP lock time from ~2 s to ~13 s on this hardware: the
-     * 4 kHz ISR preempts the main loop continuously, slowing the
-     * PTP-FOL Sync-frame processing during the lock phase.  The ~5 µs
-     * vs ~200 ns jitter difference is invisible to the eye anyway and
-     * doesn't matter for the visible 1 Hz LED demo. */
+    /* Branch cyclic-isr: drive cyclic_fire via the TC1 compare-match
+     * ISR backend (cyclic_fire_isr.c) instead of the main-loop-polled
+     * tfuture path.  Earlier attempts with this backend slowed PTP
+     * lock from 2.6 s to >30 s — but the root cause was the blocking
+     * watchdog_kick (now fixed in the parent iperf-payload-test
+     * branch).  With non-blocking kick the ISR variant should give
+     * sub-µs visible jitter without compromising lock time. */
+    cyclic_fire_isr_init();
+    cyclic_fire_use_isr_path(true);
 
     /* Start cyclic_fire in free-run + SILENT mode.  SILENT skips the
      * native 250 µs PD10 toggle inside cyclic_fire — the decimator below
