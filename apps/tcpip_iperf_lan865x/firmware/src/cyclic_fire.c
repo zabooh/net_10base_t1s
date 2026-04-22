@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "tfuture.h"
+#include "cyclic_fire_isr.h"
 #include "ptp_clock.h"
 #include "system/ports/sys_ports.h"
 
@@ -28,6 +29,15 @@ static uint32_t              s_saved_spin_us      = 0u;
 static cyclic_fire_pattern_t s_pattern            = CYCLIC_FIRE_PATTERN_SQUARE;
 static uint32_t              s_marker_phase       = 0u;   /* 0..9, MARKER pattern */
 static cyclic_fire_user_cb_t s_user_cb            = NULL; /* optional decimator hook */
+static bool                  s_use_isr_path       = false; /* Phase-1 off by default */
+
+/* Thin abstraction over the two available timing backends.  Kept in
+ * one place so the re-arm site in fire_callback() stays a single line. */
+static inline bool arm_backend(uint64_t target_ns)
+{
+    return s_use_isr_path ? cyclic_fire_isr_arm_at_ns(target_ns)
+                          : tfuture_arm_at_ns(target_ns);
+}
 
 static void fire_callback(uint64_t target_ns, uint64_t actual_ns)
 {
@@ -87,16 +97,17 @@ static void fire_callback(uint64_t target_ns, uint64_t actual_ns)
     if (s_user_cb != NULL) {
         s_user_cb(target_ns);
     }
-    /* Robust re-arm: if tfuture refuses the next target (e.g. because a
-     * PTP_CLOCK anchor jump at role-change made next_target_ns inconsistent
-     * with the new PTP_CLOCK domain), fall back to "now + half_period" so
-     * the callback chain doesn't silently die.  Each retry bumps s_misses
-     * so the stuck condition is visible via cyclic_status. */
-    if (!tfuture_arm_at_ns(next_target_ns)) {
+    /* Robust re-arm: if the backend refuses the next target (e.g. because
+     * a PTP_CLOCK anchor jump at role-change made next_target_ns
+     * inconsistent with the new PTP_CLOCK domain), fall back to
+     * "now + half_period" so the callback chain doesn't silently die.
+     * Each retry bumps s_misses so the stuck condition is visible via
+     * cyclic_status. */
+    if (!arm_backend(next_target_ns)) {
         next_target_ns   = PTP_CLOCK_GetTime_ns() + half_period_ns;
         s_last_target_ns = next_target_ns;
         s_misses++;
-        (void)tfuture_arm_at_ns(next_target_ns);
+        (void)arm_backend(next_target_ns);
     }
     s_cycles++;
 }
@@ -168,16 +179,28 @@ bool cyclic_fire_start_ex(uint32_t period_us, uint64_t phase_anchor_ns,
     s_cycles          = 0u;
     s_misses          = 0u;
     s_last_target_ns  = first_target_ns;
-    s_saved_spin_us   = tfuture_get_spin_threshold_us();
-    tfuture_set_spin_threshold_us(CYCLIC_FIRE_SPIN_US);
-    tfuture_set_fire_callback(fire_callback);
+
+    /* Register fire_callback with whichever backend is active.  For the
+     * tfuture (polled) path we also shorten its spin threshold so other
+     * main-loop services still get CPU during each half-period. */
+    if (s_use_isr_path) {
+        cyclic_fire_isr_set_callback(fire_callback);
+    } else {
+        s_saved_spin_us = tfuture_get_spin_threshold_us();
+        tfuture_set_spin_threshold_us(CYCLIC_FIRE_SPIN_US);
+        tfuture_set_fire_callback(fire_callback);
+    }
 
     s_running = true;
 
-    if (!tfuture_arm_at_ns(first_target_ns)) {
+    if (!arm_backend(first_target_ns)) {
         /* Arm failed — roll everything back. */
-        tfuture_set_fire_callback(NULL);
-        tfuture_set_spin_threshold_us(s_saved_spin_us);
+        if (s_use_isr_path) {
+            cyclic_fire_isr_set_callback(NULL);
+        } else {
+            tfuture_set_fire_callback(NULL);
+            tfuture_set_spin_threshold_us(s_saved_spin_us);
+        }
         SYS_PORT_PinClear(CYCLIC_FIRE_PIN);
         s_running = false;
         return false;
@@ -191,10 +214,21 @@ void cyclic_fire_stop(void)
         return;
     }
     s_running = false;             /* callback short-circuits before re-arming */
-    tfuture_set_fire_callback(NULL);
-    tfuture_cancel();
-    tfuture_set_spin_threshold_us(s_saved_spin_us);
+    if (s_use_isr_path) {
+        cyclic_fire_isr_set_callback(NULL);
+        cyclic_fire_isr_cancel();
+    } else {
+        tfuture_set_fire_callback(NULL);
+        tfuture_cancel();
+        tfuture_set_spin_threshold_us(s_saved_spin_us);
+    }
     SYS_PORT_PinClear(CYCLIC_FIRE_PIN);
+}
+
+void cyclic_fire_use_isr_path(bool enable)
+{
+    /* Take effect on next cyclic_fire_start — not hot-swappable. */
+    s_use_isr_path = enable;
 }
 
 bool     cyclic_fire_is_running(void)        { return s_running;         }

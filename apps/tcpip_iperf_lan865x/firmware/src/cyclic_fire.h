@@ -70,4 +70,11 @@ uint64_t cyclic_fire_get_missed_count(void);
 typedef void (*cyclic_fire_user_cb_t)(uint64_t target_ns);
 void cyclic_fire_set_user_callback(cyclic_fire_user_cb_t cb);
 
+/* Select the timing backend: false = main-loop-polled tfuture (default,
+ * ~5 µs jitter); true = TC1 compare-match ISR (~200 ns jitter).  Must
+ * be called BEFORE cyclic_fire_start — the running instance is not
+ * hot-swappable.  See README_standalone_demo §9 for the precision
+ * comparison. */
+void cyclic_fire_use_isr_path(bool enable);
+
 #endif /* CYCLIC_FIRE_H */

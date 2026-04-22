@@ -37,6 +37,7 @@ target_sources(tcpip_iperf_lan865x_default_default_XC32_compile PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/button_led.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/standalone_demo.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/iperf_control.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../src/cyclic_fire_isr.c"
 )
 
 # Generate a small cmake helper that handles both MINGW behaviors at build time.

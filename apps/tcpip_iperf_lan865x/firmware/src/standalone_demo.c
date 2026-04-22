@@ -8,6 +8,7 @@
 #include "peripheral/port/plib_port.h"
 
 #include "cyclic_fire.h"
+#include "cyclic_fire_isr.h"
 #include "ptp_clock.h"
 #include "ptp_fol_task.h"
 #include "ptp_gm_task.h"
@@ -276,6 +277,15 @@ void standalone_demo_init(void)
     /* Hook the decimator before we start cyclic_fire so the first
      * callback already counts. */
     cyclic_fire_set_user_callback(demo_decimator);
+
+    /* Phase 2: use the TC1 compare-match ISR backend instead of the
+     * main-loop-polled tfuture path.  Brings the jitter floor down from
+     * ~5 µs to ~200 ns (NVIC IRQ entry + ISR prologue only), which
+     * makes a visible difference on the Saleae cross-board delta
+     * measurement.  Bring up TC1 + register selection BEFORE starting
+     * cyclic_fire so the first arm uses the new backend. */
+    cyclic_fire_isr_init();
+    cyclic_fire_use_isr_path(true);
 
     /* Start cyclic_fire in free-run + SILENT mode.  SILENT skips the
      * native 250 µs PD10 toggle inside cyclic_fire — the decimator below
