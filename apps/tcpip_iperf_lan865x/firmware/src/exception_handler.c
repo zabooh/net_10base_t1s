@@ -185,3 +185,10 @@ DEFINE_FAULT_HANDLER(HardFault_Handler,        "HardFault")
 DEFINE_FAULT_HANDLER(MemoryManagement_Handler, "MemoryManagement")
 DEFINE_FAULT_HANDLER(BusFault_Handler,         "BusFault")
 DEFINE_FAULT_HANDLER(UsageFault_Handler,       "UsageFault")
+
+/* NonMaskableInt is mostly fired by clock-failure detection on this
+ * part — useful to log if it ever happens.  SVCall / DebugMonitor /
+ * PendSV intentionally NOT overridden: the FreeRTOS variant relies on
+ * SVCall + PendSV for context-switching, and DebugMonitor only ever
+ * fires when a JTAG/SWD probe is attached. */
+DEFINE_FAULT_HANDLER(NonMaskableInt_Handler,   "NMI (clock failure?)")

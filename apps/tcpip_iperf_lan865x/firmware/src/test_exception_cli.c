@@ -30,7 +30,10 @@ static void usage(void)
 {
     SYS_CONSOLE_PRINT("test_exception <kind>\r\n"
                       "  null_read  null_write  unaligned\r\n"
-                      "  undef      divzero     svcall\r\n");
+                      "  undef      divzero     svcall\r\n"
+                      "  hang        — busy-loop with IRQs ON  (WDT EW fires)\r\n"
+                      "  hang_irqoff — busy-loop with IRQs OFF (WDT EW masked,\r\n"
+                      "                hardware WDT reset still hits at 2 s)\r\n");
 }
 
 /* Each trigger function is no-inline + volatile-cast to defeat the
@@ -88,6 +91,27 @@ static void __attribute__((noinline)) trigger_svcall(void)
     __asm volatile ("svc #0");
 }
 
+static void __attribute__((noinline, noreturn)) trigger_hang(void)
+{
+    /* Plain busy-loop with interrupts still enabled → WDT Early-Warning
+     * fires after ~1 s and dumps "WatchdogEW" via the shared
+     * exception path. */
+    SYS_CONSOLE_PRINT("test_exception: hanging in while(1) "
+                      "(IRQs on) — WDT EW should fire in ~1 s\r\n");
+    for (;;) { __asm volatile ("nop"); }
+}
+
+static void __attribute__((noinline, noreturn)) trigger_hang_irqoff(void)
+{
+    /* Disable interrupts globally so the WDT EW NVIC vector cannot
+     * fire — the hardware WDT reset at 2 s is the only escape route.
+     * No dump in this scenario, but the controller DOES recover. */
+    SYS_CONSOLE_PRINT("test_exception: hanging in while(1) with PRIMASK "
+                      "set — only hardware WDT reset @ 2 s saves us\r\n");
+    __asm volatile ("cpsid i" ::: "memory");
+    for (;;) { __asm volatile ("nop"); }
+}
+
 static void test_exception_cmd(SYS_CMD_DEVICE_NODE *p, int argc, char **argv)
 {
     (void)p;
@@ -109,12 +133,14 @@ static void test_exception_cmd(SYS_CMD_DEVICE_NODE *p, int argc, char **argv)
     SYS_CONSOLE_PRINT("test_exception: about to trigger '%s' — controller "
                       "should dump + reset.\r\n", k);
 
-    if      (strcmp(k, "null_read")  == 0) trigger_null_read();
-    else if (strcmp(k, "null_write") == 0) trigger_null_write();
-    else if (strcmp(k, "unaligned")  == 0) trigger_unaligned();
-    else if (strcmp(k, "undef")      == 0) trigger_undef();
-    else if (strcmp(k, "divzero")    == 0) trigger_divzero();
-    else if (strcmp(k, "svcall")     == 0) trigger_svcall();
+    if      (strcmp(k, "null_read")   == 0) trigger_null_read();
+    else if (strcmp(k, "null_write")  == 0) trigger_null_write();
+    else if (strcmp(k, "unaligned")   == 0) trigger_unaligned();
+    else if (strcmp(k, "undef")       == 0) trigger_undef();
+    else if (strcmp(k, "divzero")     == 0) trigger_divzero();
+    else if (strcmp(k, "svcall")      == 0) trigger_svcall();
+    else if (strcmp(k, "hang")        == 0) trigger_hang();
+    else if (strcmp(k, "hang_irqoff") == 0) trigger_hang_irqoff();
     else { usage(); return; }
 
     /* If we get here the trigger didn't fault — usually means the CCR

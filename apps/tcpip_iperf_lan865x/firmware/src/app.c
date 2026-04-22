@@ -42,6 +42,7 @@
 #include "pd10_blink_cli.h"
 #include "standalone_demo.h"
 #include "test_exception_cli.h"
+#include "watchdog.h"
 #include "ptp_rx.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
@@ -114,6 +115,12 @@ void APP_Initialize ( void )
     tfuture_init();
     pd10_blink_init();
     standalone_demo_init();
+    /* watchdog_init() is intentionally NOT called here — the TCP/IP
+     * stack + LAN865x + PTP follower bring-up takes a few seconds and
+     * during that window the main loop never runs, so an active WDT
+     * would reset us into a boot-loop.  We bring it up at first entry
+     * to APP_STATE_IDLE (see APP_Tasks below), once everything is
+     * settled and the main loop is actually iterating. */
 }
 
 
@@ -191,8 +198,17 @@ void APP_Tasks ( void )
                     }
                 }
                 ptp_fol_initialized = true;
+                /* Bring up the WDT only AFTER the slow boot-time
+                 * subsystems (TCP/IP stack, LAN865x driver, PTP
+                 * follower hardware init) have completed.  If we
+                 * armed it earlier the boot path itself would trip
+                 * the watchdog and the controller would reset-loop. */
+                watchdog_init();
             }
             uint64_t current_tick = SYS_TIME_Counter64Get();
+
+            /* === Watchdog: keep alive while the main loop is healthy === */
+            watchdog_kick();
 
             /* === PD10 rectangle generator — enabled via `blink` CLI === */
             pd10_blink_service(current_tick);
