@@ -174,11 +174,20 @@ static bool debounce_press_edge(debounce_t *d, uint64_t now_tick)
 
 static void demo_decimator(uint64_t target_ns)
 {
-    /* LED1 state is a pure function of the scheduled target_ns — after
-     * PTP lock both boards see identical target_ns values and therefore
-     * drive LED1 to the same polarity.  Also drive PD10 active-HIGH so
-     * Saleae sees a clean 1 Hz rectangle tracking LED1's visible state. */
-    bool led1_on = (((target_ns / LED1_SLOT_NS) & 1ULL) != 0ULL);
+    /* LED1 state is derived from the CURRENT PTP wallclock, not from
+     * cyclic_fire's scheduled target_ns.  Reason: target_ns evolution
+     * depends on each board's cyclic_fire history (when it was first
+     * armed at boot, plus its catch-up trajectory through any PTP_CLOCK
+     * jumps at role-change), so two boards that boot a few hundred ms
+     * apart can carry that initial phase offset forward indefinitely
+     * even after the PTP servo locks them within sub-µs.  Reading
+     * PTP_CLOCK_GetTime_ns() here makes the LED phase a pure function
+     * of the synchronised wallclock — identical on both boards within
+     * the servo residual (~100 ns) plus the inter-board decimator
+     * jitter (~250 µs worst case) — both invisible at 1 Hz visual rate. */
+    (void)target_ns;
+    uint64_t wc_ns = PTP_CLOCK_GetTime_ns();
+    bool led1_on = (((wc_ns / LED1_SLOT_NS) & 1ULL) != 0ULL);
     if (led1_on) {
         LED_ON(LED1_PIN);
         SYS_PORT_PinSet(PD10_MIRROR_PIN);
@@ -198,7 +207,7 @@ static void demo_decimator(uint64_t target_ns)
      *   FREE          → controlled by enter_state() (OFF), not touched here.
      */
     if (s_state == DEMO_SYNCING_FOL || s_state == DEMO_SYNCING_GM) {
-        bool led2_on = (((target_ns / LED2_SLOT_NS) & 1ULL) != 0ULL);
+        bool led2_on = (((wc_ns / LED2_SLOT_NS) & 1ULL) != 0ULL);
         if (led2_on) LED_ON(LED2_PIN);
         else         LED_OFF(LED2_PIN);
     } else if (s_state == DEMO_SYNCED && s_is_follower) {
@@ -207,7 +216,7 @@ static void demo_decimator(uint64_t target_ns)
          * distinct from the master's solid ON while still lit enough to
          * identify.  Frequency = 1/(16·250µs) = 250 Hz, well above the
          * flicker-perception threshold. */
-        uint64_t tick_slot = target_ns / (uint64_t)(CYCLIC_PERIOD_US * 500u);
+        uint64_t tick_slot = wc_ns / (uint64_t)(CYCLIC_PERIOD_US * 500u);
         bool pwm_on = ((tick_slot & (LED2_DIM_PERIOD_SLOTS - 1u)) == 0u);
         if (pwm_on) LED_ON(LED2_PIN);
         else        LED_OFF(LED2_PIN);
@@ -278,14 +287,14 @@ void standalone_demo_init(void)
      * callback already counts. */
     cyclic_fire_set_user_callback(demo_decimator);
 
-    /* Phase 2: use the TC1 compare-match ISR backend instead of the
-     * main-loop-polled tfuture path.  Brings the jitter floor down from
-     * ~5 µs to ~200 ns (NVIC IRQ entry + ISR prologue only), which
-     * makes a visible difference on the Saleae cross-board delta
-     * measurement.  Bring up TC1 + register selection BEFORE starting
-     * cyclic_fire so the first arm uses the new backend. */
-    cyclic_fire_isr_init();
-    cyclic_fire_use_isr_path(true);
+    /* Stick with the main-loop-polled tfuture backend (the TC1 ISR
+     * variant is implemented in cyclic_fire_isr.c and still callable
+     * via cyclic_fire_use_isr_path(true), but enabling it here
+     * pushed PTP lock time from ~2 s to ~13 s on this hardware: the
+     * 4 kHz ISR preempts the main loop continuously, slowing the
+     * PTP-FOL Sync-frame processing during the lock phase.  The ~5 µs
+     * vs ~200 ns jitter difference is invisible to the eye anyway and
+     * doesn't matter for the visible 1 Hz LED demo. */
 
     /* Start cyclic_fire in free-run + SILENT mode.  SILENT skips the
      * native 250 µs PD10 toggle inside cyclic_fire — the decimator below
@@ -336,6 +345,32 @@ static void cyclic_fire_watchdog(uint64_t current_tick)
 void standalone_demo_service(uint64_t current_tick)
 {
     cyclic_fire_watchdog(current_tick);
+
+    /* CLI mode-change auto-sync: if the operator switches PTP mode
+     * directly via the `ptp_mode master|follower|off` CLI (instead of
+     * pressing SW1/SW2), reflect that in the demo's LED2 state machine
+     * so LED2 still shows blink-then-solid/dim.  Without this poll the
+     * demo would stay in DEMO_FREE (LED2 off) even though PTP itself is
+     * locked. */
+    ptpMode_t cur_ptp = PTP_FOL_GetMode();
+    if (s_state == DEMO_FREE) {
+        if (cur_ptp == PTP_MASTER && !s_is_master) {
+            s_is_master = true;
+            enter_state(DEMO_SYNCING_GM, current_tick);
+        } else if (cur_ptp == PTP_SLAVE && !s_is_follower) {
+            s_is_follower = true;
+            enter_state(DEMO_SYNCING_FOL, current_tick);
+        }
+    } else if (cur_ptp == PTP_DISABLED && (s_is_master || s_is_follower)) {
+        /* CLI disabled PTP — return to FREE. */
+        s_is_master   = false;
+        s_is_follower = false;
+        if (s_iperf_running) {
+            iperf_control_stop();
+            s_iperf_running = false;
+        }
+        enter_state(DEMO_FREE, current_tick);
+    }
 
     bool sw1_pressed = debounce_press_edge(&s_sw1, current_tick);
     bool sw2_pressed = debounce_press_edge(&s_sw2, current_tick);

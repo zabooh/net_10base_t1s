@@ -65,11 +65,18 @@ void watchdog_init(void)
 
 void watchdog_kick(void)
 {
-    /* Wait for any pending CLEAR sync from the previous kick — a
-     * back-to-back kick from an ISR could otherwise be silently
-     * dropped.  At 1024 Hz the sync window is 1 ms max, so this loop
-     * is in practice always taken zero or one times. */
-    while ((WDT_REGS->WDT_SYNCBUSY & WDT_SYNCBUSY_CLEAR_Msk) != 0u) { }
+    /* Rate-limited kick: WDT runs at 1024 Hz so SYNCBUSY.CLEAR stays
+     * asserted for ~3 WDT cycles ≈ 3 ms after each write.  Calling
+     * this every main-loop iteration (a typical loop runs at >1 kHz)
+     * therefore blocks the loop in the SYNCBUSY spin almost continuously
+     * — observed on the bench as PTP lock time stretching from 2.6 s
+     * (no WDT kick) to >30 s.  Only re-kick once SYNCBUSY has settled,
+     * and bail immediately otherwise.  At a real-world main-loop rate
+     * of a few kHz this still produces hundreds of kicks per second,
+     * far more than enough for the 4 s WDT timeout. */
+    if ((WDT_REGS->WDT_SYNCBUSY & WDT_SYNCBUSY_CLEAR_Msk) != 0u) {
+        return;        /* previous kick still syncing — skip this one */
+    }
     WDT_REGS->WDT_CLEAR = WDT_CLEAR_CLEAR_KEY;
 }
 

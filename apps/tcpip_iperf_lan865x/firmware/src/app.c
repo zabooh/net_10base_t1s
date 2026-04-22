@@ -199,10 +199,9 @@ void APP_Tasks ( void )
                 }
                 ptp_fol_initialized = true;
                 /* Bring up the WDT only AFTER the slow boot-time
-                 * subsystems (TCP/IP stack, LAN865x driver, PTP
-                 * follower hardware init) have completed.  If we
-                 * armed it earlier the boot path itself would trip
-                 * the watchdog and the controller would reset-loop. */
+                 * subsystems have completed (TCP/IP stack, LAN865x,
+                 * PTP follower init) so the WDT doesn't trip during
+                 * boot. */
                 watchdog_init();
             }
             uint64_t current_tick = SYS_TIME_Counter64Get();
