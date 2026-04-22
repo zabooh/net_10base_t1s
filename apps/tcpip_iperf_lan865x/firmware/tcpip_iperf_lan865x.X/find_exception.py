@@ -2,11 +2,20 @@
 """find_exception.py — decode a Cortex-M4 crash dump and locate the
                        faulting source line(s)
 
-Three input modes — pick whichever is easiest after a crash:
+Four input modes — pick whichever is easiest after a crash:
 
   python find_exception.py 0x000249d4         # PC-only, fastest
-  python find_exception.py --paste            # paste full crash dump,
-                                              #   end with empty line + Ctrl+Z (Win) / Ctrl+D
+  python find_exception.py --clipboard        # COPY dump in TeraTerm,
+                                              #   then run this — no
+                                              #   manual paste at all
+  python find_exception.py --paste            # interactive multi-line
+                                              #   prompt; end with empty
+                                              #   line + Ctrl+Z (Win) /
+                                              #   Ctrl+D (Linux).
+                                              #   Works for clipboard
+                                              #   pastes that line-feed
+                                              #   per input() call.
+  python find_exception.py --file crash.txt   # read from file
   type crash.txt | python find_exception.py --stdin
 
 For each address found in the dump (PC and stacked LR), the script:
@@ -320,6 +329,35 @@ def read_paste_or_stdin(use_stdin):
     return "\n".join(lines)
 
 
+def read_clipboard():
+    """Read the system clipboard via tkinter (Python stdlib).  No pip
+    install needed.  Avoids all the line-buffering quirks of pasting
+    multi-line text into a Windows / Linux console input()."""
+    try:
+        import tkinter
+    except ImportError:
+        sys.exit("[ERROR] tkinter not available in this Python install — "
+                 "use --paste, --stdin or --file instead.")
+    try:
+        root = tkinter.Tk()
+        root.withdraw()                  # hide the otherwise-empty window
+        root.update()                    # required on some platforms
+        text = root.clipboard_get()
+        root.destroy()
+    except Exception as exc:
+        sys.exit(f"[ERROR] Could not read clipboard: {exc}")
+    if not text.strip():
+        sys.exit("[ERROR] Clipboard is empty.")
+    return text
+
+
+def read_file(path):
+    p = Path(path)
+    if not p.is_file():
+        sys.exit(f"[ERROR] File not found: {p}")
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -333,8 +371,12 @@ def main():
                    help="exception PC, e.g. 0x000249d4 (interactive if omitted)")
     p.add_argument("--paste", action="store_true",
                    help="prompt for a full multi-line crash dump")
+    p.add_argument("--clipboard", "-c", action="store_true",
+                   help="read crash dump from system clipboard (tkinter)")
+    p.add_argument("--file", "-f",
+                   help="read crash dump from a text file")
     p.add_argument("--stdin", action="store_true",
-                   help="read full crash dump from stdin")
+                   help="read full crash dump from stdin (e.g. type x.txt | ...)")
     p.add_argument("--elf",      default=DEFAULT_ELF)
     p.add_argument("--listing",  default=DEFAULT_LISTING)
     p.add_argument("--xc32-bin", default=DEFAULT_XC32_BIN)
@@ -361,10 +403,15 @@ def main():
         print(f"[INFO] Reusing existing listing: {listing}")
 
     # ------------------------------------------------------------------
-    # Mode A — paste / stdin: parse a full crash dump
+    # Mode A — full crash dump from clipboard / file / stdin / paste
     # ------------------------------------------------------------------
-    if args.paste or args.stdin:
-        raw = read_paste_or_stdin(args.stdin)
+    if args.clipboard or args.file or args.paste or args.stdin:
+        if args.clipboard:
+            raw = read_clipboard()
+        elif args.file:
+            raw = read_file(args.file)
+        else:
+            raw = read_paste_or_stdin(args.stdin)
         regs, fault_name = parse_dump(raw)
         if not regs:
             sys.exit("[ERROR] No recognisable register lines in input.")
