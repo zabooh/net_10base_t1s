@@ -9,6 +9,22 @@ synchronisation accuracy over 10BASE-T1S.
 > - Full documentation index: **[documentation/README.md](documentation/README.md)**
 > - Developer tools (flash / tests / analysis): **[tools/README.md](tools/README.md)**
 > - Risks & open questions: **[RISKS.md](RISKS.md)**
+> - Cleanup history: **[CLEANUP_PLAN.md](CLEANUP_PLAN.md)**
+
+### Quick start (from the repo root)
+
+```cmd
+python setup_flasher.py      :: once — detect the two debugger COM ports
+python setup_compiler.py     :: once — pick an installed XC32 version
+build.bat                    :: incremental build (build.bat rebuild for clean)
+python tools\flash\flash.py  :: program both boards with out/.../default.hex
+```
+
+Top-level scripts (`setup_*.py`, `build.bat`, `build_summary.py`,
+`mdb_flash.py`, `check_serial_tk.pyw`) live at the repo root; test /
+analysis / Saleae scripts live under [tools/](tools/). The MPLAB X
+project itself is untouched at
+[apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/).
 
 ### See Also
 
