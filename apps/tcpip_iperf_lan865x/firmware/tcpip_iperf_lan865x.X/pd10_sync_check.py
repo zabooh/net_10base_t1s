@@ -32,6 +32,7 @@ import datetime
 import re
 import statistics
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -184,26 +185,156 @@ def median_period_us(rising):
     return statistics.median(diffs)
 
 
+class SerialDrainer:
+    """Background reader that continuously drains one or more serial ports
+    and tee's every received line into the shared logger, prefixed with
+    a per-port tag.  Used by --verbose to surface board chatter that
+    would otherwise silently sit in the kernel UART buffer between the
+    explicit polling phases (settle, Saleae capture, analysis).
+
+    Start ONLY after any synchronous reader (wait_for_fine, drain_and_log,
+    etc.) has finished — two threads racing for bytes from the same port
+    causes interleaved/missing characters."""
+
+    def __init__(self, ports_with_tags, log):
+        self._ports = ports_with_tags          # list of (serial.Serial, tag_str)
+        self._log   = log
+        self._stop  = threading.Event()
+        self._lock  = threading.Lock()         # serialise log.info from N threads
+        self._threads = []
+
+    def _drain_one(self, ser, tag):
+        """Non-blocking drain loop: poll in_waiting (byte count currently
+        in the OS receive buffer) and only read what's actually there.
+
+        The earlier version used ser.read(256), which on Windows can block
+        until the full 256-byte request is satisfied — a known pyserial
+        behaviour where the configured 0.1 s timeout is not always honoured
+        precisely during concurrent gRPC / Saleae traffic.  Observed: an
+        entire 60 s Saleae capture passed without any drained lines even
+        though the boards were printing re-sync events.
+
+        Polling in_waiting + short sleep is robust across platforms and
+        never blocks, so no board chatter can ever be lost between the
+        FINE lock and the end-of-run shutdown."""
+        line_buf = b""
+        while not self._stop.is_set():
+            try:
+                n = ser.in_waiting
+            except Exception:
+                # port closed under us — exit cleanly
+                return
+            if n == 0:
+                # Idle: short sleep so we don't spin-poll at 100 % CPU.
+                time.sleep(0.01)
+                continue
+            try:
+                chunk = ser.read(n)
+            except Exception:
+                return
+            if not chunk:
+                continue
+            line_buf += chunk
+            while b"\n" in line_buf:
+                ln, line_buf = line_buf.split(b"\n", 1)
+                text = ln.rstrip(b"\r").decode("ascii", "replace")
+                if text:
+                    with self._lock:
+                        self._log.info(f"      [{tag}] {text}")
+
+    def start(self):
+        for ser, tag in self._ports:
+            t = threading.Thread(target=self._drain_one,
+                                 args=(ser, tag), daemon=True,
+                                 name=f"drain-{tag}")
+            t.start()
+            self._threads.append(t)
+
+    def stop(self):
+        self._stop.set()
+        for t in self._threads:
+            t.join(timeout=1.0)
+
+
+def write_histogram(deltas_us, median_us, mad_us, out_dir, log):
+    """Render a PNG histogram next to deltas_us.csv.  matplotlib is
+    optional — if it isn't installed we just skip and print a hint,
+    rather than failing the whole run."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")   # no display needed; write PNG only
+        import matplotlib.pyplot as plt
+    except ImportError:
+        log.info("  (matplotlib not installed — skipping histogram PNG)")
+        log.info("  install with: python -m pip install matplotlib")
+        return None
+
+    n = len(deltas_us)
+    if n < 2:
+        log.info("  (< 2 edges — skipping histogram)")
+        return None
+
+    bin_width = 5.0     # us — good granularity for 60-edge, 10s..60s captures
+    lo = min(deltas_us) - bin_width
+    hi = max(deltas_us) + bin_width
+    bins = [lo + i * bin_width
+            for i in range(int((hi - lo) / bin_width) + 2)]
+
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.hist(deltas_us, bins=bins, edgecolor="black", color="#4a7cbf", alpha=0.85)
+    ax.axvline(median_us, color="red",   linestyle="--", linewidth=1.5,
+               label=f"median = {median_us:+.1f} us")
+    ax.axvline(median_us - mad_us, color="orange", linestyle=":", linewidth=1.2,
+               label=f"median +/- MAD (+/-{mad_us:.1f} us)")
+    ax.axvline(median_us + mad_us, color="orange", linestyle=":", linewidth=1.2)
+
+    spread_us = max(deltas_us) - min(deltas_us)
+    ax.set_title(f"Cross-board PD10 rising-edge delta (n={n})\n"
+                 f"MAD = {mad_us:.1f} us   spread = {spread_us:.1f} us")
+    ax.set_xlabel("delta = Ch1 - Ch0  (us)")
+    ax.set_ylabel("count")
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend()
+    plt.tight_layout()
+
+    png = out_dir / "histogram.png"
+    plt.savefig(png, dpi=120)
+    plt.close(fig)
+    return png
+
+
 def cross_board_delta_us(rising_a, rising_b, bracket_s=0.499):
-    """For each rising edge on Ch0 find the closest rising edge on Ch1
-    within ±bracket_s.  Default bracket = 499 ms = just under half the
-    1 Hz period, so we correctly pair even a near-180° phase offset
-    (the pair is then the 'same' edge but wrapped half a cycle)."""
+    """For each rising edge on Ch0 find the closest UNUSED rising edge on
+    Ch1 within ±bracket_s.  Default bracket = 499 ms = just under half
+    the 1 Hz period, so we correctly pair even a near-180° phase offset
+    (the pair is then the 'same' edge but wrapped half a cycle).
+
+    Each Ch1 edge can be used AT MOST ONCE.  Without this constraint a
+    surplus Ch0 edge (e.g. a glitch right after cyclic_fire start, or
+    one extra edge captured at a window boundary) gets paired with the
+    SAME Ch1 edge as its neighbour, producing one correct pair plus
+    one massively-wrong artefact (observed: +280 us / -719 us at the
+    start of pd10_sync_check_20260423_184334).
+    """
     if not rising_a or not rising_b:
         return []
     deltas = []
+    used = set()           # indices into rising_b that have already been paired
     j = 0
     for ta in rising_a:
         while j < len(rising_b) - 1 and rising_b[j + 1] < ta:
             j += 1
-        cand = []
+        best_k = None
+        best_d = None
         for k in (j, j + 1):
-            if 0 <= k < len(rising_b):
+            if 0 <= k < len(rising_b) and k not in used:
                 d = rising_b[k] - ta
-                if abs(d) <= bracket_s:
-                    cand.append(d)
-        if cand:
-            deltas.append(min(cand, key=abs) * 1e6)
+                if abs(d) <= bracket_s and (best_d is None or abs(d) < abs(best_d)):
+                    best_k = k
+                    best_d = d
+        if best_k is not None:
+            used.add(best_k)
+            deltas.append(best_d * 1e6)
     return deltas
 
 
@@ -224,6 +355,11 @@ def main():
                    help="|median| gate for visual sync (default 50 ms)")
     p.add_argument("--no-prep", action="store_true",
                    help="skip reset+mode setup; assume boards already locked")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="log every command sent to the boards AND every line "
+                        "received from either UART throughout the entire run "
+                        "(boot, prep, settle, capture, analysis).  Default: "
+                        "only show output during prep + FINE polling.")
     p.add_argument("--out-dir", default=None)
     args = p.parse_args()
 
@@ -240,6 +376,7 @@ def main():
              f"{args.sample_rate/1_000_000:.0f} MS/s "
              f"(resolution {1e9/args.sample_rate:.0f} ns)")
     log.info(f"  PASS gate    : |median delta| < {args.threshold_ms:.1f} ms")
+    log.info(f"  Verbose      : {'ON (full target chatter)' if args.verbose else 'off'}")
     log.info(f"  Output       : {out_dir.resolve()}")
 
     try:
@@ -268,7 +405,29 @@ def main():
         log.info(f"  Settling {args.settle_s:.0f} s for cyclic_fire alignment ...")
         time.sleep(args.settle_s)
 
-    gm.close(); fol.close()
+    # Enable [CLK] anchor-JUMP log on both boards so the run log captures
+    # every sanity-rejected sample (firmware default is OFF).  Put this AFTER
+    # the FINE/settle phase so the cascade of rejections during the initial
+    # hard-sync isn't logged — only steady-state events.  The setting is
+    # board-side only; toggling via CLI doesn't disturb PTP.
+    log.info("  Enabling [CLK] anchor-JUMP diagnostic log on GM + FOL ...")
+    verbose_send(gm,  "clk_jump_log on", log, "GM ")
+    verbose_send(fol, "clk_jump_log on", log, "FOL")
+    drain_and_log(gm,  log, "GM ", 0.2)
+    drain_and_log(fol, log, "FOL", 0.2)
+
+    # In verbose mode keep the serial ports open and run a background
+    # drainer so any board chatter during settle / Saleae capture /
+    # analysis still ends up in the run log.  In default mode we close
+    # the ports here (no UART traffic between phases is expected).
+    drainer = None
+    if args.verbose:
+        log.info("  Verbose mode: starting background UART drainers "
+                 "(GM, FOL) — every received line is tee'd into the run log.")
+        drainer = SerialDrainer([(gm, "GM "), (fol, "FOL")], log)
+        drainer.start()
+    else:
+        gm.close(); fol.close()
 
     # ----- Step 3: Saleae capture -----
     banner(f"Step 3 — Saleae capture ({args.duration_s:.1f} s)", log)
@@ -365,10 +524,28 @@ def main():
                     f"{spread_us:.3f}",
                     f"{period_a_us:.3f}", f"{period_b_us:.3f}",
                     "PASS" if pass_visible else "FAIL"])
+    # ----- Histogram PNG -----
+    png = write_histogram(deltas_us, median_us, mad_us, out_dir, log)
+
     log.info("")
     log.info(f"  Per-edge CSV : {out_dir/'deltas_us.csv'}")
     log.info(f"  Summary CSV  : {out_dir/'summary.csv'}")
+    if png is not None:
+        log.info(f"  Histogram    : {png}")
     log.info(f"  Log file     : {log_path}")
+
+    # Shut down verbose drainers + close serial ports cleanly.
+    if drainer is not None:
+        drainer.stop()
+        try:
+            gm.close()
+        except Exception:
+            pass
+        try:
+            fol.close()
+        except Exception:
+            pass
+
     return 0 if pass_visible else 1
 
 

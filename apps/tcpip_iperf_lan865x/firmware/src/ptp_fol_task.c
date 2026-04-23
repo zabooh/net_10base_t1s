@@ -613,6 +613,24 @@ void PTP_FOL_Service(void)
                 (void)DRV_LAN865X_WriteRegister(0u, MAC_TA, fol_reg_values.ta_value,
                                                 true, fol_reg_write_callback, NULL);
                 fol_reg_state = FOL_REG_WAIT_TA;
+                /* Log "big" MAC_TA adjusts (>= 1 us) so the otherwise-silent
+                 * servo phase corrections that cause cyclic_fire jumps
+                 * become visible in run logs.  Small FINE-state adjusts
+                 * (<= 150 ns by design) would spam the log every Sync;
+                 * the threshold filters them out.  MAC_TA encoding:
+                 * bit 31 = sign (1 = advance / clock moves forward),
+                 * bit 30..0 = magnitude in ns. */
+                {
+                    uint32_t ta_val = fol_reg_values.ta_value;
+                    bool     adv    = (ta_val & 0x80000000u) != 0u;
+                    uint32_t mag_ns = ta_val & 0x7FFFFFFFu;
+                    if (mag_ns >= 1000u) {
+                        PTP_LOG("[FOL] MAC_TA %s%lu ns (%lu us)\r\n",
+                                adv ? "+" : "-",
+                                (unsigned long)mag_ns,
+                                (unsigned long)(mag_ns / 1000u));
+                    }
+                }
             } else {
                 fol_reg_state = FOL_REG_DONE;
             }

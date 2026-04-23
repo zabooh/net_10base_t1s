@@ -9,6 +9,7 @@
 #include "ptp_gm_task.h"
 #include "ptp_clock.h"
 #include "ptp_offset_trace.h"
+#include "app_log.h"
 #include "system/command/sys_command.h"
 #include "system/console/sys_console.h"
 #include "system/time/sys_time.h"
@@ -22,20 +23,29 @@ static void ptp_mode_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
         return;
     }
     if (strcmp(argv[1], "off") == 0) {
+        ptpMode_t prev = PTP_FOL_GetMode();
         PTP_FOL_SetMode(PTP_DISABLED);
         PTP_GM_Deinit();
-        SYS_CONSOLE_PRINT("PTP disabled\r\n");
+        if (prev == PTP_MASTER) {
+            app_log_event("PTP master STOPPED (via CLI)");
+        } else if (prev == PTP_SLAVE) {
+            app_log_event("PTP follower STOPPED (via CLI)");
+        } else {
+            app_log_event("PTP disabled (was already off, via CLI)");
+        }
     } else if (strcmp(argv[1], "master") == 0) {
         bool verbose = (argc >= 3) && (strcmp(argv[2], "v") == 0);
         PTP_FOL_SetMode(PTP_MASTER);
         PTP_GM_SetVerbose(verbose);
         PTP_GM_Init();
-        SYS_CONSOLE_PRINT("PTP Grandmaster enabled%s\r\n", verbose ? " (verbose)" : "");
+        app_log_event(verbose ? "PTP master STARTED (via CLI, verbose)"
+                              : "PTP master STARTED (via CLI)");
     } else if ((strcmp(argv[1], "follower") == 0) || (strcmp(argv[1], "slave") == 0)) {
         PTP_FOL_SetMode(PTP_SLAVE);
         bool verbose = (argc >= 3) && (strcmp(argv[2], "v") == 0);
         PTP_FOL_SetVerbose(verbose);
-        SYS_CONSOLE_PRINT("PTP Follower enabled%s\r\n", verbose ? " (verbose)" : "");
+        app_log_event(verbose ? "PTP follower STARTED (via CLI, verbose)"
+                              : "PTP follower STARTED (via CLI)");
     } else {
         SYS_CONSOLE_PRINT("Usage: ptp_mode [off|master [v]|follower [v]]\r\n");
     }
@@ -211,6 +221,23 @@ static void uptime_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
                       (unsigned long long)ticks);
 }
 
+static void clk_jump_log_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc < 2) {
+        SYS_CONSOLE_PRINT("clk_jump_log: %s  (default OFF; usage: clk_jump_log on|off)\r\n",
+                          PTP_CLOCK_GetAnchorJumpLog() ? "ON" : "OFF");
+        return;
+    }
+    if      (strcmp(argv[1], "on")  == 0) PTP_CLOCK_SetAnchorJumpLog(true);
+    else if (strcmp(argv[1], "off") == 0) PTP_CLOCK_SetAnchorJumpLog(false);
+    else {
+        SYS_CONSOLE_PRINT("clk_jump_log: bad arg '%s' (use on|off)\r\n", argv[1]);
+        return;
+    }
+    SYS_CONSOLE_PRINT("clk_jump_log: now %s\r\n",
+                      PTP_CLOCK_GetAnchorJumpLog() ? "ON" : "OFF");
+}
+
 static void drift_iir_reset_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     (void)pCmdIO; (void)argc; (void)argv;
     PTP_CLOCK_ResetDriftFilter();
@@ -246,6 +273,7 @@ static const SYS_CMD_DESCRIPTOR ptp_cmd_tbl[] = {
     {"clk_set_drift",    (SYS_CMD_FNC) clk_set_drift_cmd,    ": diagnostic: manually set PTP_CLOCK drift_ppb (clk_set_drift [<ppb>])"},
     {"drift_iir_n",      (SYS_CMD_FNC) drift_iir_n_cmd,      ": get/set PTP_CLOCK drift IIR window N (drift_iir_n [<8..4096>])"},
     {"drift_iir_reset",  (SYS_CMD_FNC) drift_iir_reset_cmd,  ": re-arm adaptive IIR warm-up (fast convergence with low jitter floor)"},
+    {"clk_jump_log",     (SYS_CMD_FNC) clk_jump_log_cmd,     ": diag log for anchor-JUMP rejections (clk_jump_log [on|off]; default off)"},
     {"uptime",           (SYS_CMD_FNC) uptime_cmd,           ": time since SAME54 reset (TC0 ticks, independent of PTP state)"},
 };
 

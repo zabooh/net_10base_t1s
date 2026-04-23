@@ -8,6 +8,7 @@
 #include "system/command/sys_command.h"
 #include "config/default/library/tcpip/tcpip.h"
 #include "config/default/library/tcpip/tcpip_manager.h"
+#include "ptp_log.h"
 
 /* Declared non-static in config/default/library/tcpip/src/iperf.c so we
  * can dispatch them without going through the SYS_CMD console parser. */
@@ -66,24 +67,24 @@ bool iperf_control_set_ip(const char *ip_str, const char *mask_str)
 {
     TCPIP_NET_HANDLE net = TCPIP_STACK_IndexToNet(0);
     if (net == NULL) {
-        SYS_CONSOLE_PRINT("[IPERF] no network interface index 0\r\n");
+        PTP_LOG("[IPERF] no network interface index 0\r\n");
         return false;
     }
     IPV4_ADDR ip;
     IPV4_ADDR mask;
     if (!TCPIP_Helper_StringToIPAddress(ip_str, &ip)) {
-        SYS_CONSOLE_PRINT("[IPERF] bad IP '%s'\r\n", ip_str);
+        PTP_LOG("[IPERF] bad IP '%s'\r\n", ip_str);
         return false;
     }
     if (!TCPIP_Helper_StringToIPAddress(mask_str, &mask)) {
-        SYS_CONSOLE_PRINT("[IPERF] bad netmask '%s'\r\n", mask_str);
+        PTP_LOG("[IPERF] bad netmask '%s'\r\n", mask_str);
         return false;
     }
     if (!TCPIP_STACK_NetAddressSet(net, &ip, &mask, false)) {
-        SYS_CONSOLE_PRINT("[IPERF] TCPIP_STACK_NetAddressSet failed\r\n");
+        PTP_LOG("[IPERF] TCPIP_STACK_NetAddressSet failed\r\n");
         return false;
     }
-    SYS_CONSOLE_PRINT("[IPERF] IP set to %s / %s\r\n", ip_str, mask_str);
+    PTP_LOG("[IPERF] IP set to %s / %s\r\n", ip_str, mask_str);
     return true;
 }
 
@@ -102,7 +103,7 @@ void iperf_control_server_start(void)
      * RX counter never increments and the demo looks broken. */
     static char a2[] = "-u";
     char *argv[] = { a0, a1, a2, NULL };
-    SYS_CONSOLE_PRINT("[IPERF] starting UDP server on :5001\r\n");
+    PTP_LOG("[IPERF] starting UDP server on :5001\r\n");
     CommandIperfStart(&s_stub_cmd_io, 3, argv);
 }
 
@@ -131,7 +132,7 @@ void iperf_control_client_start(const char *server_ip)
     (void)strncpy(ip_buf, server_ip, sizeof(ip_buf) - 1u);
     ip_buf[sizeof(ip_buf) - 1u] = '\0';
     char *argv[] = { a0, a1, ip_buf, a3, a4, NULL };
-    SYS_CONSOLE_PRINT("[IPERF] starting UDP client to %s:5001 (cap 5 Mbps)\r\n",
+    PTP_LOG("[IPERF] starting UDP client to %s:5001 (cap 5 Mbps)\r\n",
                       server_ip);
     CommandIperfStart(&s_stub_cmd_io, 5, argv);
 }
@@ -140,6 +141,6 @@ void iperf_control_stop(void)
 {
     static char a0[] = "iperfk";
     char *argv[] = { a0, NULL };
-    SYS_CONSOLE_PRINT("[IPERF] stop\r\n");
+    PTP_LOG("[IPERF] stop\r\n");
     CommandIperfStop(&s_stub_cmd_io, 1, argv);
 }

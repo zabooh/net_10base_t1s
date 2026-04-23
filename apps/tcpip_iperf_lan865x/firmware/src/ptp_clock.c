@@ -17,6 +17,7 @@
  */
 
 #include "ptp_clock.h"
+#include "ptp_log.h"
 #include "system/time/sys_time.h"
 
 /* TC0 frequency after GCLK0/2 prescaler (60 MHz) */
@@ -85,6 +86,21 @@ static uint64_t s_anchor_tick  = 0u;
 static int32_t  s_drift_ppb    = 0;      /* filtered TC0 rate offset (signed ppb) */
 static bool     s_valid        = false;
 static bool     s_drift_valid  = false;  /* becomes true after 1st rate sample */
+static bool     s_jump_log_en  = false;  /* default OFF — verbose diagnostic, opt-in via CLI */
+static uint32_t s_consec_reject = 0u;    /* consecutive sanity-rejected samples since last accept */
+
+/* Force an anchor update after this many consecutive rejections.  Without
+ * this safety net, a run of bad samples can freeze the anchor for an
+ * unbounded time while the follower's hardware servo keeps adjusting the
+ * LAN865x wallclock; the SW PTP_CLOCK then drifts away by hundreds of
+ * microseconds to milliseconds (seen in pd10_sync_check_20260423_195150:
+ * a cluster of 3 small-residual rejects at abs 71.6-71.9s caused a 1.1 ms
+ * baseline shift plus continuous -38 ppm drift over the next 25 s).  At
+ * a 125 ms Sync interval, 3 rejections = 375 ms of stale anchor — short
+ * enough that a single over-ride doesn't lose useful drift information,
+ * long enough that isolated nIRQ-delay events still benefit from the
+ * skip-bad-anchor fix. */
+#define ANCHOR_REJECT_FORCE_UPDATE  3u
 
 /* -------------------------------------------------------------------------
  * Internal helpers
@@ -131,7 +147,23 @@ void PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick)
 {
     /* Measure instantaneous TC0 rate vs GM by comparing the delta of both
      * since the previous anchor.  Feed through IIR to suppress per-sample
-     * noise, then store as the ppb correction used in GetTime_ns(). */
+     * noise, then store as the ppb correction used in GetTime_ns().
+     *
+     * Anchor update policy: only when the sample is ACCEPTED.  A sample
+     * whose (wallclock_ns, sys_tick) pair is inconsistent — typically
+     * because the LAN8651 delayed the RX nIRQ by several ms after SFD,
+     * giving a stale tick-capture timestamp for this real t2 — gets
+     * rejected by the sanity check.  If we also stored that bad pair as
+     * the new anchor, the NEXT (normal) sample would compute a huge
+     * apparent residual against it and get rejected too; cyclic_fire's
+     * wallclock conversion from the bad anchor would produce the silent
+     * millisecond-scale phase shifts we observed on the Saleae.  By
+     * keeping the previous anchor on rejection, the next good sample
+     * computes over a larger dt (one sync period skipped) and lands a
+     * clean residual.  Root cause identified in
+     * pd10_sync_check_20260423_192229 — paired +/-9 ms anchor JUMPs
+     * always +/- 136 ms apart (one PTP sync interval). */
+    bool accepted = false;
     if (s_valid) {
         uint64_t dwc_ns = wallclock_ns - s_anchor_wc_ns;
         uint64_t dtick  = sys_tick - s_anchor_tick;
@@ -155,6 +187,22 @@ void PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick)
                                   ? (int32_t)s_drift_samples
                                   : s_drift_iir_n;
                     if (n_eff < 1) n_eff = 1;
+                    /* Log GENUINE outlier samples — only after warm-up ramp
+                     * has finished AND when the deviation from the running
+                     * average exceeds 1000 ppm.  Earlier 100 ppm threshold
+                     * fired on practically every Sync (normal ISR-anchor
+                     * jitter is ~100-300 ppm per sample); 1000 ppm filters
+                     * to actual anomalies. */
+                    if (s_drift_samples >= (uint32_t)s_drift_iir_n) {
+                        int64_t deviation = inst_ppb - (int64_t)s_drift_ppb;
+                        int64_t abs_dev   = (deviation < 0) ? -deviation : deviation;
+                        if (abs_dev > 1000000LL) {    /* > 1000 ppm */
+                            PTP_LOG("[CLK] inst_ppb OUTLIER %+lld (filtered=%+ld dev=%+lld)\r\n",
+                                    (long long)inst_ppb,
+                                    (long)s_drift_ppb,
+                                    (long long)deviation);
+                        }
+                    }
                     /* s_drift_ppb = ((N-1)*old + inst) / N   (IIR) */
                     int64_t blended = ((int64_t)s_drift_ppb * (n_eff - 1)
                                        + inst_ppb) / n_eff;
@@ -166,13 +214,62 @@ void PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick)
                 if (s_drift_samples < 0xFFFFFFFFu) {
                     s_drift_samples++;
                 }
+                s_consec_reject = 0u; /* good pair resets the reject chain */
+                accepted = true;      /* good pair — commit new anchor */
+            } else {
+                /* SANITY-REJECTED sample: |inst_ppb| > 5000 ppm.  Typical
+                 * cause is nIRQ-delay on this particular Sync (LAN8651
+                 * held the frame in its SPI-side queue a few ms before
+                 * firing nIRQ).  We REJECT the sample AND keep the old
+                 * anchor (see policy comment above), so cyclic_fire's
+                 * wallclock view never sees the bad pair. */
+                s_consec_reject++;
+                if (s_consec_reject >= ANCHOR_REJECT_FORCE_UPDATE) {
+                    /* Safety: too many consecutive rejections in a row —
+                     * the anchor is getting too stale, cyclic_fire's
+                     * wallclock view starts drifting.  Force-commit this
+                     * sample's anchor (still skip the IIR blend) so the
+                     * SW PTP_CLOCK catches up to physical reality.  Log
+                     * as a separate event so the operator can see the
+                     * safety kicked in. */
+                    if (s_jump_log_en) {
+                        PTP_LOG("[CLK] anchor JUMP rejected inst_ppb=%+lld dwc=%llu expected=%llu (FORCE-UPDATE after %lu rejects)\r\n",
+                                (long long)inst_ppb,
+                                (unsigned long long)dwc_ns,
+                                (unsigned long long)expected_ns,
+                                (unsigned long)s_consec_reject);
+                    }
+                    s_consec_reject = 0u;
+                    accepted        = true;   /* treat as accepted for anchor-commit purposes */
+                } else if (s_jump_log_en) {
+                    PTP_LOG("[CLK] anchor JUMP rejected inst_ppb=%+lld dwc=%llu expected=%llu\r\n",
+                            (long long)inst_ppb,
+                            (unsigned long long)dwc_ns,
+                            (unsigned long long)expected_ns);
+                }
+                /* If still not accepted: accepted stays false → anchor NOT
+                 * updated below, cyclic_fire's wallclock view stays clean. */
             }
-            /* Out-of-range sample: silently skip, keep previous estimate. */
         }
     }
-    s_anchor_wc_ns = wallclock_ns;
-    s_anchor_tick  = sys_tick;
-    s_valid        = true;
+
+    /* First-ever sample (s_valid was false): commit anchor unconditionally
+     * so GetTime_ns has something to interpolate from. */
+    if (!s_valid) {
+        s_anchor_wc_ns = wallclock_ns;
+        s_anchor_tick  = sys_tick;
+        s_valid        = true;
+        return;
+    }
+
+    /* Subsequent samples: commit the new anchor only if the pair was
+     * accepted.  Rejecting the anchor update on a sanity-rejected pair
+     * prevents the +/-9 ms anchor-JUMP cascade observed in
+     * pd10_sync_check_20260423_192229. */
+    if (accepted) {
+        s_anchor_wc_ns = wallclock_ns;
+        s_anchor_tick  = sys_tick;
+    }
 }
 
 uint64_t PTP_CLOCK_GetTime_ns(void)
@@ -220,6 +317,7 @@ void PTP_CLOCK_ForceSet(uint64_t wallclock_ns)
     s_drift_ppb     = 0;
     s_drift_valid   = false;   /* re-learn rate after a manual set */
     s_drift_samples = 0u;
+    s_consec_reject = 0u;
     s_valid         = true;
 }
 
@@ -234,6 +332,7 @@ void PTP_CLOCK_ResetDriftFilter(void)
     s_drift_samples = 0u;
     s_drift_valid   = false;
     s_drift_ppb     = 0;
+    s_consec_reject = 0u;
 }
 
 int32_t PTP_CLOCK_GetDriftIIRN(void)
@@ -246,4 +345,14 @@ void PTP_CLOCK_SetDriftIIRN(int32_t n)
     if (n < 8)    n = 8;
     if (n > 4096) n = 4096;
     s_drift_iir_n = n;
+}
+
+bool PTP_CLOCK_GetAnchorJumpLog(void)
+{
+    return s_jump_log_en;
+}
+
+void PTP_CLOCK_SetAnchorJumpLog(bool enable)
+{
+    s_jump_log_en = enable;
 }

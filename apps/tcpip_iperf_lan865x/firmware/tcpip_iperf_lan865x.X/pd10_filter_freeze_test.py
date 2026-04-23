@@ -82,23 +82,30 @@ DEFAULT_DOMINANT_X   = 2.0     # filter dominant if A_mad / B_mad >= this
 
 def pair_with_times(rising_a, rising_b, bracket_s=0.499):
     """Like cross_board_delta_us(), but returns parallel lists
-    (ch0_t_s, delta_us) so the caller can run a linear regression."""
+    (ch0_t_s, delta_us) so the caller can run a linear regression.
+
+    Each Ch1 edge is used at most once — see the equivalent comment in
+    pd10_sync_check.cross_board_delta_us for why."""
     if not rising_a or not rising_b:
         return [], []
     ts, deltas = [], []
+    used = set()
     j = 0
     for ta in rising_a:
         while j < len(rising_b) - 1 and rising_b[j + 1] < ta:
             j += 1
-        cand = []
+        best_k = None
+        best_d = None
         for k in (j, j + 1):
-            if 0 <= k < len(rising_b):
+            if 0 <= k < len(rising_b) and k not in used:
                 d = rising_b[k] - ta
-                if abs(d) <= bracket_s:
-                    cand.append(d)
-        if cand:
+                if abs(d) <= bracket_s and (best_d is None or abs(d) < abs(best_d)):
+                    best_k = k
+                    best_d = d
+        if best_k is not None:
+            used.add(best_k)
             ts.append(ta)
-            deltas.append(min(cand, key=abs) * 1e6)
+            deltas.append(best_d * 1e6)
     return ts, deltas
 
 

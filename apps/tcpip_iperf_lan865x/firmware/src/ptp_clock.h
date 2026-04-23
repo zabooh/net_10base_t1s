@@ -85,6 +85,18 @@ int32_t  PTP_CLOCK_GetDriftIIRN(void);
 void     PTP_CLOCK_SetDriftIIRN(int32_t n);
 
 /**
+ * Toggle the diagnostic "[CLK] anchor JUMP rejected ..." log line that
+ * fires every time PTP_CLOCK_Update sees an inst_ppb > ±5000 ppm sample
+ * (typically one Sync per ~10-30 s caused by LAN8651 nIRQ-delay).
+ *
+ * Default OFF — the message is verbose and only useful when
+ * investigating cyclic_fire timing artefacts.  Toggle from the CLI
+ * via the `clk_jump_log on|off` command.
+ */
+bool     PTP_CLOCK_GetAnchorJumpLog(void);
+void     PTP_CLOCK_SetAnchorJumpLog(bool enable);
+
+/**
  * Re-arm the adaptive IIR warm-up ramp without changing the configured
  * steady-state N.  Use this from test scripts to make settle-time
  * measurements reproducible — after a reset the next ~N_max samples
