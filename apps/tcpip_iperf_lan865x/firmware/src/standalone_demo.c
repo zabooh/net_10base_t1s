@@ -7,6 +7,7 @@
 #include "system/time/sys_time.h"
 #include "system/console/sys_console.h"
 #include "peripheral/port/plib_port.h"
+#include "app_log.h"
 
 #include "cyclic_fire.h"
 #include "cyclic_fire_isr.h"
@@ -41,7 +42,28 @@
  * Timing constants
  * ------------------------------------------------------------------------ */
 
-#define CYCLIC_PERIOD_US            500u
+#define CYCLIC_PERIOD_US_DEFAULT    500u
+/* Runtime-configurable cyclic_fire full rectangle period in µs.
+ * fire_callback runs twice per period (every period/2), so this is
+ * the sampling rate for the LED1/PD10 decimator.  Lowering it sharpens
+ * PD10 edge timing (each edge lands within half a fire interval of the
+ * target wallclock slot).  Raising it reduces CPU load but loosens
+ * edge timing.  Hot-applied via demo_set_cyclic_period_us() / the
+ * `demo_cyclic_period <us>` CLI. */
+static uint32_t             s_cyclic_period_us = CYCLIC_PERIOD_US_DEFAULT;
+
+/* cyclic_fire phase anchor in PTP-wallclock nanoseconds.  Non-zero →
+ * both boards phase-align their fires to the same absolute grid
+ * `anchor + N × period`, so after PTP sync their fire_callbacks
+ * execute at identical wallclock instants (the decimator's
+ * sub-sampling error becomes the SAME on both boards and cancels out
+ * in the cross-board delta).  Zero would fall back to each board's
+ * "now + period" at start time, which leaves a random phase offset
+ * up to fire_interval between boards — that's what caused the ~22 µs
+ * cross-board MAD in earlier runs.  1 ns is the smallest legal non-
+ * zero value; the +1 ns shift is visible equally on both boards and
+ * cancels in cross-board measurements. */
+static uint64_t             s_cyclic_anchor_ns = 1ULL;
 
 /* LED toggle rates encoded as PTP-wallclock half-period slot widths.
  * The decimator derives the LED state directly from the scheduled
@@ -53,8 +75,19 @@
  * board's cyclic_fire catches up over a PTP_CLOCK jump while the other
  * doesn't, producing a 180° LED mismatch that was occasionally seen on
  * the bench. */
-#define LED1_SLOT_NS                500000000ULL   /* 500 ms half-period → 1 Hz */
+#define LED1_SLOT_NS_DEFAULT        500000000ULL   /* 500 ms half-period → 1 Hz */
 #define LED2_SLOT_NS                250000000ULL   /* 250 ms half-period → 2 Hz */
+
+/* Runtime-configurable LED1/PD10 half-period in nanoseconds.  Bench-test
+ * scripts lower this to 500_000 ns (= 1 kHz rectangle) so a 10 s Saleae
+ * capture yields ~20 000 transitions per channel instead of the default
+ * 20 (at 1 Hz).  Because the decimator reads PTP_CLOCK directly on every
+ * fire, the PD10 edge timing is a pure function of the synchronised
+ * wallclock — which gives sub-µs cross-board sync, unlike the TC1-ISR
+ * driven SQUARE pattern that inherits TC1's local-crystal jitter.
+ * Must be >= CYCLIC_PERIOD_US*500 (= one fire_callback half-period, 250 µs)
+ * so the decimator samples the slot at Nyquist. */
+static uint64_t             s_led1_slot_ns     = LED1_SLOT_NS_DEFAULT;
 
 /* Dimmer-PWM for LED2 in the SYNCED-follower state.  Each "slot" is one
  * fire_callback (250 µs).  LED2 is ON for slot index 0 and OFF for the
@@ -111,6 +144,13 @@ static uint64_t         s_last_reset_tick  = 0u;
 #define WATCHDOG_MS                 500u
 static uint64_t         s_wd_last_check_tick   = 0u;
 static uint64_t         s_wd_last_cycles       = 0u;
+/* Autopilot gate.  When false (set via `demo_autopilot off` CLI), the
+ * watchdog-driven cyclic_fire restart is disabled AND the cyclic_fire
+ * user-callback is unhooked so external test scripts can own PD10 and
+ * cyclic_fire configuration (period, pattern) without the demo racing
+ * them every 500 ms.  See pd10_sync_before_after_test.py for the
+ * use-case that motivated this escape hatch. */
+static bool             s_demo_enabled     = true;
 /* Which role the operator chose — lets the decimator pick the right
  * LED2 brightness in DEMO_SYNCED (master = solid ON, follower =
  * PWM-dimmed).  Also tells the SW2 handler whether a press means "turn
@@ -188,7 +228,7 @@ static void demo_decimator(uint64_t target_ns)
      * jitter (~250 µs worst case) — both invisible at 1 Hz visual rate. */
     (void)target_ns;
     uint64_t wc_ns = PTP_CLOCK_GetTime_ns();
-    bool led1_on = (((wc_ns / LED1_SLOT_NS) & 1ULL) != 0ULL);
+    bool led1_on = (((wc_ns / s_led1_slot_ns) & 1ULL) != 0ULL);
     if (led1_on) {
         LED_ON(LED1_PIN);
         SYS_PORT_PinSet(PD10_MIRROR_PIN);
@@ -217,7 +257,7 @@ static void demo_decimator(uint64_t target_ns)
          * distinct from the master's solid ON while still lit enough to
          * identify.  Frequency = 1/(16·250µs) = 250 Hz, well above the
          * flicker-perception threshold. */
-        uint64_t tick_slot = wc_ns / (uint64_t)(CYCLIC_PERIOD_US * 500u);
+        uint64_t tick_slot = wc_ns / (uint64_t)(s_cyclic_period_us * 500u);
         bool pwm_on = ((tick_slot & (LED2_DIM_PERIOD_SLOTS - 1u)) == 0u);
         if (pwm_on) LED_ON(LED2_PIN);
         else        LED_OFF(LED2_PIN);
@@ -305,11 +345,91 @@ void standalone_demo_init(void)
      * PTP_CLOCK_ForceSet(0) satisfies cyclic_fire's "PTP valid"
      * precondition before any PTP role has been selected. */
     PTP_CLOCK_ForceSet(0u);
-    (void)cyclic_fire_start_ex(CYCLIC_PERIOD_US, 0u,
+    (void)cyclic_fire_start_ex(s_cyclic_period_us, s_cyclic_anchor_ns,
                                CYCLIC_FIRE_PATTERN_SILENT);
 
     s_state = DEMO_FREE;
     s_state_enter_tick = SYS_TIME_Counter64Get();
+}
+
+bool standalone_demo_is_enabled(void)
+{
+    return s_demo_enabled;
+}
+
+void standalone_demo_set_led1_slot_ns(uint64_t slot_ns)
+{
+    /* Guard: must be >= one fire_callback half-period so the decimator
+     * samples at Nyquist or better.  Derived from the *current*
+     * s_cyclic_period_us, so if the caller lowers the cyclic period
+     * first, they can then set a tighter slot too. */
+    uint64_t min_ns = (uint64_t)s_cyclic_period_us * 500ULL;
+    if (slot_ns < min_ns) {
+        slot_ns = min_ns;
+    }
+    s_led1_slot_ns = slot_ns;
+}
+
+uint64_t standalone_demo_get_led1_slot_ns(void)
+{
+    return s_led1_slot_ns;
+}
+
+void standalone_demo_set_cyclic_period_us(uint32_t period_us)
+{
+    if (period_us == 0u) {
+        period_us = CYCLIC_PERIOD_US_DEFAULT;
+    }
+    s_cyclic_period_us = period_us;
+    /* Re-clamp the PD10 slot if the new period invalidates the old
+     * Nyquist guard (e.g. user raised the period so now the old slot
+     * is below the new half-period). */
+    uint64_t min_ns = (uint64_t)s_cyclic_period_us * 500ULL;
+    if (s_led1_slot_ns < min_ns) {
+        s_led1_slot_ns = min_ns;
+    }
+    /* Hot-apply: stop whatever is running and let the watchdog restart
+     * (if autopilot is on) OR restart immediately (keeps PD10 live for
+     * the test script which relies on continuous edges).  Both paths
+     * will call cyclic_fire_start_ex with the new s_cyclic_period_us. */
+    cyclic_fire_stop();
+    (void)cyclic_fire_start_ex(s_cyclic_period_us, s_cyclic_anchor_ns,
+                               CYCLIC_FIRE_PATTERN_SILENT);
+    /* Reset the watchdog's last-check window so it doesn't immediately
+     * trip on the zero-cycle state right after restart. */
+    s_wd_last_check_tick = 0u;
+}
+
+uint32_t standalone_demo_get_cyclic_period_us(void)
+{
+    return s_cyclic_period_us;
+}
+
+void standalone_demo_set_enabled(bool enable)
+{
+    if (enable == s_demo_enabled) {
+        return;
+    }
+    s_demo_enabled = enable;
+    if (!enable) {
+        /* Release PD10 and cyclic_fire: unhook the decimator (so the
+         * pin isn't touched on subsequent fires) and stop cyclic_fire
+         * entirely.  The test script is then free to issue its own
+         * cyclic_start[_free] / cyclic_stop without the watchdog
+         * racing it. */
+        cyclic_fire_set_user_callback(NULL);
+        cyclic_fire_stop();
+        /* Leave LEDs in their current state — the test author can clear
+         * them via the port CLI if needed; touching them here would
+         * flicker the panel on every enable/disable toggle. */
+    } else {
+        /* Re-enable: restore the decimator.  We don't auto-restart
+         * cyclic_fire here; the watchdog will notice the stalled cycle
+         * counter on its next tick (WATCHDOG_MS) and restart with the
+         * canonical demo config. */
+        cyclic_fire_set_user_callback(demo_decimator);
+        s_wd_last_check_tick = 0u;   /* force re-seed on next watchdog run */
+    }
 }
 
 /* Watchdog on cyclic_fire's cycle counter — if fire_callback stops
@@ -318,6 +438,12 @@ void standalone_demo_init(void)
  * fresh anchor in the current PTP_CLOCK domain so both LEDs resume. */
 static void cyclic_fire_watchdog(uint64_t current_tick)
 {
+    /* Autopilot disabled → bench-test mode: leave cyclic_fire alone so
+     * the external script can stop/start/reconfigure it without the
+     * watchdog restarting it out from under the test. */
+    if (!s_demo_enabled) {
+        return;
+    }
     if (s_wd_last_check_tick == 0u) {
         s_wd_last_check_tick = current_tick;
         s_wd_last_cycles     = cyclic_fire_get_cycle_count();
@@ -335,7 +461,7 @@ static void cyclic_fire_watchdog(uint64_t current_tick)
          * will pick "now + period" as its first target — which is well
          * within the current PTP_CLOCK domain and therefore reachable. */
         cyclic_fire_stop();
-        (void)cyclic_fire_start_ex(CYCLIC_PERIOD_US, 0u,
+        (void)cyclic_fire_start_ex(s_cyclic_period_us, s_cyclic_anchor_ns,
                                    CYCLIC_FIRE_PATTERN_SILENT);
         s_wd_last_cycles = cyclic_fire_get_cycle_count();
     } else {
@@ -359,6 +485,9 @@ void standalone_demo_service(uint64_t current_tick)
         if (cur_ptp == PTP_MASTER && !s_is_master) {
             s_is_master = true;
             enter_state(DEMO_SYNCING_GM, current_tick);
+            /* Note: ptp_cli.c already emitted "PTP master STARTED (via
+             * CLI)" when the user typed `ptp_mode master`; the demo
+             * just mirrors the state machine here, no extra log line. */
         } else if (cur_ptp == PTP_SLAVE && !s_is_follower) {
             s_is_follower = true;
             enter_state(DEMO_SYNCING_FOL, current_tick);
@@ -386,6 +515,7 @@ void standalone_demo_service(uint64_t current_tick)
             s_is_follower = true;
             PTP_FOL_SetMode(PTP_SLAVE);
             enter_state(DEMO_SYNCING_FOL, current_tick);
+            app_log_event("PTP follower STARTED (via SW1)");
         } else if (sw2_pressed) {
             /* Mirror what `ptp_mode master` does in ptp_cli.c: the FOL
              * mode flag has to flip to PTP_MASTER AND PTP_GM_Init() must
@@ -397,6 +527,7 @@ void standalone_demo_service(uint64_t current_tick)
             PTP_FOL_SetMode(PTP_MASTER);
             PTP_GM_Init();
             enter_state(DEMO_SYNCING_GM, current_tick);
+            app_log_event("PTP master STARTED (via SW2)");
         }
     } else if (s_is_master && sw2_pressed
                && (s_state == DEMO_SYNCING_GM || s_state == DEMO_SYNCED)) {
@@ -408,6 +539,7 @@ void standalone_demo_service(uint64_t current_tick)
         s_is_master = false;
         PTP_FOL_SetMode(PTP_DISABLED);
         enter_state(DEMO_FREE, current_tick);
+        app_log_event("PTP master STOPPED (via SW2)");
     } else if (s_is_follower && sw1_pressed
                && (s_state == DEMO_SYNCING_FOL
                    || s_state == DEMO_SYNCED
@@ -419,6 +551,7 @@ void standalone_demo_service(uint64_t current_tick)
         if (s_iperf_running) { iperf_control_stop(); s_iperf_running = false; }
         PTP_FOL_SetMode(PTP_DISABLED);
         enter_state(DEMO_FREE, current_tick);
+        app_log_event("PTP follower STOPPED (via SW1)");
     } else if (s_is_master && sw1_pressed
                && (s_state == DEMO_SYNCING_GM || s_state == DEMO_SYNCED)) {
         /* SW1 on master board → toggle iperf TCP server on

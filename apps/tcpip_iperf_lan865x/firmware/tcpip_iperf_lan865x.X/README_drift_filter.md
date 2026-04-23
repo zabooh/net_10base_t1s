@@ -231,6 +231,27 @@ The adaptive form recovers the warm-up speed of α=1/8 (filter is useful within
 1 s) while reaching a jitter floor close to α=1/128 in steady state — the
 trade-off is broken, not just shifted.
 
+### 5.4 Why the `pd10_sync_before_after_test` 10 s MAD sits at ~22 µs, not 7 µs
+
+That test runs PD10 at 1 kHz (500 µs half-period slot) via the demo's
+decimator reading `PTP_CLOCK_GetTime_ns()` on each fire.  Per-edge jitter
+in the cross-board delta is sub-µs (measured mean |Δ| ≈ 1.3 µs between
+consecutive Ch1–Ch0 samples), so the MAD is **not** from decimator
+sampling — adding an explicit `s_cyclic_anchor_ns = 1 ns` fixed grid
+did not change it.
+
+The 22 µs floor is the slow drift of cross-board phase across the 10 s
+window: delta typically walks ~60–80 µs end-to-end, and for a linear
+ramp MAD ≈ range/4.  That walk is the adaptive filter hunting between
+Sync samples, exactly the same mechanism this README describes in §5.2
+and §5.3 — the 7.2 µs figure there was measured over a different
+capture length and filter warm-up state; the 1 kHz PD10 test simply
+picks it up as a steady-state 20-ish µs MAD.
+
+Pushing it further requires the tuning described in §6 (longer N_max
+for lower floor, or shorter Sync interval), not decimator / anchor
+work.  See [README_pd10_sync_before_after.md](README_pd10_sync_before_after.md).
+
 ---
 
 ## 6. Tuning Guidance

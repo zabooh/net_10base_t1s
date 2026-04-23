@@ -41,8 +41,10 @@
 #include "pd10_blink.h"
 #include "pd10_blink_cli.h"
 #include "standalone_demo.h"
+#include "demo_cli.h"
 #include "test_exception_cli.h"
 #include "watchdog.h"
+#include "ptp_log.h"
 #include "ptp_rx.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "system/time/sys_time.h"
@@ -88,6 +90,7 @@ static void Command_Init(void) {
     LOOP_STATS_CLI_Register();
     CYCLIC_FIRE_CLI_Register();
     PD10_BLINK_CLI_Register();
+    DEMO_CLI_Register();
     TEST_EXCEPTION_CLI_Register();
 }
 
@@ -159,6 +162,13 @@ void APP_Tasks ( void )
                 else if ((rc & RSTC_RCAUSE_EXT_Msk)     != 0u) cause = "EXT";
                 else if ((rc & RSTC_RCAUSE_WDT_Msk)     != 0u) cause = "WDT";
                 else if ((rc & RSTC_RCAUSE_SYST_Msk)    != 0u) cause = "SYST";
+                /* Boot banner goes through SYS_CONSOLE_PRINT directly
+                 * because PTP_LOG_Flush is not yet being called from
+                 * SYS_Tasks at this point — ring-buffered messages
+                 * would sit unfIlushed through the rest of Harmony init.
+                 * The separator is a single-call string so the console
+                 * queue can't split it; the [APP] tag here is the
+                 * pre-timestamp format (PTP_CLOCK isn't valid yet). */
                 SYS_CONSOLE_PRINT("\r\n"
                                   "==================================\r\n"
                                   "[APP] Build: " __DATE__ " " __TIME__
@@ -190,8 +200,8 @@ void APP_Tasks ( void )
 
             /* Register the PTP packet handler */
             bool ptpRxOk = PTP_RX_Register(eth0_net_hd);
-            SYS_CONSOLE_PRINT("[APP] PacketHandlerRegister: %s\r\n",
-                              ptpRxOk ? "OK" : "FAIL");
+            PTP_LOG("[APP] PacketHandlerRegister: %s\r\n",
+                    ptpRxOk ? "OK" : "FAIL");
 
             appData.state = APP_STATE_IDLE;
             break;
@@ -208,7 +218,7 @@ void APP_Tasks ( void )
             }
             /* === IDLE first-entry: init PTP follower HW === */
             if (!ptp_fol_initialized) {
-                SYS_CONSOLE_PRINT("[APP] STATE_IDLE entered — calling PTP_FOL_Init\r\n");
+                PTP_LOG("[APP] STATE_IDLE entered — calling PTP_FOL_Init\r\n");
                 PTP_FOL_Init();
                 /* Provide follower with local MAC so it can build Delay_Req frames */
                 TCPIP_NET_HANDLE netH = TCPIP_STACK_IndexToNet(0);
@@ -274,7 +284,7 @@ void APP_Tasks ( void )
             if (!lan865x_prev_ready && lan865x_ready &&
                 (PTP_FOL_GetMode() == PTP_MASTER))
             {
-                SYS_CONSOLE_PRINT("[PTP-GM] driver ready after reinit - re-applying TX-Match config\r\n");
+                PTP_LOG("[PTP-GM] driver ready after reinit - re-applying TX-Match config\r\n");
                 PTP_GM_Init();
             }
             lan865x_prev_ready = lan865x_ready;

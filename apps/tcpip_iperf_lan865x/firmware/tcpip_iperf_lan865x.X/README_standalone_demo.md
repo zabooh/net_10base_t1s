@@ -121,15 +121,58 @@ the two boards with different counter values → LED1 locked but 180° out
 of phase.
 
 The current implementation derives the LED state **statelessly from the
-scheduled PTP target**:
+current PTP wallclock read in the decimator**:
 
 ```c
-bool led1_on = (((target_ns / 500000000ULL) & 1ULL) != 0ULL);
+uint64_t wc_ns = PTP_CLOCK_GetTime_ns();
+bool led1_on  = (((wc_ns / s_led1_slot_ns) & 1ULL) != 0ULL);
 ```
 
-Once both boards are PTP-locked, each `fire_callback()` invocation gets
-an identical `target_ns` on both sides → identical LED phase, by
+Once both boards are PTP-locked, each `fire_callback()` reads an
+identical `wc_ns` on both sides → identical LED phase, by
 construction.  No per-board state to drift.
+
+### Phase anchor for cyclic_fire (cross-board alignment robustness)
+
+`cyclic_fire_start_ex(period, anchor, SILENT)` is now called with
+`anchor = s_cyclic_anchor_ns = 1 ns` (not `0`, which it used to be).
+With `anchor = 0`, cyclic_fire falls back to `first_target = now +
+period`, which is board-specific.  With a non-zero anchor, both boards
+compute `first_target = anchor + N × period` on the same absolute PTP
+grid — so their fire_callback invocations happen at identical
+wallclock instants once PTP is locked.
+
+Strictly speaking the fix is redundant on the boot path:
+`PTP_CLOCK_ForceSet(0)` runs just before the first `cyclic_fire_start`,
+which coincidentally made `first_target = period` on both boards even
+under `anchor = 0`.  The anchor makes alignment robust against any
+future change that removes the `ForceSet(0)` (e.g. for ptp-always-on
+configurations), so the decimator does not inherit a random phase
+offset from the boot-time PTP_CLOCK value.
+
+It does **not** reduce the observed cross-board MAD of ~22 µs —
+that floor is dominated by the PTP servo residual (`drift_ppb` IIR
+hunting between Sync samples), not decimator sampling.  See
+[README_pd10_sync_before_after.md](README_pd10_sync_before_after.md)
+for the measurement.
+
+### Runtime-configurable decimator (bench-test CLIs)
+
+Three CLI commands make the decimator configuration hot-swappable for
+bench scripts without firmware rebuilds:
+
+| CLI                          | What it does | Default |
+|------------------------------|--------------|---------|
+| `demo_autopilot [on\|off]`   | `off` unhooks the decimator and stops cyclic_fire, handing PD10 and cyclic_fire ownership to the caller.  `on` re-hooks the decimator; watchdog re-arms cyclic_fire. | `on` |
+| `demo_pd10_slot [us]`        | Set `s_led1_slot_ns` (half-period for LED1/PD10).  Values below the fire_callback half-period are clamped up (Nyquist). | 500 000 (= 1 Hz) |
+| `demo_cyclic_period [us]`    | Set `s_cyclic_period_us` (cyclic_fire full period).  Hot-applied — stops + restarts cyclic_fire with the new period + SILENT pattern.  Lower = finer edge timing, higher ISR load. | 500 (= 4 kHz fire) |
+
+These live in [demo_cli.c](../src/demo_cli.c).  The
+`pd10_sync_before_after_test.py` bench test uses `demo_pd10_slot` to
+lower the PD10 rate from 1 Hz to 1 kHz for 20 000-sample histograms
+and optionally `demo_cyclic_period` to sweep fire rate vs. sync
+accuracy.  Safe lower bound on this firmware: `cyclic_period ≥ 250 µs`
+(8 kHz fire) — below that the ISR load starves PTP processing.
 
 ---
 
@@ -139,7 +182,8 @@ construction.  No per-board state to drift.
 APP_Initialize()
     cyclic_fire_set_user_callback(demo_decimator)
     PTP_CLOCK_ForceSet(0)
-    cyclic_fire_start_ex(500 µs, anchor=0, PATTERN_SILENT)
+    cyclic_fire_start_ex(s_cyclic_period_us, s_cyclic_anchor_ns, PATTERN_SILENT)
+    //  defaults:        500 µs              1 ns (shared grid anchor)
     standalone_demo_init()       // buttons, LED pins, pull-ups
 
 main-loop IDLE state
@@ -149,10 +193,11 @@ main-loop IDLE state
         → PTP_FOL_SetMode(PTP_MASTER) + PTP_GM_Init()  on SW2
         DEMO_SYNCING_* → DEMO_SYNCED transitions
 
-cyclic_fire fire_callback every 250 µs (half-period of 500 µs)
+cyclic_fire fire_callback every s_cyclic_period_us/2 (default 250 µs)
     s_user_cb(target_ns) → demo_decimator
-        LED1 / PD10 <- bit 0 of (target_ns / 500 ms)
-        LED2        <- bit 0 of (target_ns / 250 ms)  only if SYNCING
+        wc = PTP_CLOCK_GetTime_ns()
+        LED1 / PD10 <- bit 0 of (wc / s_led1_slot_ns)    // default 500 ms
+        LED2        <- bit 0 of (wc / LED2_SLOT_NS)      // 250 ms, only if SYNCING
 ```
 
 ### Key firmware changes on this branch
@@ -183,6 +228,27 @@ cyclic_fire fire_callback every 250 µs (half-period of 500 µs)
 7. **Sync-loss detection + recovery** — see §8.
 8. **iperf payload** — `iperf_control` module lets the demo
    programmatically start / stop Harmony's iperf TCP server/client; see §7.
+9. **Runtime-configurable decimator** — `s_cyclic_period_us` (fire
+   rate) and `s_led1_slot_ns` (PD10 half-period) are statics with
+   setters `standalone_demo_set_cyclic_period_us()` and
+   `standalone_demo_set_led1_slot_ns()`, exposed via the
+   `demo_cyclic_period` / `demo_pd10_slot` CLIs.  Setter hot-applies
+   the new period: stops cyclic_fire, restarts with new `period` +
+   `s_cyclic_anchor_ns` + SILENT pattern.  Re-clamps the slot to the
+   new Nyquist minimum automatically.
+10. **`demo_autopilot off` CLI** — unhooks the decimator user callback
+    AND disables the 500 ms watchdog-driven cyclic_fire restart, so
+    bench test scripts can own cyclic_fire without the demo racing
+    them every 500 ms.  On → re-hook, watchdog re-arms.
+11. **Cyclic-fire phase anchor = 1 ns** — all three
+    `cyclic_fire_start_ex` call sites (init, watchdog restart,
+    hot-apply) pass `s_cyclic_anchor_ns` instead of `0`.  With anchor
+    > 0, both boards' first fire lands on `anchor + N × period`, not
+    each board's `now + period` — makes cross-board fire alignment
+    robust against any change that removes the early
+    `PTP_CLOCK_ForceSet(0)`.  Does not by itself improve the observed
+    cross-board MAD (~22 µs) because that floor is PTP-servo-bounded,
+    not decimator-bounded.
 
 ---
 

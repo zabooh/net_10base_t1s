@@ -39,4 +39,34 @@ void standalone_demo_init(void);
  * caller's already-captured SYS_TIME_Counter64Get() value. */
 void standalone_demo_service(uint64_t current_tick);
 
+/* Autopilot gate.  `false` disables the cyclic_fire watchdog AND
+ * unhooks the demo's user-callback from cyclic_fire, handing PD10 and
+ * cyclic_fire ownership over to an external controller (e.g. a bench
+ * test script).  `true` restores the user-callback; the watchdog will
+ * then re-arm cyclic_fire on its next tick if it finds it stopped.
+ * Bound to the CLI via `demo_autopilot on|off` in demo_cli.c. */
+void standalone_demo_set_enabled(bool enable);
+bool standalone_demo_is_enabled(void);
+
+/* LED1/PD10 half-period slot in nanoseconds (default 500_000_000 = 1 Hz
+ * rectangle).  Lowering it raises the PD10 toggle rate — bench test
+ * scripts set it to 500_000 ns (1 kHz) so a 10 s Saleae capture yields
+ * enough transitions for meaningful interval-histogram statistics.
+ * Because the decimator reads PTP_CLOCK on every fire, lower slot_ns
+ * does not degrade sync quality — cross-board jitter stays at the PTP
+ * servo residual (~100 ns) regardless of rate.
+ * Values smaller than the fire_callback half-period are clamped up. */
+void     standalone_demo_set_led1_slot_ns(uint64_t slot_ns);
+uint64_t standalone_demo_get_led1_slot_ns(void);
+
+/* cyclic_fire full rectangle period in µs (default 500 → fire_callback
+ * runs every 250 µs).  Lowering it sharpens PD10 edge timing (each
+ * edge lands within half a fire interval of the target wallclock
+ * slot) at the cost of more ISR load.  Hot-applied — caller doesn't
+ * need to stop/start cyclic_fire manually.  0 resets to the compile-
+ * time default.  The LED1 slot is re-clamped to the new Nyquist
+ * minimum if necessary. */
+void     standalone_demo_set_cyclic_period_us(uint32_t period_us);
+uint32_t standalone_demo_get_cyclic_period_us(void);
+
 #endif /* STANDALONE_DEMO_H */
