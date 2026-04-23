@@ -126,12 +126,12 @@ void iperf_control_client_start(const char *server_ip)
      * sustainable PLCA goodput on this two-board setup and produces
      * a steady 1-second progress report on the master ("Rx" stats). */
     static char a3[] = "-b";
-    static char a4[] = "9000000";
+    static char a4[] = "5000000";
     static char ip_buf[48];
     (void)strncpy(ip_buf, server_ip, sizeof(ip_buf) - 1u);
     ip_buf[sizeof(ip_buf) - 1u] = '\0';
     char *argv[] = { a0, a1, ip_buf, a3, a4, NULL };
-    SYS_CONSOLE_PRINT("[IPERF] starting UDP client to %s:5001 (cap 9 Mbps)\r\n",
+    SYS_CONSOLE_PRINT("[IPERF] starting UDP client to %s:5001 (cap 5 Mbps)\r\n",
                       server_ip);
     CommandIperfStart(&s_stub_cmd_io, 5, argv);
 }
