@@ -7,7 +7,7 @@
       //   NameError: global name 'is_debug_build' is not defined
       // "launch" triggers MDB to reprogram via the broken script path.
       // Use this "attach" config instead:
-      //   1. python ../../../../tools/flash/flash.py   (from repo root: python tools/flash/flash.py)
+      //   1. python ../../../../flash.py   (from repo root: python flash.py)
       //   2. F5 -> "Attach"       (MDB connects without reprogramming)
       "name": "Attach (after flash.py)",
       "type": "mplab-core-da",

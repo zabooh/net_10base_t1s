@@ -23,11 +23,15 @@ tools/
 
 | Script | Purpose |
 |--------|---------|
-| [flash.py](flash/flash.py) | Program both boards via MPLAB MDB |
-| [mdb_flash.py](../mdb_flash.py) | Low-level MDB wrapper (lives at repo root) |
-| [setup_flasher.py](../setup_flasher.py) | Detect + configure debugger COM ports (lives at repo root) |
-| [setup_compiler.py](../setup_compiler.py) | Compiler environment setup (lives at repo root) |
-| [setup_debug.py](../setup_debug.py) | Debug session initialization (lives at repo root) |
+All flash / setup bootstrap scripts now live at the repo root:
+
+| Script | Purpose |
+|--------|---------|
+| [flash.py](../flash.py) | Program both boards via MPLAB MDB |
+| [mdb_flash.py](../mdb_flash.py) | Low-level MDB wrapper |
+| [setup_flasher.py](../setup_flasher.py) | Detect + configure debugger COM ports |
+| [setup_compiler.py](../setup_compiler.py) | Compiler environment setup |
+| [setup_debug.py](../setup_debug.py) | Debug session initialization |
 
 **Quick start:** run `setup_flasher.py` once, then `flash.py`.
 

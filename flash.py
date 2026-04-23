@@ -26,7 +26,7 @@ import argparse
 import json
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
+_REPO_ROOT = _HERE
 
 HEX_DEFAULT = os.path.join(
     _REPO_ROOT,

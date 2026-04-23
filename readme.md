@@ -17,7 +17,7 @@ synchronisation accuracy over 10BASE-T1S.
 python setup_flasher.py      :: once — detect the two debugger COM ports
 python setup_compiler.py     :: once — pick an installed XC32 version
 build.bat                    :: incremental build (build.bat rebuild for clean)
-python tools\flash\flash.py  :: program both boards with out/.../default.hex
+python flash.py              :: program both boards with out/.../default.hex
 ```
 
 Top-level scripts (`setup_*.py`, `build.bat`, `build_summary.py`,
