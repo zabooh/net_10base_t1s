@@ -26,8 +26,8 @@ tools/
 | [flash.py](flash/flash.py) | Program both boards via MPLAB MDB |
 | [mdb_flash.py](flash/mdb_flash.py) | Low-level MDB wrapper |
 | [setup_flasher.py](flash/setup_flasher.py) | Detect + configure debugger COM ports |
-| [setup_compiler.py](flash/setup_compiler.py) | Compiler environment setup |
-| [setup_debug.py](flash/setup_debug.py) | Debug session initialization |
+| [setup_compiler.py](../setup_compiler.py) | Compiler environment setup (lives at repo root) |
+| [setup_debug.py](../setup_debug.py) | Debug session initialization (lives at repo root) |
 
 **Quick start:** run `setup_flasher.py` once, then `flash.py`.
 

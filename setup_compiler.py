@@ -19,7 +19,7 @@ import sys
 # project directory.
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
+REPO_ROOT = SCRIPT_DIR
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "setup_compiler.config")
 TOOLCHAIN_CMAKE = os.path.join(
     REPO_ROOT,
