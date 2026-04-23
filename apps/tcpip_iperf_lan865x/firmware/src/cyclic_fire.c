@@ -76,17 +76,30 @@ static void fire_callback(uint64_t target_ns, uint64_t actual_ns)
     uint64_t half_period_ns = (uint64_t)s_period_us * 500ULL;
     uint64_t next_target_ns = target_ns + half_period_ns;
 
-    /* If we slipped past the next target already (unlikely at period ≥ 400 µs
-     * but possible if something stalled the main loop), catch up by rebasing
-     * to a future slot and count a miss. */
+    /* If we slipped past the next target already (can happen after a
+     * PTP hard-sync jump of tens of ms), catch up in O(1) by computing
+     * how many full half-periods we lost and rebasing in one step.
+     *
+     * The previous implementation was an incremental loop
+     *   while (next_target_ns <= now_ns) next_target_ns += half_period_ns;
+     * which takes (jump_ns / half_period_ns) iterations.  With a 13 ms
+     * hard-sync jump and half_period = 250 µs that is 52 000 iterations,
+     * executed inside the TC1 ISR context — enough to starve the main
+     * loop and trip the WDT.  Captured via find_exception.py on a
+     * follower that kept cycling GM_RESET → HARDSYNC during the
+     * cyclic-isr bring-up, 2026-04-23. */
     uint64_t now_ns = PTP_CLOCK_GetTime_ns();
-    while (next_target_ns <= now_ns) {
-        next_target_ns += half_period_ns;
-        s_misses++;
-        /* Missed half-period still counts toward the MARKER phase; keep
-         * the pattern aligned to absolute slots. */
+    if (next_target_ns <= now_ns && half_period_ns > 0ULL) {
+        uint64_t behind_ns = now_ns - next_target_ns;
+        /* +1 ensures the result is strictly in the future. */
+        uint64_t n_misses  = (behind_ns / half_period_ns) + 1ULL;
+        next_target_ns    += n_misses * half_period_ns;
+        s_misses          += (uint32_t)n_misses;
         if (s_pattern == CYCLIC_FIRE_PATTERN_MARKER) {
-            s_marker_phase = (s_marker_phase + 1u) % 10u;
+            /* Advance the MARKER phase by the same number of missed
+             * slots so the pattern stays aligned to absolute slots. */
+            s_marker_phase = (uint8_t)(((uint32_t)s_marker_phase
+                                        + (uint32_t)n_misses) % 10u);
         }
     }
 

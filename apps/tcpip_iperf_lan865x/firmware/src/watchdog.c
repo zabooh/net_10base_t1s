@@ -44,10 +44,13 @@ void watchdog_init(void)
     WDT_REGS->WDT_INTFLAG = WDT_INTFLAG_EW_Msk;       /* W1C any stale flag */
     WDT_REGS->WDT_INTENSET = WDT_INTENSET_EW_Msk;
 
-    /* NVIC: priority equal to the other custom ISRs (3) so the EW
-     * fires at the next breathing window even if a long-running ISR
-     * is currently active (NVIC priority same → tail-chain). */
-    NVIC_SetPriority(WDT_IRQn, 3);
+    /* NVIC priority 0 = highest on Cortex-M4 — so the EW ISR can ALWAYS
+     * preempt any other active handler (SysTick=7, DMAC/SERCOM=7, TC1
+     * cyclic_fire=3, EIC EXTINT14 nIRQ=default).  We saw silent WDT
+     * resets with no dump when priority 3 tail-chained behind a
+     * long-running SPI or TC1 ISR — priority 0 guarantees the dump
+     * path runs no matter what the CPU was doing. */
+    NVIC_SetPriority(WDT_IRQn, 0);
     NVIC_EnableIRQ(WDT_IRQn);
 
     /* Enable.  ALWAYSON would prevent later disable for a sleep mode —
@@ -104,3 +107,4 @@ void __attribute__((naked, noreturn)) WDT_Handler(void)
  * file scope so the ldr =wdt_label_str literal load resolves. */
 const char wdt_label_str[] __attribute__((used)) =
     "WatchdogEW (firmware hung — main loop did not kick the WDT for ~1 s)";
+
