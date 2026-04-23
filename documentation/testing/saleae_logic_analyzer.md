@@ -236,7 +236,7 @@ newly added rectangle pattern's frequency.  For **cross-board sync
 quality** use `cyclic_fire_hw_test.py` instead — it understands pair
 semantics.
 
-Full details: [README_saleae_freq_check.md](README_saleae_freq_check.md).
+Full details: [saleae_freq_characterization.md](saleae_freq_characterization.md).
 
 ---
 
@@ -472,11 +472,11 @@ the effective update rate tops out at ~3 Hz on Logic 8.
 
 ## See also
 
-- [README_saleae_freq_check.md](README_saleae_freq_check.md) — deep-dive into
+- [saleae_freq_characterization.md](saleae_freq_characterization.md) — deep-dive into
   just the `saleae_freq_check.py` output format and measurement accuracy.
-- [readme.md](../../../../readme.md) §5.12 — `cyclic_fire` module
+- [readme.md](../../readme.md) §5.12 — `cyclic_fire` module
   overview + bench measurement results.
-- [README_PTP.md](README_PTP.md) §§4.2, 4.6, 12 — PTP anchor-tick
+- [implementation.md](../ptp/implementation.md) §§4.2, 4.6, 12 — PTP anchor-tick
   capture path, IIR drift filter, cross-board SW accuracy ceiling.
 - `cyclic_fire_branch_state.md` (memory) — current state of the
   cyclic-fire branch and what the last measurement run looked like.

@@ -1,7 +1,7 @@
 # Software PTP Clock — CLI-Test
 
 Dieses Dokument beschreibt wie der nanosekunden-aufgelöste Software-Timestamp
-(siehe `README_timestamp.md`) auf zwei Boards (Grandmaster + Follower) über den
+(siehe [software_ptp_clock_design.md](software_ptp_clock_design.md)) auf zwei Boards (Grandmaster + Follower) über den
 seriellen CLI getestet werden kann.
 
 ---

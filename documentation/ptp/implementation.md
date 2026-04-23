@@ -670,7 +670,7 @@ PTP_CLOCK_Update(wallclock_ns, sys_tick):
                 // s_drift_iir_n is runtime-tunable via `drift_iir_n` CLI
                 // (default 128, range 8..4096); `drift_iir_reset` re-arms
                 // the ramp without disturbing the anchor.  See
-                // README_drift_filter.md for the full design rationale.
+                // documentation/ptp/drift_filter.md for the full design rationale.
                 s_drift_ppb = ((N_eff-1) × s_drift_ppb + inst_ppb) / N_eff
                 s_drift_samples++
     anchor_wc_ns = wallclock_ns
@@ -998,8 +998,8 @@ accuracy, because the read happens some distance away from the event of interest
 |---|---|---|
 | 1. Clock value itself | HW-PTP FINE anchor error + drift-corrected TC0 interpolation | ~100 ns – 1 µs |
 | 2. Call-site latency | ISR dispatch, FreeRTOS scheduling, stack processing between event and `GetTime_ns()` call | 200 ns (ISR) – several ms (task under load) |
-| 3. Cross-board SW stamping (2 boards stamp same external event) | Forward/reverse path asymmetry in SPI + TCP/IP stack | ~25 µs (measured, see README_NTP §7) |
-| 4. Cross-board SW firing (2 boards fire GPIO at same PTP-wallclock moment) | Anchor-strategy asymmetry + drift-filter short-term wander + main-loop / tfuture spin latency | **~7 µs MAD (10 s capture) / ~39 µs MAD (60 s capture)** — measured 2026-04-23 with TC1-ISR cyclic_fire backend + adaptive IIR drift filter (warm-up α=1 → steady-state α=1/128). 60 s window also shows **0.0 ppm cross-board rate match**. See [README_drift_filter.md](README_drift_filter.md) §5. Previous values with fixed `DRIFT_IIR_N=128`: ~30 µs median, ~35 µs MAD. |
+| 3. Cross-board SW stamping (2 boards stamp same external event) | Forward/reverse path asymmetry in SPI + TCP/IP stack | ~25 µs (measured, see [ntp_reference.md](ntp_reference.md) §7) |
+| 4. Cross-board SW firing (2 boards fire GPIO at same PTP-wallclock moment) | Anchor-strategy asymmetry + drift-filter short-term wander + main-loop / tfuture spin latency | **~7 µs MAD (10 s capture) / ~39 µs MAD (60 s capture)** — measured 2026-04-23 with TC1-ISR cyclic_fire backend + adaptive IIR drift filter (warm-up α=1 → steady-state α=1/128). 60 s window also shows **0.0 ppm cross-board rate match**. See [drift_filter.md](drift_filter.md) §5. Previous values with fixed `DRIFT_IIR_N=128`: ~30 µs median, ~35 µs MAD. |
 
 ### 12.2 Practical guidance
 
@@ -1034,7 +1034,7 @@ pure-software sync protocol on this platform and to demonstrate — by direct
 comparison with HW-PTP running concurrently — how much of the sync quality
 actually comes from the hardware timestamping chain.
 
-Among its findings (full results in `README_NTP.md` §7 and §8):
+Among its findings (full results in [ntp_reference.md](ntp_reference.md) §7 and §8):
 
 - SW-NTP on free-running crystals: **~850 µs residual jitter**, slope gives
   the ±165 ppm crystal mismatch of the specific board pair.
@@ -1043,7 +1043,7 @@ Among its findings (full results in `README_NTP.md` §7 and §8):
   top of the expected ~1800× slope reduction — HW-PTP makes the clock not just
   more accurate but also inherently steadier.
 
-Full documentation: [README_NTP.md](README_NTP.md).
+Full documentation: [ntp_reference.md](ntp_reference.md).
 
 ---
 
@@ -1067,4 +1067,4 @@ Two CLI commands expose the filter at runtime:
 - `drift_iir_reset` — re-arm the warm-up ramp for reproducible measurements
 
 Full design rationale, measurement methodology, fixed-vs-adaptive comparison,
-and tuning guidance: [README_drift_filter.md](README_drift_filter.md).
+and tuning guidance: [drift_filter.md](drift_filter.md).

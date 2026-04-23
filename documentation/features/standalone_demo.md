@@ -60,7 +60,7 @@ drifting — the whole point of PTP.
 4. **Wait ~3 s.** Both LED2 transition from blinking to **SOLID ON** —
    Board A when its servo reaches `FINE` (typically 2.7 s after SW1, with
    the adaptive drift filter described in
-   [README_drift_filter.md](README_drift_filter.md)), Board B after a fixed
+   [drift_filter.md](../ptp/drift_filter.md)), Board B after a fixed
    2 s blink window matching Board A's typical lock time.
 5. **Observe LED1**: the two boards' 1 Hz rectangles are now phase-locked
    and do not drift apart over time.
@@ -153,7 +153,7 @@ offset from the boot-time PTP_CLOCK value.
 It does **not** reduce the observed cross-board MAD of ~22 µs —
 that floor is dominated by the PTP servo residual (`drift_ppb` IIR
 hunting between Sync samples), not decimator sampling.  See
-[README_pd10_sync_before_after.md](README_pd10_sync_before_after.md)
+[pd10_sync_before_after_tests.md](../testing/pd10_sync_before_after_tests.md)
 for the measurement.
 
 ### Runtime-configurable decimator (bench-test CLIs)
@@ -167,7 +167,7 @@ bench scripts without firmware rebuilds:
 | `demo_pd10_slot [us]`        | Set `s_led1_slot_ns` (half-period for LED1/PD10).  Values below the fire_callback half-period are clamped up (Nyquist). | 500 000 (= 1 Hz) |
 | `demo_cyclic_period [us]`    | Set `s_cyclic_period_us` (cyclic_fire full period).  Hot-applied — stops + restarts cyclic_fire with the new period + SILENT pattern.  Lower = finer edge timing, higher ISR load. | 500 (= 4 kHz fire) |
 
-These live in [demo_cli.c](../src/demo_cli.c).  The
+These live in [demo_cli.c](../../apps/tcpip_iperf_lan865x/firmware/src/demo_cli.c).  The
 `pd10_sync_before_after_test.py` bench test uses `demo_pd10_slot` to
 lower the PD10 rate from 1 Hz to 1 kHz for 20 000-sample histograms
 and optionally `demo_cyclic_period` to sweep fire rate vs. sync
@@ -283,7 +283,7 @@ The test guides the operator through three phases:
    ideally under 1 ms.  Measured 2026-04-23 with the adaptive drift
    filter + TC1-ISR cyclic_fire backend: **median −32 µs, MAD 39 µs,
    0.0 ppm cross-board rate match** on a 60 s capture (full numbers and
-   methodology in [README_drift_filter.md](README_drift_filter.md) §5).
+   methodology in [drift_filter.md](../ptp/drift_filter.md) §5).
 
 ### Useful flags
 

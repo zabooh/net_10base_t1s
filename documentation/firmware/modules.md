@@ -76,7 +76,7 @@ Works identically on Grandmaster and Follower. The anchor source differs (`PTP_F
 
 **Dependencies** — Only a 64-bit monotonic tick source (`SYS_TIME_Counter64Get`). Nothing PTP-specific in the core logic — can be driven by any timing source that yields `(now_time, now_tick)` pairs.
 
-**API** — [ptp_clock.h](ptp_clock.h)
+**API** — [ptp_clock.h](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_clock.h)
 
 ```c
 void     PTP_CLOCK_Update(uint64_t wallclock_ns, uint64_t sys_tick);
@@ -99,7 +99,7 @@ void     PTP_CLOCK_ForceSet(uint64_t wallclock_ns);
 
 **Dependencies** — None (just `<stdint.h>`).
 
-**API** — [filters.h](filters.h)
+**API** — [filters.h](../../apps/tcpip_iperf_lan865x/firmware/src/filters.h)
 
 ```c
 double firLowPassFilter(int32_t input, lpfState  *state);
@@ -125,7 +125,7 @@ State machine covers UNINIT → MATCHFREQ → HARD_SYNC → COARSE → FINE.
 
 **Dependencies** — LAN865x driver API (`DRV_LAN865X_*`), `ptp_clock`, `filters`, `ptp_log`, `ptp_offset_trace`, `ptp_ts_ipc`.
 
-**API** — [ptp_fol_task.h](ptp_fol_task.h)
+**API** — [ptp_fol_task.h](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_fol_task.h)
 
 ```c
 void      PTP_FOL_Init(void);
@@ -156,7 +156,7 @@ Also exposes a configurable anchor delay (`PTP_GM_SetExtraAnchorDelay`) used to 
 
 **Dependencies** — LAN865x driver, `ptp_clock`, `ptp_log`.
 
-**API** — [ptp_gm_task.h](ptp_gm_task.h)
+**API** — [ptp_gm_task.h](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_gm_task.h)
 
 ```c
 void PTP_GM_Init(void);
@@ -189,7 +189,7 @@ void PTP_GM_RequestRegDump(void);
 
 **Dependencies** — Defined by the TC6 driver callback; only the header is consumed elsewhere.
 
-**API** — [ptp_ts_ipc.h](ptp_ts_ipc.h)
+**API** — [ptp_ts_ipc.h](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_ts_ipc.h)
 
 ```c
 extern volatile PTP_RxTimestampEntry_t g_ptp_rx_ts;
@@ -208,7 +208,7 @@ extern volatile PTP_RxFrameEntry_t     g_ptp_raw_rx;
 
 **Dependencies** — Harmony TCP/IP stack, `ptp_ts_ipc`, `PTP_FOL_task`, `ptp_gm_task`.
 
-**API** — [ptp_rx.h](ptp_rx.h)
+**API** — [ptp_rx.h](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_rx.h)
 
 ```c
 bool PTP_RX_Register(TCPIP_NET_HANDLE hNet);   /* call once after NetIsUp() */
@@ -229,7 +229,7 @@ void PTP_RX_Poll(void);                        /* main-loop tick */
 
 **Dependencies** — `SYS_CONSOLE_PRINT` (swap for any thread-unsafe printer).
 
-**API** — [ptp_log.h](ptp_log.h)
+**API** — [ptp_log.h](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_log.h)
 
 ```c
 void ptp_log_enqueue(const char *fmt, ...);
@@ -249,7 +249,7 @@ void ptp_log_flush(void);
 
 **Dependencies** — `SYS_TIME_Counter64Get`.
 
-**API** — [loop_stats.h](loop_stats.h)
+**API** — [loop_stats.h](../../apps/tcpip_iperf_lan865x/firmware/src/loop_stats.h)
 
 ```c
 typedef enum {
@@ -276,7 +276,7 @@ void LOOP_STATS_Print(void);
 
 **Dependencies** — None (plain C99 + `SYS_CONSOLE_PRINT` for dump).
 
-**API** — [ptp_offset_trace.h](ptp_offset_trace.h)
+**API** — [ptp_offset_trace.h](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_offset_trace.h)
 
 ```c
 void     ptp_offset_trace_record(int32_t offset_ns, uint8_t sync_status);
@@ -295,7 +295,7 @@ uint32_t ptp_offset_trace_count(void);
 
 **Description** — Same pattern as `ptp_offset_trace` but stores `int64_t` because SW-NTP offsets grow unbounded when HW-PTP is off and crystal drift accumulates. Each entry carries offset + status byte (0=timeout, 1=valid).
 
-**API** — [sw_ntp_offset_trace.h](sw_ntp_offset_trace.h)
+**API** — [sw_ntp_offset_trace.h](../../apps/tcpip_iperf_lan865x/firmware/src/sw_ntp_offset_trace.h)
 
 ```c
 void     sw_ntp_offset_trace_record(int64_t offset_ns, uint8_t valid);
@@ -318,7 +318,7 @@ Single 32-byte UDP frame (opcode + three int64 timestamps) per request. Port 123
 
 **Dependencies** — `ptp_clock`, Harmony TCP/IP UDP socket API.
 
-**API** — [sw_ntp.h](sw_ntp.h)
+**API** — [sw_ntp.h](../../apps/tcpip_iperf_lan865x/firmware/src/sw_ntp.h)
 
 ```c
 void          sw_ntp_init(void);
@@ -346,7 +346,7 @@ Two PTP-synchronized boards armed with the same `target_ns` fire within hundreds
 
 **Dependencies** — `ptp_clock`, `SYS_TIME_Counter64Get`.
 
-**API** — [tfuture.h](tfuture.h)
+**API** — [tfuture.h](../../apps/tcpip_iperf_lan865x/firmware/src/tfuture.h)
 
 ```c
 void            tfuture_init(void);
@@ -395,7 +395,7 @@ Trade-off — shorter periods mean more CPU spent in `tfuture`'s busy-wait windo
 
 **Dependencies** — `tfuture`, `ptp_clock`, Harmony `SYS_PORT_PinToggle / PinSet / PinClear`.
 
-**API** — [cyclic_fire.h](cyclic_fire.h)
+**API** — [cyclic_fire.h](../../apps/tcpip_iperf_lan865x/firmware/src/cyclic_fire.h)
 
 ```c
 #define CYCLIC_FIRE_DEFAULT_PERIOD_US  1000u  /* full rectangle period → 1 kHz on PD10 */
@@ -431,7 +431,7 @@ Drift behaviour: the scheduled toggle tick advances by exactly one half-period e
 
 **Dependencies** — `SYS_TIME_Counter64Get`, `SYS_PORT_PinToggle`.  Nothing else.
 
-**API** — [pd10_blink.h](pd10_blink.h)
+**API** — [pd10_blink.h](../../apps/tcpip_iperf_lan865x/firmware/src/pd10_blink.h)
 
 ```c
 void     pd10_blink_init(void);                       /* called from APP_Initialize */
@@ -463,7 +463,7 @@ void MODULE_CLI_Register(void);     /* call once at startup    */
 
 **Dependencies** — `DRV_LAN865X_*`, `SYS_CMD`, `SYS_TIME_Counter64Get`.
 
-**API** — [lan_regs_cli.h](lan_regs_cli.h)
+**API** — [lan_regs_cli.h](../../apps/tcpip_iperf_lan865x/firmware/src/lan_regs_cli.h)
 
 ```c
 void LAN_REGS_CLI_Register(void);
@@ -482,7 +482,7 @@ void LAN_REGS_CLI_Service(uint64_t current_tick, uint64_t ticks_per_ms);
 
 **Dependencies** — `PTP_FOL_task`, `ptp_gm_task`, `ptp_clock`, `ptp_offset_trace`, `SYS_CMD`.
 
-**API** — [ptp_cli.h](ptp_cli.h)
+**API** — [ptp_cli.h](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_cli.h)
 
 ```c
 void PTP_CLI_Register(void);
@@ -498,7 +498,7 @@ void PTP_CLI_Register(void);
 
 **Dependencies** — `sw_ntp`, `sw_ntp_offset_trace`, `SYS_CMD`.
 
-**API** — [sw_ntp_cli.h](sw_ntp_cli.h)
+**API** — [sw_ntp_cli.h](../../apps/tcpip_iperf_lan865x/firmware/src/sw_ntp_cli.h)
 
 ```c
 void SW_NTP_CLI_Register(void);
@@ -514,7 +514,7 @@ void SW_NTP_CLI_Register(void);
 
 **Dependencies** — `tfuture`, `ptp_clock` (for drift display), `SYS_CMD`.
 
-**API** — [tfuture_cli.h](tfuture_cli.h)
+**API** — [tfuture_cli.h](../../apps/tcpip_iperf_lan865x/firmware/src/tfuture_cli.h)
 
 ```c
 void TFUTURE_CLI_Register(void);
@@ -530,7 +530,7 @@ void TFUTURE_CLI_Register(void);
 
 **Dependencies** — `loop_stats`, `SYS_CMD`.
 
-**API** — [loop_stats_cli.h](loop_stats_cli.h)
+**API** — [loop_stats_cli.h](../../apps/tcpip_iperf_lan865x/firmware/src/loop_stats_cli.h)
 
 ```c
 void LOOP_STATS_CLI_Register(void);
@@ -546,7 +546,7 @@ void LOOP_STATS_CLI_Register(void);
 
 **Dependencies** — `cyclic_fire`, `SYS_CMD`.
 
-**API** — [cyclic_fire_cli.h](cyclic_fire_cli.h)
+**API** — [cyclic_fire_cli.h](../../apps/tcpip_iperf_lan865x/firmware/src/cyclic_fire_cli.h)
 
 ```c
 void CYCLIC_FIRE_CLI_Register(void);
@@ -564,7 +564,7 @@ Note on `MAX_CMD_GROUP`: adding this module pushed the number of SYS_CMD groups 
 
 **Dependencies** — `pd10_blink`, `SYS_CMD`.
 
-**API** — [pd10_blink_cli.h](pd10_blink_cli.h)
+**API** — [pd10_blink_cli.h](../../apps/tcpip_iperf_lan865x/firmware/src/pd10_blink_cli.h)
 
 ```c
 void PD10_BLINK_CLI_Register(void);
@@ -588,7 +588,7 @@ void PD10_BLINK_CLI_Register(void);
 
 **Dependencies** — All of the above.
 
-**API** — [app.h](app.h)
+**API** — [app.h](../../apps/tcpip_iperf_lan865x/firmware/src/app.h)
 
 ```c
 void APP_Initialize(void);

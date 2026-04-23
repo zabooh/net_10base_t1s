@@ -141,7 +141,7 @@ instruction that faulted. Everything else helps narrow down WHY.
 
 ## 4. Firmware Components
 
-### 4.1 [exception_handler.c](../../firmware/src/exception_handler.c) — Fault Vectors and Naked Trampolines
+### 4.1 [exception_handler.c](../../apps/tcpip_iperf_lan865x/firmware/src/exception_handler.c) — Fault Vectors and Naked Trampolines
 
 Provides strong overrides for the weak fault handlers in
 `config/default/exceptions.c`:
@@ -176,7 +176,7 @@ all relevant SCB registers + stacked R0-R3,R12,LR,PC,xPSR + EXC_RETURN +
 ICSR via the polled SERCOM1 path, drains TXC, then triggers
 `SCB->AIRCR = (0x05FA<<16) | SYSRESETREQ` for a controller reset.
 
-### 4.2 [watchdog.c](../../firmware/src/watchdog.c) — SAM E54 WDT with Early-Warning
+### 4.2 [watchdog.c](../../apps/tcpip_iperf_lan865x/firmware/src/watchdog.c) — SAM E54 WDT with Early-Warning
 
 The CPU-fault path catches *traps*. It does not catch *deadlocks* — a
 spinning ISR or a starvation loop produces no exception. For those we use
@@ -224,7 +224,7 @@ main loop did not kick the WDT for ~1 s)"`. The captured PC is the
 instruction the CPU was executing when the EW interrupt preempted —
 usually inside whatever ISR or busy-loop is causing the hang.
 
-### 4.3 [test_exception_cli.c](../../firmware/src/test_exception_cli.c) — Deliberate Fault Triggers
+### 4.3 [test_exception_cli.c](../../apps/tcpip_iperf_lan865x/firmware/src/test_exception_cli.c) — Deliberate Fault Triggers
 
 Available via the `test_exception` CLI command on either UART. Used to
 verify the dump-and-reset path works on the wire after firmware changes.
@@ -249,7 +249,7 @@ cleaner CFSR sub-bit diagnostics in the dump.
 
 ---
 
-## 5. [find_exception.py](find_exception.py) — Decode the Dump
+## 5. [find_exception.py](../../tools/test-harness/find_exception.py) — Decode the Dump
 
 The Python companion that turns the raw UART dump into a source-line
 pointer. Lives next to the build output so it can find the ELF
@@ -436,19 +436,19 @@ code. That fact alone narrows the search by 10×.
 
 | File | Role |
 |---|---|
-| [apps/tcpip_iperf_lan865x/firmware/src/exception_handler.c](../../firmware/src/exception_handler.c) | Strong overrides + naked trampolines + fault_dump_and_reset() |
-| [apps/tcpip_iperf_lan865x/firmware/src/watchdog.c](../../firmware/src/watchdog.c) | WDT init, non-blocking kick, WDT_Handler trampoline |
-| [apps/tcpip_iperf_lan865x/firmware/src/watchdog.h](../../firmware/src/watchdog.h) | API: `watchdog_init()`, `watchdog_kick()` |
-| [apps/tcpip_iperf_lan865x/firmware/src/test_exception_cli.c](../../firmware/src/test_exception_cli.c) | `test_exception` CLI with all kinds |
-| [apps/tcpip_iperf_lan865x/firmware/src/test_exception_cli.h](../../firmware/src/test_exception_cli.h) | CLI registration prototype |
-| [apps/tcpip_iperf_lan865x/firmware/src/app.c](../../firmware/src/app.c) | Calls `watchdog_init()` on first IDLE entry, `watchdog_kick()` per main-loop iteration |
-| [find_exception.py](find_exception.py) | Decode + addr2line + disassembly context |
+| [apps/tcpip_iperf_lan865x/firmware/src/exception_handler.c](../../apps/tcpip_iperf_lan865x/firmware/src/exception_handler.c) | Strong overrides + naked trampolines + fault_dump_and_reset() |
+| [apps/tcpip_iperf_lan865x/firmware/src/watchdog.c](../../apps/tcpip_iperf_lan865x/firmware/src/watchdog.c) | WDT init, non-blocking kick, WDT_Handler trampoline |
+| [apps/tcpip_iperf_lan865x/firmware/src/watchdog.h](../../apps/tcpip_iperf_lan865x/firmware/src/watchdog.h) | API: `watchdog_init()`, `watchdog_kick()` |
+| [apps/tcpip_iperf_lan865x/firmware/src/test_exception_cli.c](../../apps/tcpip_iperf_lan865x/firmware/src/test_exception_cli.c) | `test_exception` CLI with all kinds |
+| [apps/tcpip_iperf_lan865x/firmware/src/test_exception_cli.h](../../apps/tcpip_iperf_lan865x/firmware/src/test_exception_cli.h) | CLI registration prototype |
+| [apps/tcpip_iperf_lan865x/firmware/src/app.c](../../apps/tcpip_iperf_lan865x/firmware/src/app.c) | Calls `watchdog_init()` on first IDLE entry, `watchdog_kick()` per main-loop iteration |
+| [find_exception.py](../../tools/test-harness/find_exception.py) | Decode + addr2line + disassembly context |
 
 Related documentation:
 
-- [README_PTP.md](README_PTP.md) §4 — main-loop structure that the WDT
+- [implementation.md](../ptp/implementation.md) §4 — main-loop structure that the WDT
   protects.
-- [README_standalone_demo.md](README_standalone_demo.md) — uses a *separate*
+- [standalone_demo.md](../features/standalone_demo.md) — uses a *separate*
   software watchdog inside the demo state machine to detect cyclic_fire
   liveness. Don't confuse the two: that one detects an application-level
   stall (cycles counter not advancing), this one is the SAM E54 hardware

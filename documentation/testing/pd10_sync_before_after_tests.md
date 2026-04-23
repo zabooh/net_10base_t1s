@@ -5,7 +5,7 @@ twice — once with PTP disabled (boards free-run on their local crystals)
 and once with PTP locked — and shows the effect of synchronisation
 directly on the scope data.
 
-Script: [pd10_sync_before_after_test.py](pd10_sync_before_after_test.py)
+Script: [pd10_sync_before_after_test.py](../../tools/ptp-analysis/sync-tests/pd10_sync_before_after_test.py)
 
 ---
 
@@ -42,8 +42,8 @@ PD10 directly. The test runs at 1 kHz via the
 via `demo_cyclic_period <us>` — halving the cyclic period places each
 PD10 edge into a half-width sampling window around its target slot
 boundary, tightening cross-board MAD. See
-[standalone_demo.c](../src/standalone_demo.c) and
-[demo_cli.c](../src/demo_cli.c).
+[standalone_demo.c](../../apps/tcpip_iperf_lan865x/firmware/src/standalone_demo.c) and
+[demo_cli.c](../../apps/tcpip_iperf_lan865x/firmware/src/demo_cli.c).
 
 ## PASS/FAIL gates
 
@@ -189,7 +189,7 @@ lines of evidence:
    hunting between Sync samples), not decimator aliasing.
 
 **A cyclic_fire phase anchor** (`s_cyclic_anchor_ns = 1 ns`, new in
-[standalone_demo.c](../src/standalone_demo.c)) was added so both
+[standalone_demo.c](../../apps/tcpip_iperf_lan865x/firmware/src/standalone_demo.c)) was added so both
 boards' fires land on an absolute grid `anchor + N·period` rather than
 each board's own "now + period" at start time. That fix works and
 stays in the firmware — but it turned out to be a no-op for MAD,
@@ -203,7 +203,7 @@ by decimator timing.
 
 **To push MAD below ~20 µs would require PTP-servo work:**
 a shorter `drift_ppb` IIR (sharper tracking, more jitter per sample —
-see [README_drift_filter.md](README_drift_filter.md)), a phase-lock
+see [drift_filter.md](../ptp/drift_filter.md)), a phase-lock
 loop on top of the current rate-only lock, a faster Sync interval
 (125 ms → 31 ms), or calibrating the LAN865x RX-pipeline asymmetry
 (`PTP_FOL_ANCHOR_OFFSET_NS`). None of that is a decimator issue.
@@ -260,10 +260,10 @@ output, or lower-cost PTP processing.
 
 ## Related documents
 
-- [README_standalone_demo.md](README_standalone_demo.md) — the
+- [standalone_demo.md](../features/standalone_demo.md) — the
   PTP_CLOCK-driven decimator this test relies on
-- [README_pd10_sync_test.md](README_pd10_sync_test.md) — single-phase
+- [pd10_sync_tests.md](pd10_sync_tests.md) — single-phase
   synced-only cross-board test (no before/after comparison)
-- [README_drift_filter.md](README_drift_filter.md) — why the
+- [drift_filter.md](../ptp/drift_filter.md) — why the
   `drift_ppb` IIR corrects the follower rate but not the per-edge
   jitter

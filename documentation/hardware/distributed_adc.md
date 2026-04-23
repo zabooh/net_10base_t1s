@@ -28,7 +28,7 @@ output level (`PD10` toggles via the `cyclic_fire` module), reaches:
   `--cyclic-period-us 250` in the bench test).  `fire_callback` runs
   every `period/2 = 125 µs` → 8 000 samples/s per board.  This is the
   highest sustained fire rate that still keeps the PTP servo stable;
-  see [README_pd10_sync_before_after.md](README_pd10_sync_before_after.md)
+  see [pd10_sync_before_after_tests.md](../testing/pd10_sync_before_after_tests.md)
   for the sweep across 100 / 200 / 250 / 500 / 1000 µs periods.
 - **Steady-state Median Absolute Deviation (MAD): ~18 µs** on the
   cross-board rising-edge delta after detrending the linear drift
@@ -152,7 +152,7 @@ than ~45 %.
 The SAME54 ADC hardware itself handles up to ~1 MS/s, so raising the
 fire rate and the sample rate in lock-step would relax Nyquist —
 but the fire rate itself tops out at 8 kHz on this firmware due to PTP
-processing load (see [README_pd10_sync_before_after.md](README_pd10_sync_before_after.md)
+processing load (see [pd10_sync_before_after_tests.md](../testing/pd10_sync_before_after_tests.md)
 § "Effect of `--cyclic-period-us`").  The only way above 8 kHz sample
 rate is to decouple the ADC trigger from the fire_callback — e.g. use
 the fire_callback to arm a free-running TC that does hardware triggers
@@ -190,7 +190,7 @@ For a long-running distributed acquisition, design for the **longer-window
 figure** rather than the optimistic 10 s number.  The extra noise over
 long windows comes from the IIR filter and Sync-anchor breathing, not
 from the cyclic_fire backend itself (see
-[README_drift_filter.md](README_drift_filter.md) §5).  If your
+[drift_filter.md](../ptp/drift_filter.md) §5).  If your
 measurement duration exceeds ~30 s, budget for an MAD closer to 40 µs
 than 18 µs.
 
@@ -215,7 +215,7 @@ The earlier `pd10_filter_freeze_test.py` work (freezing the IIR)
 found that the jitter got **worse**, not better — the servo *is* doing
 useful tightening, and turning it off doesn't help.  To push lower,
 the filter needs tuning (see
-[README_drift_filter.md](README_drift_filter.md) §6 for N_max recipes)
+[drift_filter.md](../ptp/drift_filter.md) §6 for N_max recipes)
 or the PTP Sync interval has to be raised (125 ms → 31 ms).
 
 **Adding a phase anchor to cyclic_fire** (`s_cyclic_anchor_ns = 1 ns`,
@@ -225,7 +225,7 @@ boards' fire grids by coincidence.  The anchor is now part of
 standard_demo to make that alignment explicit and robust against
 future changes.
 
-A full architecture analysis is in [README_PTP.md](README_PTP.md) §12.
+A full architecture analysis is in [implementation.md](../ptp/implementation.md) §12.
 **Tightening the IIR filter or shortening the Sync interval are the
 two effective knobs** — the decimator/trigger architecture itself is
 not the dominant source of the 18 µs MAD at 8 kHz fire rate.
@@ -271,7 +271,7 @@ over many fires).
 
 This is the standard "PTP-disciplined timer" recipe used in industrial
 PTP-based sampling systems and is described conceptually in
-[README_PTP.md](README_PTP.md) §12.3.
+[implementation.md](../ptp/implementation.md) §12.3.
 
 Either approach pushes the achievable distributed-ADC bandwidth from
 **~4 kHz Nyquist at 18 µs MAD → tens to hundreds of kHz**, and lifts
@@ -338,24 +338,24 @@ Cross-board trigger jitter: same ~18 µs MAD.
 
 ## 8. References
 
-- [README_PTP.md](README_PTP.md) §11 — measured PTP performance at the wire.
-- [README_PTP.md](README_PTP.md) §12 — accuracy when used from app code,
+- [implementation.md](../ptp/implementation.md) §11 — measured PTP performance at the wire.
+- [implementation.md](../ptp/implementation.md) §12 — accuracy when used from app code,
   including the hardware-trigger path for sub-µs.
-- [README_pd10_sync_before_after.md](README_pd10_sync_before_after.md) —
+- [pd10_sync_before_after_tests.md](../testing/pd10_sync_before_after_tests.md) —
   cyclic_period sweep (100/200/250/500/1000 µs) that established 8 kHz
   as the practical fire-rate ceiling on this firmware, and the 18/22 µs
   cross-board MAD numbers used above.
-- [README_drift_filter.md](README_drift_filter.md) §5 — measurement
+- [drift_filter.md](../ptp/drift_filter.md) §5 — measurement
   methodology + fixed-vs-adaptive filter comparison + capture-window MAD
   characterisation.  §5.4 explicitly reconciles the 7.2 µs figure there
   with the 18 – 22 µs measured by the 1 kHz PD10 bench test.
-- [README_standalone_demo.md](README_standalone_demo.md) — end-to-end demo
+- [standalone_demo.md](../features/standalone_demo.md) — end-to-end demo
   showing the cross-board cyclic_fire alignment in action, plus the
   `demo_autopilot` / `demo_pd10_slot` / `demo_cyclic_period` bench CLIs.
-- [pd10_filter_freeze_test.py](pd10_filter_freeze_test.py) — A/B test that
+- [pd10_filter_freeze_test.py](../../tools/ptp-analysis/ptp-drift-tests/pd10_filter_freeze_test.py) — A/B test that
   isolated the IIR filter's contribution to jitter (rejected hypothesis;
   filter is not dominant).
-- [pd10_sync_before_after_test.py](pd10_sync_before_after_test.py) — the
+- [pd10_sync_before_after_test.py](../../tools/ptp-analysis/sync-tests/pd10_sync_before_after_test.py) — the
   unsynced-vs-synced cross-board PD10 test referenced throughout this
   document; `--cyclic-period-us 250` reproduces the 8 kHz / 18 µs MAD
   figures.

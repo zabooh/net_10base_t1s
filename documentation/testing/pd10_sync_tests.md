@@ -69,7 +69,7 @@ Direct A/B run on the same board pair, identical 30 s captures at
 
 - **MAD drops from 36.9 → 22.5 µs (≈ −39 %)** — the cross-board
   jitter floor is now dominated by the PTP servo's residual (~24 µs
-  stdev per board, see README_NTP §8) rather than the main-loop spin
+  stdev per board, see [ntp_reference.md](../ptp/ntp_reference.md) §8) rather than the main-loop spin
   threshold of the polled path.
 - p99 magnitude improves from 126 µs → 69 µs.
 - The systematic median bias (≈ −60 to −100 µs depending on board pair)
@@ -77,7 +77,7 @@ Direct A/B run on the same board pair, identical 30 s captures at
   `PTP_FOL_ANCHOR_OFFSET_NS = 10 ms` which was tuned on a different
   board pair (R25 calibration).  It is **independent of the cyclic_fire
   backend** — both the ISR and tfuture paths show comparable median
-  bias on this pair.  See README_PTP §R25 for the calibration procedure.
+  bias on this pair.  See [implementation.md](../ptp/implementation.md) §R25 for the calibration procedure.
 - Total spread (max − min) is similar (~250 µs both) because that's
   dominated by occasional servo-jump outliers, not by the timing
   backend.

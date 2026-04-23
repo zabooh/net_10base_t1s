@@ -121,7 +121,7 @@ slow tightening of the floor.
 
 ### 3.3 Implementation
 
-[`ptp_clock.c`](../../firmware/src/ptp_clock.c) maintains two state variables:
+[`ptp_clock.c`](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_clock.c) maintains two state variables:
 
 ```c
 static int32_t  s_drift_iir_n   = 128;   /* steady-state ceiling, CLI-tunable */
@@ -152,7 +152,7 @@ The counter is reset (forces a fresh warm-up ramp) by:
 ## 4. CLI Commands
 
 Two commands expose the filter at runtime (both registered in
-[`ptp_cli.c`](../../firmware/src/ptp_cli.c)):
+[`ptp_cli.c`](../../apps/tcpip_iperf_lan865x/firmware/src/ptp_cli.c)):
 
 | Command | Purpose |
 |---|---|
@@ -178,7 +178,7 @@ clk_get: 1234567894523456 ns  drift=+1218 ppb
 
 ## 5. Measured Behaviour
 
-All measurements use [`pd10_sync_check.py`](pd10_sync_check.py) on the standard
+All measurements use [`pd10_sync_check.py`](../../tools/ptp-analysis/sync-tests/pd10_sync_check.py) on the standard
 two-board PTP setup (GM on COM10 / Saleae Ch0, FOL on COM8 / Saleae Ch1, 50 MS/s
 sample rate). PASS gate is `|median delta| < 50 ms` — the rough human-visual
 perception threshold.
@@ -250,7 +250,7 @@ picks it up as a steady-state 20-ish µs MAD.
 
 Pushing it further requires the tuning described in §6 (longer N_max
 for lower floor, or shorter Sync interval), not decimator / anchor
-work.  See [README_pd10_sync_before_after.md](README_pd10_sync_before_after.md).
+work.  See [pd10_sync_before_after_tests.md](../testing/pd10_sync_before_after_tests.md).
 
 ---
 

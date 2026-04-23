@@ -233,7 +233,7 @@ letztes, würden alle Testskripte auf Linux ohne Anpassung fehlschlagen.
 
 ---
 
-## Weitere Risiken (aus README_PTP.md)
+## Weitere Risiken (aus documentation/ptp/implementation.md)
 
 ### R8 — t3-Software-Fallback: Fehlerbehafteter Timestamp bei TTSCA-Ausfall
 
@@ -358,7 +358,7 @@ sichtbare Fehlermeldung.
 
 ---
 
-## Weitere offene Fragen (aus README_PTP.md)
+## Weitere offene Fragen (aus documentation/ptp/implementation.md)
 
 ### F8 — Woher kommt der Wert 575983 ns genau? ✅ TEILWEISE BEANTWORTET (2026-04-20)
 
@@ -559,7 +559,7 @@ auf ~990 ppm (GM vs FOL Quarzmismatch), Langzeit-Cross-Board-Rate-Residual
 10.5 µs/500 ms Drift (= 21 ppm unkompensiert) und zeigt, dass die
 Kompensation funktioniert wie vorgesehen.
 
-Die stale-Doku-Bemerkung in `ptp_clock.c` und README_PTP.md §4.6 wurde
+Die stale-Doku-Bemerkung in `ptp_clock.c` und documentation/ptp/implementation.md §4.6 wurde
 im gleichen Commit (`657e8a1`) korrigiert.
 
 ---
@@ -591,7 +591,7 @@ Anpassungen).
 
 **Empfehlung (falls Sub-10 µs MAD benötigt wird):** Median-of-N Filter
 statt IIR, oder hardware-getriggerte GPIO-Ausgabe über MAC-Timer-Compare
-(siehe README_PTP §12.3) statt Software-PTP_CLOCK-Poll.
+(siehe documentation/ptp/implementation.md §12.3) statt Software-PTP_CLOCK-Poll.
 
 **Bewertung:** Wahrscheinlichkeit: Sicher (inhärent bei IIR-Filter
 auf korrelierten Eingangssamples) | Auswirkung: Gering (Demo-Sync
@@ -953,7 +953,7 @@ Neu hinzugekommen 2026-04-20: R19 (IIR-Filter-Wander), R20 (MARKER-Phase-Race), 
 
 Das PTP-Projekt auf Basis IEEE 1588-2008 über 10BASE-T1S (ATSAME54P20A + LAN865x) ist ein technisch ambitioniertes und in vielen Bereichen sorgfältig ausgeführtes Demo. Die nicht-blockierende Zustandsmaschinen-Architektur, die konsequente Nutzung von Hardware-Timestamps (TTSCA), der deferred Delay-Calc-Mechanismus und die FIR/IIR-Servo-Filterung zeigen solides Embedded-Design-Handwerk. Die Servo-Konvergenz auf ±200–500 ns (FINE-Zustand) ist für ein Crystal-basiertes System auf einem Shared-Medium-Bus eine beachtliche Leistung.
 
-Die neu hinzugekommene **Cross-Board-Synchronisation auf Software-Ebene** (`cyclic_fire` + Saleae-Verifikation) erreicht mit dem ISR-Anker-Umbau 2026-04-20 **Median-Delta −30 µs, MAD 35 µs, +1.2 ppm Langzeit-Rate-Residual** — Faktor 5 besser als die bisherige ~−135 µs Baseline (vgl. README_NTP §8 "~150 µs nicht entfernbar mit diesem Design" — inzwischen überholt).
+Die neu hinzugekommene **Cross-Board-Synchronisation auf Software-Ebene** (`cyclic_fire` + Saleae-Verifikation) erreicht mit dem ISR-Anker-Umbau 2026-04-20 **Median-Delta −30 µs, MAD 35 µs, +1.2 ppm Langzeit-Rate-Residual** — Faktor 5 besser als die bisherige ~−135 µs Baseline (vgl. documentation/ptp/ntp_reference.md §8 "~150 µs nicht entfernbar mit diesem Design" — inzwischen überholt).
 
 **Fixe seit letzter Bewertung:**
 

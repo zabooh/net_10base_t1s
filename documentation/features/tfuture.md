@@ -30,7 +30,7 @@ value — which, because HW-PTP keeps the two clocks aligned to ~50 ns, produces
 two physical firings that occur within hundreds of nanoseconds of each other.
 
 The module is the capstone of the time-sync chain documented in
-[README_PTP.md](README_PTP.md) and [README_NTP.md](README_NTP.md):
+[implementation.md](../ptp/implementation.md) and [ntp_reference.md](../ptp/ntp_reference.md):
 
 ```
  IEEE 1588 protocol           → ptp_trace_debug_test.py
@@ -559,13 +559,13 @@ Interpretation for this specific board pair:
   runtime).  The single-shot tests in §7 are unaffected because they arm
   once with large leads — the factor only surfaces at sub-millisecond
   periodic arming.  Filed as Ticket 7 in
-  [prompts/codebase_cleanup_followups.md](../../../../prompts/codebase_cleanup_followups.md).
+  [prompts/codebase_cleanup_followups.md](../../prompts/codebase_cleanup_followups.md).
 
 ### Natural extensions
 
 1. **GPIO output** — **implemented**: the `cyclic_fire` module uses the
    new post-fire callback hook to toggle `PB22` on every callback.  See
-   [README_modules.md → cyclic_fire](../../src/README_modules.md#cyclic_fire).
+   [modules.md → cyclic_fire](../firmware/modules.md#cyclic_fire).
 2. **EIC capture pin** on the other board — independent verification of firing
    coincidence without relying on PTP_CLOCK self-reports. ~100 lines + MCC
    config change.

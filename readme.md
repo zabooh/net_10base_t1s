@@ -16,14 +16,14 @@ For the full PTP implementation reference — state machine pseudocode, IEEE 158
 compliance verification, Mermaid flow diagrams, servo design, register reference,
 and the automated regression test — see:
 
-**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_PTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_PTP.md)**
+**[documentation/ptp/implementation.md](documentation/ptp/implementation.md)**
 
 For the companion **Software-NTP** module — application-layer UDP time-sync using
 SW timestamps from `PTP_CLOCK_GetTime_ns()`, a two-phase test that compares the
 SW-NTP jitter floor *with* and *without* HW-PTP disciplining, and a discussion of
 how precisely the software clock can be used from application code — see:
 
-**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md)**
+**[documentation/ptp/ntp_reference.md](documentation/ptp/ntp_reference.md)**
 
 For the **tfuture** module — coordinated single-shot firing at an absolute
 PTP_CLOCK time across two HW-PTP-synchronised boards (self_jitter < 50 µs median,
@@ -32,7 +32,7 @@ uncovered and fixed two latent bugs in the PTP_CLOCK drift filter, and a
 by-product that reports the ppm deviations of all four crystals in the system
 (2× SAME54 + 2× LAN8651) — see:
 
-**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_tfuture.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture.md)**
+**[documentation/features/tfuture.md](documentation/features/tfuture.md)**
 
 For the **standalone demo** — two-board self-contained PTP sync demo
 driven entirely by the on-board SW1/SW2 buttons and LED1/LED2 indicators
@@ -43,7 +43,7 @@ the SW1/SW2 role-selection is made, plus an iperf TCP server/client
 toggle on the opposite button of each role that exchanges payload over
 the synchronised link:
 
-**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_standalone\_demo.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_standalone_demo.md)**
+**[documentation/features/standalone_demo.md](documentation/features/standalone_demo.md)**
 
 For the **PTP_CLOCK drift filter** — adaptive single-pole IIR design that
 breaks the usual settle-vs-jitter trade-off (warm-up α=1 → steady-state
@@ -51,7 +51,7 @@ breaks the usual settle-vs-jitter trade-off (warm-up α=1 → steady-state
 on the cyclic_fire cross-board edges (~7 µs MAD vs ~25 µs MAD), and
 guidance on choosing N_max for different operating conditions — see:
 
-**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_drift\_filter.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_drift_filter.md)**
+**[documentation/ptp/drift_filter.md](documentation/ptp/drift_filter.md)**
 
 For the **exception dump + watchdog + find_exception.py** crash-diagnostics
 subsystem — Cortex-M4 fault handler trampolines + register dump over
@@ -59,7 +59,7 @@ SERCOM1, SAM E54 WDT with Early-Warning catching silent hangs,
 `test_exception` CLI for verifying the dump path, and the Python decoder
 that maps the dumped PC back to the C source line — see:
 
-**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_exception\_dump.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_exception_dump.md)**
+**[documentation/hardware/exception_dump.md](documentation/hardware/exception_dump.md)**
 
 ---
 
@@ -360,9 +360,9 @@ roles, switchable at runtime via CLI.
 | `src/ptp_ts_ipc.h` | Shared IPC header: `PTP_RxTimestampEntry_t` struct + `g_ptp_rx_ts` extern declaration. |
 | `src/filters.c/.h` | FIR low-pass filter and exponential low-pass filter used by the Follower servo. |
 | `src/ptp_offset_trace.c/.h` | 1024-entry ring buffer for hardware-timestamp PTP offsets. Used by `ptp_offset_capture.py` (§5.9). |
-| `src/sw_ntp.c/.h` | Minimal software-NTP (UDP) master + follower using SW timestamps from `PTP_CLOCK_GetTime_ns()`. Measurement-only; does not discipline the clock. See [README_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md). |
+| `src/sw_ntp.c/.h` | Minimal software-NTP (UDP) master + follower using SW timestamps from `PTP_CLOCK_GetTime_ns()`. Measurement-only; does not discipline the clock. See [documentation/ptp/ntp_reference.md](documentation/ptp/ntp_reference.md). |
 | `src/sw_ntp_offset_trace.c/.h` | 1024-entry int64 ring buffer for SW-NTP offsets. Used by `sw_ntp_vs_ptp_test.py` (§5.10). |
-| `src/tfuture.c/.h` | Coordinated single-shot firing at an absolute PTP_CLOCK time. Hybrid precision (main-loop poll + runtime-configurable tight-spin). 256-entry ring buffer. Post-fire callback hook for periodic re-arming. See [README_tfuture.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_tfuture.md) and §5.11. |
+| `src/tfuture.c/.h` | Coordinated single-shot firing at an absolute PTP_CLOCK time. Hybrid precision (main-loop poll + runtime-configurable tight-spin). 256-entry ring buffer. Post-fire callback hook for periodic re-arming. See [documentation/features/tfuture.md](documentation/features/tfuture.md) and §5.11. |
 | `src/cyclic_fire.c/.h` | PTP-synchronous periodic GPIO toggle on `PD10` at a configurable `period_us` (default 1000 µs → 1 kHz rectangle).  Two output patterns: SQUARE (50/50 toggle, for rate/phase measurement) and MARKER (1-high + 4-low pulse, for visual "who fires first?").  Uses the `tfuture` callback hook. See §5.12. |
 | `src/cyclic_fire_cli.c/.h` | CLI wrapper for `cyclic_fire` — registers `cyclic_start` / `cyclic_start_marker` / `cyclic_start_free` / `cyclic_stop` / `cyclic_status`. |
 | `src/pd10_blink.c/.h` | Standalone main-loop rectangle generator on `PD10` at a configurable frequency. Independent of PTP and `tfuture`; pure `SYS_TIME_Counter64Get` service. See §5.13. |
@@ -945,7 +945,7 @@ Two CLI commands tune the filter at runtime:
 
 Full design rationale, measurement methodology, fixed-vs-adaptive comparison,
 and tuning guidance:
-**[apps/tcpip\_iperf\_lan865x/firmware/tcpip\_iperf\_lan865x.X/README\_drift\_filter.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_drift_filter.md)**
+**[documentation/ptp/drift_filter.md](documentation/ptp/drift_filter.md)**
 
 ### Cross-Board Synchronization
 
@@ -1769,7 +1769,7 @@ only measures. Offsets are accumulated into a 1024-entry ring buffer
 (`src/sw_ntp_offset_trace.c`) and dumped in one batch after the capture window,
 so the UART plays no role in the measurement path.
 
-See [README_NTP.md](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/README_NTP.md) for the module-level documentation (protocol, CLI, firmware flow).
+See [documentation/ptp/ntp_reference.md](documentation/ptp/ntp_reference.md) for the module-level documentation (protocol, CLI, firmware flow).
 
 #### Test flow
 
@@ -1850,7 +1850,7 @@ observable from plain application-layer code (25 µs SW-NTP floor), and
 §5.11 measures how precisely the application can **act** on the synchronised
 clock by scheduling a coordinated firing event at an absolute PTP_CLOCK time.
 
-The full `README_tfuture.md` covers the module, the four diagnostic scripts,
+The full `documentation/features/tfuture.md` covers the module, the four diagnostic scripts,
 and the bias-investigation history.  Summary here:
 
 #### What the module does
@@ -1878,7 +1878,7 @@ analysis; dump over UART happens outside the measurement path.
 
 #### Measured performance on this hardware
 
-After both bias fixes (see `README_tfuture.md` §8 and the git log of
+After both bias fixes (see `documentation/features/tfuture.md` §8 and the git log of
 `fix(ptp_clock)` + `fix(ptp_fol)` commits):
 
 | Metric                      | Median  | Robust stdev |
@@ -1920,7 +1920,7 @@ Crystal deviations  (reference: GM_LAN8651 = 0 ppm)
 The ~1100 ppm mismatch between LAN8651 and SAME54 crystals on each board
 is what originally caused the catastrophic ~1.3 ms tfuture bias — the old
 `DRIFT_SANITY_PPB_ABS = 200 000` (±200 ppm) sanity clamp silently rejected
-every sample and the drift filter never converged.  See `README_tfuture.md`
+every sample and the drift filter never converged.  See `documentation/features/tfuture.md`
 §8 for the full story.
 
 #### Usage
