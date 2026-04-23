@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read(//c/work/carrier/dual_mcu/**)",
+      "Read(//c/work/ptp/check3/net_10base_t1s/docs/**)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git reset --hard*)",
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~*)",
+      "Bash(rm -rf c:/*)",
+      "Bash(rm -rf C:/*)"
+    ],
+    "defaultMode": "acceptEdits",
+    "additionalDirectories": [
+      "C:\\work\\carrier\\dual_mcu"
+    ]
+  }
+}

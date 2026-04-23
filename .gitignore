@@ -2,6 +2,10 @@
 *.elf
 *.hex
 *.pdf
+
+# Claude Code — personal overrides and runtime locks
+.claude/settings.local.json
+.claude/*.lock
 !**/image/*.hex
 !**/out/tcpip_iperf_lan865x/default.hex
 *.map
