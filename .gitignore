@@ -1,6 +1,7 @@
 *.o
 *.elf
 *.hex
+*.pdf
 !**/image/*.hex
 !**/out/tcpip_iperf_lan865x/default.hex
 *.map
