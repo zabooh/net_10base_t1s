@@ -33,7 +33,7 @@ HEX_DEFAULT = os.path.join(
     r"apps\tcpip_iperf_lan865x\firmware\tcpip_iperf_lan865x.X\out\tcpip_iperf_lan865x\default.hex",
 )
 
-CONFIG_FILE = os.path.join(_HERE, "setup_flasher.config")
+CONFIG_FILE = os.path.join(_REPO_ROOT, "setup_flasher.config")
 
 
 def _load_config():
@@ -47,7 +47,7 @@ def _load_config():
     print(f"[INFO] Configuration loaded: {CONFIG_FILE}")
     return cfg["board1"], cfg["board2"]
 
-sys.path.insert(0, _HERE)
+sys.path.insert(0, _REPO_ROOT)
 from mdb_flash import flash
 
 
