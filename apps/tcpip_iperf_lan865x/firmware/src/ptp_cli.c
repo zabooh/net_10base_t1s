@@ -11,6 +11,7 @@
 #include "ptp_offset_trace.h"
 #include "system/command/sys_command.h"
 #include "system/console/sys_console.h"
+#include "system/time/sys_time.h"
 
 static void ptp_mode_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     if (argc < 2) {
@@ -192,6 +193,24 @@ static void drift_iir_n_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) 
     SYS_CONSOLE_PRINT("drift_iir_n set to %ld\r\n", (long)PTP_CLOCK_GetDriftIIRN());
 }
 
+static void uptime_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO; (void)argc; (void)argv;
+    /* SYS_TIME ticks since SAME54 reset, independent of PTP state.
+     * TC0 runs at 60 MHz on this firmware (see ptp_clock.c header).
+     * Compare values across boards to spot which one rebooted recently. */
+    uint64_t ticks = SYS_TIME_Counter64Get();
+    uint64_t total_s = ticks / 60000000ULL;
+    uint32_t d = (uint32_t)(total_s / 86400u);
+    uint32_t h = (uint32_t)((total_s % 86400u) / 3600u);
+    uint32_t m = (uint32_t)((total_s % 3600u) / 60u);
+    uint32_t s = (uint32_t)(total_s % 60u);
+    SYS_CONSOLE_PRINT("uptime: %lud %02luh %02lum %02lus  (%llu s, %llu ticks)\r\n",
+                      (unsigned long)d, (unsigned long)h,
+                      (unsigned long)m, (unsigned long)s,
+                      (unsigned long long)total_s,
+                      (unsigned long long)ticks);
+}
+
 static void drift_iir_reset_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     (void)pCmdIO; (void)argc; (void)argv;
     PTP_CLOCK_ResetDriftFilter();
@@ -227,6 +246,7 @@ static const SYS_CMD_DESCRIPTOR ptp_cmd_tbl[] = {
     {"clk_set_drift",    (SYS_CMD_FNC) clk_set_drift_cmd,    ": diagnostic: manually set PTP_CLOCK drift_ppb (clk_set_drift [<ppb>])"},
     {"drift_iir_n",      (SYS_CMD_FNC) drift_iir_n_cmd,      ": get/set PTP_CLOCK drift IIR window N (drift_iir_n [<8..4096>])"},
     {"drift_iir_reset",  (SYS_CMD_FNC) drift_iir_reset_cmd,  ": re-arm adaptive IIR warm-up (fast convergence with low jitter floor)"},
+    {"uptime",           (SYS_CMD_FNC) uptime_cmd,           ": time since SAME54 reset (TC0 ticks, independent of PTP state)"},
 };
 
 void PTP_CLI_Register(void) {

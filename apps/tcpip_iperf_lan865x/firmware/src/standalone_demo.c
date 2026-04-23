@@ -5,6 +5,7 @@
 
 #include "system/ports/sys_ports.h"
 #include "system/time/sys_time.h"
+#include "system/console/sys_console.h"
 #include "peripheral/port/plib_port.h"
 
 #include "cyclic_fire.h"
@@ -435,7 +436,7 @@ void standalone_demo_service(uint64_t current_tick)
                && (s_state == DEMO_SYNCING_FOL
                    || s_state == DEMO_SYNCED
                    || s_state == DEMO_LOST)) {
-        /* SW2 on follower board → toggle iperf TCP client → 192.168.0.10 */
+        /* SW2 on follower board → toggle iperf UDP client → 192.168.0.10 */
         if (!s_iperf_running) {
             if (iperf_control_set_ip(IPERF_FOLLOWER_IP, IPERF_NETMASK)) {
                 iperf_control_client_start(IPERF_MASTER_IP);

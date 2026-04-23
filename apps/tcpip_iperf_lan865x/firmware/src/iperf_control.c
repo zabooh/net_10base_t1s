@@ -95,25 +95,43 @@ void iperf_control_server_start(void)
 {
     static char a0[] = "iperf";
     static char a1[] = "-s";
-    char *argv[] = { a0, a1, NULL };
-    SYS_CONSOLE_PRINT("[IPERF] starting TCP server on :5001\r\n");
-    CommandIperfStart(&s_stub_cmd_io, 2, argv);
+    /* `-u` puts the server into UDP listen mode so it pairs with the
+     * follower's UDP client (see iperf_control_client_start for why
+     * we abandoned TCP).  Without `-u` the server defaults to TCP
+     * and silently ignores incoming UDP datagrams — the master's
+     * RX counter never increments and the demo looks broken. */
+    static char a2[] = "-u";
+    char *argv[] = { a0, a1, a2, NULL };
+    SYS_CONSOLE_PRINT("[IPERF] starting UDP server on :5001\r\n");
+    CommandIperfStart(&s_stub_cmd_io, 3, argv);
 }
 
 void iperf_control_client_start(const char *server_ip)
 {
     static char a0[] = "iperf";
     static char a1[] = "-c";
+    /* Switched from TCP (-x) to UDP (-b) after the TCP path turned out
+     * to be unworkable on this Harmony+LAN865x combo: the 3-way
+     * handshake completes, but the very first data packet causes the
+     * server to emit "TCP server disconnect detected" and the
+     * connection is torn down with 0 bytes transferred.  iperf then
+     * spins on send-failures and the main loop eventually gets starved
+     * long enough that the WDT trips with no exception dump (EW
+     * masked by the LAN865x SPI ISR storm).
+     *
+     * UDP avoids all of that — Harmony's iperf parser maps `-b` to
+     * UDP_PROTOCOL with the bandwidth as the rate-limiter target, and
+     * the iperf rate limiter spaces packets cleanly enough that the
+     * LAN865x TX queue never fills.  500 kbps is well inside the
+     * sustainable PLCA goodput on this two-board setup and produces
+     * a steady 1-second progress report on the master ("Rx" stats). */
     static char a3[] = "-b";
-    /* Rate-limit below 10BASE-T1S PLCA saturation so TCPIPStack
-     * TX-backpressure asserts stop flooding the console.  4 Mbps is
-     * well inside the observed ~4-6 Mbps achievable TCP goodput. */
-    static char a4[] = "4000000";
+    static char a4[] = "9000000";
     static char ip_buf[48];
     (void)strncpy(ip_buf, server_ip, sizeof(ip_buf) - 1u);
     ip_buf[sizeof(ip_buf) - 1u] = '\0';
     char *argv[] = { a0, a1, ip_buf, a3, a4, NULL };
-    SYS_CONSOLE_PRINT("[IPERF] connecting TCP client to %s:5001 (cap 4 Mbps)\r\n",
+    SYS_CONSOLE_PRINT("[IPERF] starting UDP client to %s:5001 (cap 9 Mbps)\r\n",
                       server_ip);
     CommandIperfStart(&s_stub_cmd_io, 5, argv);
 }

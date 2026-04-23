@@ -143,7 +143,28 @@ void APP_Tasks ( void )
         {
             bool appInitialized = true;
 
-            SYS_CONSOLE_PRINT("[APP] Build: " __DATE__ " " __TIME__ "\r\n");
+            /* Decode RSTC.RCAUSE so spontaneous resets are no longer
+             * silent.  Exactly one bit is normally set indicating which
+             * source triggered the most recent reset.  The register
+             * survives the reset itself and is read-only.  Combined into
+             * a single SYS_CONSOLE_PRINT() with the Build banner so
+             * Harmony's console-queue can't drop the second line during
+             * the early-boot back-pressure window. */
+            {
+                uint8_t rc = RSTC_REGS->RSTC_RCAUSE;
+                const char *cause = "UNKNOWN";
+                if      ((rc & RSTC_RCAUSE_POR_Msk)     != 0u) cause = "POR";
+                else if ((rc & RSTC_RCAUSE_BODCORE_Msk) != 0u) cause = "BODCORE";
+                else if ((rc & RSTC_RCAUSE_BODVDD_Msk)  != 0u) cause = "BODVDD";
+                else if ((rc & RSTC_RCAUSE_EXT_Msk)     != 0u) cause = "EXT";
+                else if ((rc & RSTC_RCAUSE_WDT_Msk)     != 0u) cause = "WDT";
+                else if ((rc & RSTC_RCAUSE_SYST_Msk)    != 0u) cause = "SYST";
+                SYS_CONSOLE_PRINT("\r\n"
+                                  "==================================\r\n"
+                                  "[APP] Build: " __DATE__ " " __TIME__
+                                  "  RCAUSE=0x%02x (%s)\r\n",
+                                  (unsigned int)rc, cause);
+            }
 
             if (appInitialized)
             {
