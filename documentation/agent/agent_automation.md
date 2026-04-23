@@ -230,8 +230,8 @@ The actual, in-use allowlist for this 10BASE-T1S firmware project (after consoli
       "Bash(cmd.exe //c \"build.bat\")",
       "Bash(./build.bat *)",
       "Bash(./build.bat)",
-      "Bash(/c/work/ptp/check/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/build.bat *)",
-      "Bash(cd /c/work/ptp/check/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X && ./build.bat *)",
+      "Bash(/c/work/ptp/check/net_10base_t1s/build.bat *)",
+      "Bash(cd /c/work/ptp/check/net_10base_t1s && ./build.bat *)",
 
       "Bash(python /c/work/ptp/check/net_10base_t1s/tools/flash/flash.py)",
       "Bash(python /c/work/ptp/check/net_10base_t1s/tools/test-harness/smoke_test.py)",

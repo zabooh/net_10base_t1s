@@ -2,8 +2,9 @@
 setlocal EnableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
-set "CMAKE_DIR=%SCRIPT_DIR%cmake\tcpip_iperf_lan865x\default"
-pushd "%SCRIPT_DIR%..\..\..\..\..\"
+set "MPLAB_DIR=%SCRIPT_DIR%apps\tcpip_iperf_lan865x\firmware\tcpip_iperf_lan865x.X"
+set "CMAKE_DIR=%MPLAB_DIR%\cmake\tcpip_iperf_lan865x\default"
+pushd "%SCRIPT_DIR%..\"
 set "BUILD_DIR=%CD%\temp\tcpip_iperf_lan865x\default"
 popd
 
@@ -92,14 +93,11 @@ if errorlevel 1 (
 :: Copy compile_commands.json to the repo root so VSCode's C/C++ extension
 :: (configured via .vscode/c_cpp_properties.json) can resolve "Find All
 :: References" / "Go to Definition" across the project.
-:: SCRIPT_DIR is .../net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/
-:: so ..\..\..\.. climbs up to the repo root (net_10base_t1s/).
+:: SCRIPT_DIR is the repo root (net_10base_t1s/).
 :: --------------------------------------------------------------------------
 if exist "%BUILD_DIR%\compile_commands.json" (
-    pushd "%SCRIPT_DIR%..\..\..\.." >nul
-    copy /Y "%BUILD_DIR%\compile_commands.json" "compile_commands.json" >nul
+    copy /Y "%BUILD_DIR%\compile_commands.json" "%SCRIPT_DIR%compile_commands.json" >nul
     echo compile_commands.json copied to repo root for VSCode IntelliSense.
-    popd >nul
 )
 
 echo [2/2] Building with Ninja...
@@ -114,7 +112,7 @@ echo BUILD SUCCESSFUL.
 :: ---------------------------------------------------------------------------
 :: Post-build summary: flash/RAM usage, heap, active interrupts
 :: ---------------------------------------------------------------------------
-set "ELF_PATH=%SCRIPT_DIR%out\tcpip_iperf_lan865x\default.elf"
+set "ELF_PATH=%MPLAB_DIR%\out\tcpip_iperf_lan865x\default.elf"
 if exist "%ELF_PATH%" (
     python "%SCRIPT_DIR%build_summary.py" "%BUILD_DIR%" "%ELF_PATH%" "%XC32_BIN_DIR%"
 ) else (
