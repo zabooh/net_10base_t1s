@@ -36,8 +36,8 @@ The top-level [readme.md](../readme.md) has the project overview. Risks and open
 ### [firmware/](firmware/) — Firmware Modules
 - [modules.md](firmware/modules.md) — Function / description / API for firmware modules
 
-### [meta/](meta/) — Meta / Tooling
-- [agent_automation.md](meta/agent_automation.md) — Agent-driven automation in VS Code + Claude Code
+### [agent/](agent/) — Agent / Tooling
+- [agent_automation.md](agent/agent_automation.md) — Agent-driven automation in VS Code + Claude Code
 
 ### [datasheets/](datasheets/) — External Datasheets
 - Reference PDFs for LAN8650, SAME54, and the SAME54 Curiosity Ultra board.
