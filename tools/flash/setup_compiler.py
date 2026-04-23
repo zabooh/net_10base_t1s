@@ -15,12 +15,15 @@ import re
 import sys
 
 # ---------------------------------------------------------------------------
-# Config file and toolchain.cmake live relative to this script
+# Config lives next to this script; toolchain.cmake lives inside the MPLAB
+# project directory.
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "setup_compiler.config")
 TOOLCHAIN_CMAKE = os.path.join(
-    SCRIPT_DIR,
+    REPO_ROOT,
+    "apps", "tcpip_iperf_lan865x", "firmware", "tcpip_iperf_lan865x.X",
     "cmake", "tcpip_iperf_lan865x", "default", ".generated", "toolchain.cmake",
 )
 

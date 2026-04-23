@@ -26,8 +26,12 @@ import argparse
 import json
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
 
-HEX_DEFAULT = os.path.join(_HERE, r"out\tcpip_iperf_lan865x\default.hex")
+HEX_DEFAULT = os.path.join(
+    _REPO_ROOT,
+    r"apps\tcpip_iperf_lan865x\firmware\tcpip_iperf_lan865x.X\out\tcpip_iperf_lan865x\default.hex",
+)
 
 CONFIG_FILE = os.path.join(_HERE, "setup_flasher.config")
 

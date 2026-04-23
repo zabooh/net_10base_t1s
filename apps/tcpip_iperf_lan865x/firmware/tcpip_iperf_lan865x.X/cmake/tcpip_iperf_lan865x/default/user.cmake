@@ -82,7 +82,8 @@ add_custom_command(TARGET ${_image_target} POST_BUILD
         "-DMANGLED_ELF=${CMAKE_BINARY_DIR}/outdefault.elf"
         "-DNORMAL_ELF=${CMAKE_BINARY_DIR}/out/default.elf"
         -P "${CMAKE_BINARY_DIR}/normalize_elf.cmake"
-    # Step 2: canonical location for xc32-bin2hex, flash.py, build_summary.py
+    # Step 2: canonical ELF location for xc32-bin2hex and build_summary.py
+    #         (flash.py now lives in repo-root tools/flash/, see tools/README.md)
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "${CMAKE_BINARY_DIR}/out/default.elf"
         "${tcpip_iperf_lan865x_default_output_dir}/default.elf"
