@@ -5,6 +5,11 @@ Harmony 3 project for the ATSAME54P20A + LAN865x 10BASE-T1S demo.
 The goal is to enable PTP (IEEE 1588) hardware timestamping with sub-microsecond
 synchronisation accuracy over 10BASE-T1S.
 
+> **Navigation**
+> - Full documentation index: **[documentation/README.md](documentation/README.md)**
+> - Developer tools (flash / tests / analysis): **[tools/README.md](tools/README.md)**
+> - Risks & open questions: **[RISKS.md](RISKS.md)**
+
 ### See Also
 
 For the full PTP implementation reference — state machine pseudocode, IEEE 1588-2008
