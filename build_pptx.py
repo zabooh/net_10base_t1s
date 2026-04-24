@@ -1,5 +1,11 @@
 """Populate PTP_LAN8651.pptx — keeps Microchip corporate template (logos, master)
-and fills it with our PTP / 10BASE-T1S / LAN8651 / results content."""
+and fills it with our PTP / 10BASE-T1S / LAN8651 / results content.
+
+All paths are resolved relative to this file so the script runs from any
+clone of the repo — no machine-specific absolute paths.  The PPTX must
+already exist at the output location (it carries the Microchip template);
+the script overwrites its slides, preserving the corporate master."""
+import os
 from copy import deepcopy
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
@@ -7,7 +13,10 @@ from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml.ns import qn
 
-PATH = r"C:\work\ptp\check\net_10base_t1s\PTP_LAN8651.pptx"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+PATH = os.path.join(_HERE, "PTP_LAN8651.pptx")
+PICTURE2 = os.path.join(_HERE, "Picture2.png")  # Saleae MARKER wire-level view
+PICTURE3 = os.path.join(_HERE, "Picture3.png")  # Saleae MARKER zoom / cursor delta
 
 prs = Presentation(PATH)
 
@@ -592,6 +601,91 @@ for i, lt in enumerate(demo_lines):
         r.font.name = "Consolas"
 
 # ============================================================================
+# 8b. Live CLI Test — Run GM + FOL by hand from two serial terminals
+# ============================================================================
+s = prs.slides.add_slide(L_TITLE_ONLY)
+set_title(s, "Live CLI Test — GM + Follower over Two Terminals")
+
+# Intro strip
+box(s, 0.35, 1.45, 12.55, 0.5,
+    "After flashing, open two serial terminals (115200 8N1, no flow control) — "
+    "one per board — and type the role command.  No scripts needed; firmware does the rest.",
+    fill=LIGHT, fc=NAVY, size=13, italic=True)
+
+# Two role columns, left = GM, right = FOL
+col_y = 2.15
+col_h = 2.00
+col_w = 6.10
+box(s, 0.35, col_y, col_w, 0.5, "Terminal 1  —  Board 1 (GM)  e.g.  COM8",
+    fill=OK,     size=14)
+box(s, 6.55, col_y, col_w, 0.5, "Terminal 2  —  Board 2 (FOL)  e.g.  COM10",
+    fill=ACCENT, size=14)
+
+# GM body: command + one-shot explanation
+gm_cmd_y = col_y + 0.6
+box(s, 0.35, gm_cmd_y, col_w, 0.45,
+    "> ptp_mode master v", fill=NAVY, fc=WHITE, size=14, bold=True)
+gm_bullets = [
+    "• Immediately prints 'PTP master STARTED (via CLI)'.",
+    "• Board begins sending Sync + Follow_Up ≈ every 125 ms.",
+    "• Verbose flag 'v' → one '[GM] #N  t1=hh:mm:ss.nnnnnnnnn' line per Sync.",
+    "• Stays master until 'ptp_mode off' or reset.",
+]
+tb = s.shapes.add_textbox(Inches(0.40), Inches(gm_cmd_y + 0.55),
+                          Inches(col_w - 0.10), Inches(col_h - 1.05))
+tf = tb.text_frame; tf.word_wrap = True
+for i, lt in enumerate(gm_bullets):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = lt
+    r.font.size = Pt(12); r.font.color.rgb = NAVY
+
+# FOL body: command + one-shot explanation
+box(s, 6.55, gm_cmd_y, col_w, 0.45,
+    "> ptp_mode follower v", fill=NAVY, fc=WHITE, size=14, bold=True)
+fol_bullets = [
+    "• Servo steps:  UNINIT → MATCHFREQ → HARDSYNC → COARSE → FINE.",
+    "• FINE typically reached in 2-3 s after the master is up.",
+    "• Then prints one '[FOL] FINE  t1=… off=±N ns' line per Sync.",
+    "• 'ptp_status' at any time → current servo state + last offset.",
+]
+tb = s.shapes.add_textbox(Inches(6.60), Inches(gm_cmd_y + 0.55),
+                          Inches(col_w - 0.10), Inches(col_h - 1.05))
+tf = tb.text_frame; tf.word_wrap = True
+for i, lt in enumerate(fol_bullets):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = lt
+    r.font.size = Pt(12); r.font.color.rgb = NAVY
+
+# Expected follower output — full-width code block
+box(s, 0.35, 4.55, 12.55, 0.45,
+    "Expected Follower console output", fill=NAVY, size=13)
+code_lines = [
+    "> ptp_mode follower v",
+    "PTP follower STARTED (via CLI)",
+    "PTP UNINIT->MATCHFREQ  scheduling TI=40 TISUBN=0x3A00000D",
+    "[00:00:02.332 PTP  ] MATCHFREQ->HARDSYNC offset=-13497830",
+    "Hard sync completed",
+    "PTP COARSE     offset=-2034",
+    "PTP FINE       offset=-23",
+    "[FOL] FINE  t1=00:00:05.123456789  t2=00:00:05.123514600  off=      +57 ns",
+    "[FOL] FINE  t1=00:00:05.248334810  t2=00:00:05.248392100  off=      +55 ns",
+]
+tb = s.shapes.add_textbox(Inches(0.35), Inches(5.05),
+                          Inches(12.55), Inches(1.50))
+tf = tb.text_frame; tf.word_wrap = False
+for i, ln in enumerate(code_lines):
+    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+    r = p.add_run(); r.text = ln
+    r.font.name = "Consolas"; r.font.size = Pt(11); r.font.color.rgb = NAVY
+
+# Takeaway banner: what the numbers mean
+box(s, 0.35, 6.60, 12.55, 0.55,
+    "Initial lock offsets are typically ±200 ns, steady-state under ±1 µs.  "
+    "Sustained 'FINE' lines = two boards share one nanosecond clock, ready for "
+    "cyclic_fire, iperf, SW-NTP, or any PTP_CLOCK_GetTime_ns() application.",
+    fill=OK, size=13)
+
+# ============================================================================
 # 9. Agenda
 # ============================================================================
 add_slide(L_CONTENT, "Agenda", [
@@ -888,8 +982,13 @@ for i, n in enumerate(notes):
 s = prs.slides.add_slide(L_TITLE_ONLY)
 set_title(s, "Cyclic Fire — Wire-Level View")
 # image: 4.0 in tall, aspect ≈ 1.66 → 6.65 in wide, centred horizontally
-s.shapes.add_picture(r"C:\work\ptp\check\net_10base_t1s\Picture2.png",
-                     Inches(3.34), Inches(1.45), height=Inches(4.0))
+if os.path.isfile(PICTURE2):
+    s.shapes.add_picture(PICTURE2,
+                         Inches(3.34), Inches(1.45), height=Inches(4.0))
+else:
+    label(s, 3.34, 1.45, 6.65, 4.0,
+          f"[Picture2.png missing — expected at {PICTURE2}]",
+          size=14, italic=True, color=WARN)
 # caption / explanation below the image
 tb = s.shapes.add_textbox(Inches(0.6), Inches(5.55), Inches(12.1), Inches(1.6))
 tf = tb.text_frame; tf.word_wrap = True
@@ -908,8 +1007,13 @@ for i, (text, bold) in enumerate(cap_lines):
 # ============================================================================
 s = prs.slides.add_slide(L_TITLE_ONLY)
 set_title(s, "Cyclic Fire — Zoom-In: Cross-Board Edge Delta")
-s.shapes.add_picture(r"C:\work\ptp\check\net_10base_t1s\Picture3.png",
-                     Inches(3.34), Inches(1.45), height=Inches(4.0))
+if os.path.isfile(PICTURE3):
+    s.shapes.add_picture(PICTURE3,
+                         Inches(3.34), Inches(1.45), height=Inches(4.0))
+else:
+    label(s, 3.34, 1.45, 6.65, 4.0,
+          f"[Picture3.png missing — expected at {PICTURE3}]",
+          size=14, italic=True, color=WARN)
 tb = s.shapes.add_textbox(Inches(0.6), Inches(5.55), Inches(12.1), Inches(1.6))
 tf = tb.text_frame; tf.word_wrap = True
 cap_lines = [
