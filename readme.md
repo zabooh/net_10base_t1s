@@ -5,6 +5,12 @@ Harmony 3 project for the ATSAME54P20A + LAN865x 10BASE-T1S demo.
 The goal is to enable PTP (IEEE 1588) hardware timestamping with sub-microsecond
 synchronisation accuracy over 10BASE-T1S.
 
+> **Sync quality (current HEAD — freeze candidate, measured 2026-04-24):**
+> Cross-board PD10 drift MAD **13.6 µs**, slope **−0.07 ppm** over 10 s
+> (canonical test [tools/ptp-analysis/sync-tests/pd10_sync_before_after_test.py](tools/ptp-analysis/sync-tests/pd10_sync_before_after_test.py),
+> run `20260424_084628`). All PASS gates met with wide margin
+> (`|slope| < 5 ppm`, `MAD < 50 µs`). See §5.12 for details.
+
 > **Navigation**
 > - Full documentation index: **[documentation/README.md](documentation/README.md)**
 > - Developer tools (flash / tests / analysis): **[tools/README.md](tools/README.md)**
@@ -15,14 +21,25 @@ synchronisation accuracy over 10BASE-T1S.
 
 ```cmd
 python setup_flasher.py      :: once — detect the two debugger COM ports
+python flash.py              :: program both boards with the checked-in default.hex
+cd tools\test-harness && python smoke_test.py     :: optional: 58-check regression
+
+:: To rebuild the firmware from source:
 python setup_compiler.py     :: once — pick an installed XC32 version
 build.bat                    :: incremental build (build.bat rebuild for clean)
-python flash.py              :: program both boards with out/.../default.hex
+python flash.py              :: re-flash (default.hex was overwritten by the build)
 ```
 
+`flash.py` with no argument always programs
+`apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/out/tcpip_iperf_lan865x/default.hex`
+— that file is checked in, so a fresh clone is immediately flash-ready, and
+a local `build.bat` run overwrites it in place, so the next `flash.py`
+picks up your new build automatically.  Full walkthrough:
+[§How To Reproduce](#how-to-reproduce).
+
 Top-level scripts (`setup_*.py`, `build.bat`, `build_summary.py`,
-`mdb_flash.py`, `check_serial_tk.pyw`) live at the repo root; test /
-analysis / Saleae scripts live under [tools/](tools/). The MPLAB X
+`flash.py`, `mdb_flash.py`, `check_serial_tk.pyw`) live at the repo root;
+test / analysis / Saleae scripts live under [tools/](tools/). The MPLAB X
 project itself is untouched at
 [apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/).
 
@@ -231,37 +248,139 @@ TC6_CB_OnRxEthernetPacket() → TCP/IP stack → pktEth0Handler() [app.c]
 ## How To Reproduce
 
 The following steps take you from a fresh `git clone` to live PTP output on two
-boards in about 10 minutes.
+boards in about 10 minutes.  **All commands run from the repo root**
+(`net_10base_t1s/`) — the top-level driver scripts (`setup_*.py`, `build.bat`,
+`flash.py`, `mdb_flash.py`) were moved to the root in 2026-04 so the workflow
+no longer requires `cd`-ing into `apps/.../tcpip_iperf_lan865x.X/`.
 
-### Pre-Built HEX — Skip Build & Flash Immediately
+### Prerequisites
 
-A ready-to-use firmware image is already included in the repository:
+| Requirement | Notes |
+|-------------|-------|
+| **Hardware** | 2× ATSAME54-Curiosity-Ultra + LAN865x click board, connected via T1S bus |
+| **MPLAB XC32** | v4.60 or v5.x, installed under `C:\Program Files\Microchip\xc32\` (only needed for the build path) |
+| **CMake ≥ 4.1 + Ninja** | On `PATH` (only needed for the build path) |
+| **MPLAB X IDE / MDB** | Required by `flash.py` for programming — the `mdb` CLI is bundled with MPLAB X |
+| **Python 3.9+** | `pip install pyserial` for the serial test scripts |
+| **Terminal emulator** | 115200 8N1 (PuTTY, Tera Term, etc.) — only for the live CLI console |
+
+### 1. Clone
+
+```bat
+git clone https://github.com/zabooh/net_10base_t1s.git
+cd net_10base_t1s
+```
+
+All further commands assume you are at this repo root (not inside `apps/`).
+
+### 2. One-time setup scripts (repo root)
+
+Three interactive scripts, run **once per machine**.  Each saves its result
+to a git-ignored `.config` file, so you never have to repeat them on later
+sessions.
+
+```bat
+python setup_flasher.py     :: detect + assign Board 1 (GM) / Board 2 (FOL) debuggers
+python setup_compiler.py    :: pick an installed XC32 version  (ONLY if you will build)
+python setup_debug.py       :: patch SAME54_DFP tool-pack       (ONLY if you will debug in VS Code)
+```
+
+- **`setup_flasher.py`** — both boards must be connected via USB (EDBG port)
+  when you run this.  The script enumerates all plugged-in EDBG debuggers
+  and lets you assign which serial is Board 1 vs Board 2.  Result written to
+  `setup_flasher.config`.
+- **`setup_compiler.py`** — skip this if you are only flashing the pre-built
+  HEX.  Needed before the first `build.bat` call.
+- **`setup_debug.py`** — skip this unless you plan to step through code in
+  VS Code with `cortex-debug`.  Does not affect flashing or the command-line
+  build.
+
+### 3a. Flash WITHOUT building (fastest path, no toolchain needed)
+
+After cloning, the latest known-good firmware HEX is already checked in at
+[apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/out/tcpip_iperf_lan865x/default.hex](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/out/tcpip_iperf_lan865x/default.hex).
+`flash.py` programs exactly that file by default — no compiler or CMake
+needed on your machine:
+
+```bat
+python flash.py                 :: programs both boards with default.hex
+python flash.py --board1-only   :: only Board 1 (GM)
+python flash.py --board2-only   :: only Board 2 (FOL)
+python flash.py --hex <path>    :: alternative HEX (absolute or relative to repo root)
+```
+
+> Both boards run **identical firmware**.  The role (Grandmaster / Follower)
+> is assigned at runtime via the `ptp_mode master` / `ptp_mode follower` CLI
+> — no separate images.
+
+### 3b. Build, then flash (for firmware changes)
+
+```bat
+build.bat                       :: incremental build — only changed files
+build.bat rebuild               :: clean + full rebuild
+build.bat clean                 :: remove build artifacts
+```
+
+A successful build **overwrites** `out/.../default.hex` in place with a fresh
+image (and also produces a timestamped copy under `out/.../image/`).  The
+next `python flash.py` therefore automatically picks up your new build — no
+path argument needed:
+
+```bat
+build.bat && python flash.py    :: build then flash, one line
+```
+
+A build summary (flash / RAM usage, heap, active interrupt handlers, HEX path)
+is printed automatically after every successful build — see §6.2 for the
+full description.
+
+### 4. Regression test — `smoke_test.py`
+
+Once both boards are flashed, run the broad functional regression guard to
+confirm the build is healthy.  Takes ~60 s and exercises every CLI command,
+PTP FINE lock, the tfuture single-shot firing, the cyclic_fire ISR path,
+SW-NTP end-to-end exchange, and a cross-board FOL/GM offset bracketing:
+
+```bat
+cd tools\test-harness
+python smoke_test.py
+```
+
+Useful flags:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--gm-port`, `--fol-port` | `COM8`, `COM10` | serial ports of GM / FOL |
+| `--no-reset` | off | skip Phase 1 boot + PTP FINE (assume boards already running) |
+| `--abort-on-fail` | off | stop on the first FAIL for fast-fail CI use |
+| `--verbose` | off | log every serial round-trip |
+| `--settle-s N` | `5.0` | extra seconds after PTP FINE before Phase 2 starts |
+
+Expected happy-path ending:
 
 ```
-apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/out/tcpip_iperf_lan865x/image/tcpip_iperf_lan865x_20260416_144531.hex
+======================================================================
+  Summary: 58 PASS / 0 FAIL  (total 58)
+======================================================================
+
+======================================================================
+  Post-test: reset + PTP sync (leave boards ready for next use)
+======================================================================
+  ...
+  FOL reached PTP FINE in 2.1 s — GM (master) + FOL (follower) in sync,
+  ready for next use.
 ```
 
-Flash this file onto **both** boards using **MPLAB X IPE** (Integrated Programming
-Environment) as a standalone programmer — no build toolchain required:
+The post-test teardown is automatic: after the summary prints, both boards
+are reset, IPs are reconfigured, PTP is restarted (GM = master, FOL =
+follower), and the follower is waited for FINE — so the boards are left in
+a clean, ready-to-use synced state that you can immediately attach a
+Saleae to, or drive via the CLI, without another reset.
 
-1. Open **MPLAB X IPE** (Start → Microchip → MPLAB X IPE vX.XX).
-2. **Device:** select `ATSAME54P20A`.
-3. **Tool:** select the EDBG/debugger of the first board from the drop-down
-   (connect the board via the USB debugger port beforehand).
-4. **Hex File:** click *Browse* and navigate to the `.hex` path above.
-5. Click **Connect**, then **Program**.  
-   IPE erases, programs, and verifies in one step. Wait for *"Programming/Verify
-   complete"*.
-6. Repeat steps 3–5 for the second board (select its EDBG from the Tool drop-down).
+Exit code: `0` on all-PASS, `1` on any FAIL.  A run log is written to
+`smoke_test_<YYYYmmdd_HHMMSS>.log` in the `tools/test-harness/` directory.
 
-> Both boards run identical firmware. The role (Grandmaster / Follower) is
-> assigned at runtime via the `ptp_mode master` / `ptp_mode follower` CLI
-> command — no separate images are needed.
-
-If you want to modify the firmware, follow the full [Clone → Build → Flash](#clone)
-flow below instead.
-
-### First Console Test
+### 5. First console test (optional — interactive)
 
 Open two serial terminal windows (115200 8N1, no flow control):
 
@@ -292,69 +411,14 @@ PTP FINE       offset=...
 [FOL] FINE  t1=00:00:05.248334810  t2=00:00:05.248392100  off=      +55 ns
 ```
 
-Once the follower prints `FINE` continuously, synchronisation is established.
-Offsets below ±200 ns are typical for the initial lock; steady-state offsets
-are usually below ±1 µs.
+Once the follower prints `FINE` continuously, synchronisation is
+established.  Offsets below ±200 ns are typical for the initial lock;
+steady-state offsets are usually below ±1 µs.  Check the servo state at
+any time:
 
-Check the servo state at any time:
 ```
 > ptp_status
 ```
-
----
-
-### Prerequisites
-
-| Requirement | Notes |
-|-------------|-------|
-| **Hardware** | 2× ATSAME54-Curiosity-Ultra + LAN865x click board, connected via T1S bus |
-| **MPLAB XC32** | v4.60 or v5.x, installed under `C:\Program Files\Microchip\xc32\` |
-| **CMake ≥ 4.1 + Ninja** | Must be on `PATH` |
-| **MPLAB X IDE / MDB** | Required by `flash.py` for programming |
-| **Python 3.9+** | `pip install pyserial` for the serial test scripts |
-| **Terminal emulator** | Two independent windows, 115200 8N1 (e.g. PuTTY, Tera Term) |
-
-### Clone
-
-```bat
-git clone https://github.com/zabooh/net_10base_t1s.git
-cd net_10base_t1s\apps\tcpip_iperf_lan865x\firmware\tcpip_iperf_lan865x.X
-```
-
-The repository contains pre-built HEX images in
-`apps/tcpip_iperf_lan865x/firmware/out/tcpip_iperf_lan865x/image/`
-(tracked via a `.gitignore` negation rule) — a rebuild is optional for a quick
-first test.
-
-### Tool Setup
-
-Run these two scripts once per machine. Both are interactive and save their
-result to a git-ignored `.config` file.
-
-All further commands assume you are in the working directory from the Clone step
-(`tcpip_iperf_lan865x.X\`):
-
-```bat
-python setup_compiler.py   # pick the installed XC32 version
-python setup_flasher.py    # assign Board 1 (GM) and Board 2 (FOL) to their debuggers
-python setup_debug.py      # fix SAME54_DFP tool-pack bug (required for VS Code debugging)
-```
-
-> **Note:** Both boards must be connected via USB (EDBG/debugger port) before
-> running `setup_flasher.py`. The script detects all plugged-in EDBG debuggers
-> and lets you assign which one is Board 1 (Grandmaster) and which is Board 2
-> (Follower). If only one board is connected, the script will not be able to
-> configure both entries.
-
-### Build & Flash
-
-```bat
-build.bat          # incremental build  (use "build.bat rebuild" for a clean build)
-python flash.py    # flash both boards in sequence
-```
-
-A build summary (flash/RAM usage, interrupt handlers, HEX path) is printed
-automatically after every successful build. See §6.2 for details.
 
 ---
 
@@ -2034,20 +2098,28 @@ Verification path:
   rate residual (ppm).  Use after firmware changes to `DRIFT_IIR_N` or to
   the anchor-tick capture path.
 
-**Measured on the bench (2026-04-20, with ISR-captured GM anchor tick +
-`DRIFT_IIR_N = 128` + `PTP_GM_ANCHOR_OFFSET_NS = 800000`):**
+**Freeze-state measurement (2026-04-24, canonical test
+`pd10_sync_before_after_test.py`, 10 s capture each phase @ 50 MS/s,
+demo decimator path, default `drift_iir_n = 128`, ISR-captured GM anchor):**
 
-| Metric | Value |
-|---|---|
-| Cross-board rising-edge median (SQUARE, 1 kHz) | **−30 µs** |
-| MAD | 35 µs |
-| Long-term rate residual (60 s) | +1.2 ppm |
-| Drift filter stddev per board | 32-37 ppm |
-| Period jitter per board | sub-µs MAD |
+| Metric | UNSYNCED | **SYNCED (freeze state)** |
+|---|---:|---:|
+| Cross-board drift slope | +28.72 ppm | **−0.07 ppm** |
+| Cross-board drift MAD | 70.76 µs | **13.62 µs** |
+| Start → end | +175 → +545 µs | −51.7 → −3.1 µs |
+| Per-board interval MAD @ 500 µs | 0.26-0.28 µs | 0.22-0.28 µs |
+| PTP FINE lock time | — | 2.7 s |
 
-These are substantially better than the older numbers (~−135 µs median,
-~50 ppm filter stddev, ~11 ppm rate residual) which dated from before the
-ISR-anchor change and the larger IIR window.
+Synchronisation reduces cross-board drift MAD by **5.2×** and collapses
+the secular slope to effectively zero.  Both gates from the PASS criteria
+(`|slope| < 5 ppm`, `MAD < 50 µs`) pass with wide margin.
+
+These numbers improve on the earlier documented state (22.3 µs MAD,
+−1.2 ppm slope — see
+[documentation/testing/pd10_sync_before_after_tests.md](documentation/testing/pd10_sync_before_after_tests.md))
+by ~1.6× on MAD and ~17× on residual slope, with no firmware changes to
+the PTP servo — improvement comes from the adaptive-IIR drift filter
+and ISR-anchor path already landed on master.
 
 ---
 

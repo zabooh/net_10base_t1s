@@ -150,11 +150,12 @@ future change that removes the `ForceSet(0)` (e.g. for ptp-always-on
 configurations), so the decimator does not inherit a random phase
 offset from the boot-time PTP_CLOCK value.
 
-It does **not** reduce the observed cross-board MAD of ~22 µs —
+It does **not** reduce the observed cross-board MAD of ~14-22 µs —
 that floor is dominated by the PTP servo residual (`drift_ppb` IIR
 hunting between Sync samples), not decimator sampling.  See
 [pd10_sync_before_after_tests.md](../testing/pd10_sync_before_after_tests.md)
-for the measurement.
+for the measurement (freeze-state 2026-04-24: 13.62 µs MAD / −0.07 ppm
+slope; earlier 2026-04-23: 22.3 µs / −1.2 ppm).
 
 ### Runtime-configurable decimator (bench-test CLIs)
 
@@ -280,10 +281,16 @@ The test guides the operator through three phases:
    for both LED2 solid.
 4. **Step 3** — 6 s post-sync capture.  Expect median cross-board
    rising-edge delta well under 50 ms (the human-visual threshold) and
-   ideally under 1 ms.  Measured 2026-04-23 with the adaptive drift
-   filter + TC1-ISR cyclic_fire backend: **median −32 µs, MAD 39 µs,
-   0.0 ppm cross-board rate match** on a 60 s capture (full numbers and
-   methodology in [drift_filter.md](../ptp/drift_filter.md) §5).
+   ideally under 1 ms.  Measured on current HEAD with the adaptive drift
+   filter + TC1-ISR cyclic_fire backend:
+   - **2026-04-24 (freeze-state, `pd10_sync_before_after_test.py`, 10 s
+     capture):** MAD **13.62 µs**, slope **−0.07 ppm**.
+   - 2026-04-23 (60 s capture, `drift_filter_analysis.py`): median −32 µs,
+     MAD 39 µs, 0.0 ppm cross-board rate match.
+
+   Full numbers and methodology in
+   [drift_filter.md](../ptp/drift_filter.md) §5 and
+   [pd10_sync_before_after_tests.md](../testing/pd10_sync_before_after_tests.md).
 
 ### Useful flags
 

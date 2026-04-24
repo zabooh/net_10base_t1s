@@ -8,6 +8,18 @@
 #include "system/command/sys_command.h"
 #include "system/console/sys_console.h"
 
+static const char *cyclic_start_rc_str(cyclic_fire_start_rc_t rc)
+{
+    switch (rc) {
+    case CYCLIC_FIRE_START_OK:              return "ok";
+    case CYCLIC_FIRE_START_ALREADY_RUNNING: return "already running";
+    case CYCLIC_FIRE_START_PTP_INVALID:     return "PTP_CLOCK not valid";
+    case CYCLIC_FIRE_START_ARM_FAILED:
+        return "arm failed (anchor too far, ISR backend = 1 ms window)";
+    default:                                return "unknown";
+    }
+}
+
 static void cyclic_start_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
     (void)pCmdIO;
     uint32_t period_us = CYCLIC_FIRE_DEFAULT_PERIOD_US;
@@ -19,7 +31,8 @@ static void cyclic_start_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv)
         anchor_ns = (uint64_t)strtoull(argv[2], NULL, 0);
     }
     if (!cyclic_fire_start(period_us, anchor_ns)) {
-        SYS_CONSOLE_PRINT("cyclic_start FAIL  (already running or PTP_CLOCK not valid)\r\n");
+        SYS_CONSOLE_PRINT("cyclic_start FAIL  (%s)\r\n",
+                          cyclic_start_rc_str(s_last_start_rc));
         return;
     }
     SYS_CONSOLE_PRINT("cyclic_start OK  period=%lu us  anchor=%llu ns\r\n",
@@ -42,7 +55,8 @@ static void cyclic_start_marker_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char 
         anchor_ns = (uint64_t)strtoull(argv[2], NULL, 0);
     }
     if (!cyclic_fire_start_ex(period_us, anchor_ns, CYCLIC_FIRE_PATTERN_MARKER)) {
-        SYS_CONSOLE_PRINT("cyclic_start_marker FAIL  (already running or PTP_CLOCK not valid)\r\n");
+        SYS_CONSOLE_PRINT("cyclic_start_marker FAIL  (%s)\r\n",
+                          cyclic_start_rc_str(s_last_start_rc));
         return;
     }
     SYS_CONSOLE_PRINT("cyclic_start_marker OK  period=%lu us  anchor=%llu ns  "

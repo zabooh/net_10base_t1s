@@ -60,6 +60,9 @@ except ImportError:
     print("ERROR: logic2-automation not installed.  Run: pip install logic2-automation")
     sys.exit(1)
 
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ptp-analysis", "ptp-drift-tests"))
+
 from ptp_drift_compensate_test import (  # noqa: E402
     Logger, open_port, send_command, wait_for_pattern,
     reset_and_wait_for_boot, sleep_with_countdown,

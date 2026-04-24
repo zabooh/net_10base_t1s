@@ -41,6 +41,9 @@ from pathlib import Path
 
 import serial
 
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ptp-analysis", "ptp-drift-tests"))
+
 # Re-use the helpers that are already battle-tested in cyclic_fire_hw_test
 from cyclic_fire_hw_test import (                                    # noqa: E402
     start_saleae_capture, export_capture_csv, parse_edges,

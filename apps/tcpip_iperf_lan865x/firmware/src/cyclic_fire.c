@@ -136,13 +136,17 @@ bool cyclic_fire_start(uint32_t period_us, uint64_t phase_anchor_ns)
                                 CYCLIC_FIRE_PATTERN_SQUARE);
 }
 
+cyclic_fire_start_rc_t s_last_start_rc = CYCLIC_FIRE_START_OK;
+
 bool cyclic_fire_start_ex(uint32_t period_us, uint64_t phase_anchor_ns,
                           cyclic_fire_pattern_t pattern)
 {
     if (s_running) {
+        s_last_start_rc = CYCLIC_FIRE_START_ALREADY_RUNNING;
         return false;
     }
     if (!PTP_CLOCK_IsValid()) {
+        s_last_start_rc = CYCLIC_FIRE_START_PTP_INVALID;
         return false;
     }
     if (period_us == 0u) {
@@ -207,7 +211,12 @@ bool cyclic_fire_start_ex(uint32_t period_us, uint64_t phase_anchor_ns,
     s_running = true;
 
     if (!arm_backend(first_target_ns)) {
-        /* Arm failed — roll everything back. */
+        /* Arm failed — roll everything back.  Typical reason is that
+         * first_target_ns is further than TC1's 16-bit arm window (1 ms
+         * on the ISR path) — e.g. a caller-supplied phase_anchor that is
+         * seconds in the future.  Use CLI cyclic_status / tfuture_status
+         * and s_last_start_rc to distinguish this from "already running"
+         * or "PTP_CLOCK not valid". */
         if (s_use_isr_path) {
             cyclic_fire_isr_set_callback(NULL);
         } else {
@@ -216,8 +225,10 @@ bool cyclic_fire_start_ex(uint32_t period_us, uint64_t phase_anchor_ns,
         }
         SYS_PORT_PinClear(CYCLIC_FIRE_PIN);
         s_running = false;
+        s_last_start_rc = CYCLIC_FIRE_START_ARM_FAILED;
         return false;
     }
+    s_last_start_rc = CYCLIC_FIRE_START_OK;
     return true;
 }
 

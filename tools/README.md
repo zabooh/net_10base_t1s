@@ -19,27 +19,44 @@ tools/
 └── saleae-logic-analyzer/      # Saleae Logic 2 capture / polling scripts
 ```
 
-## [flash/](flash/) — Flash & Debugger Setup
+## Flash & Debugger Setup (at the repo root)
+
+All flash / setup bootstrap scripts live at the repo root (not under `tools/`)
+so a fresh clone can flash without any `cd` gymnastics.
 
 | Script | Purpose |
 |--------|---------|
-All flash / setup bootstrap scripts now live at the repo root:
+| [flash.py](../flash.py) | Program both boards via MPLAB MDB.  **No argument** → programs the checked-in `apps/.../out/tcpip_iperf_lan865x/default.hex` — that file is overwritten in place by `build.bat`, so the next `flash.py` automatically picks up your latest build. |
+| [mdb_flash.py](../mdb_flash.py) | Low-level MDB wrapper used by `flash.py` |
+| [setup_flasher.py](../setup_flasher.py) | One-time: detect + assign Board 1 / Board 2 debugger serials (writes `setup_flasher.config`) |
+| [setup_compiler.py](../setup_compiler.py) | One-time: pick an installed XC32 version (writes `setup_compiler.config`) |
+| [setup_debug.py](../setup_debug.py) | One-time: patch SAME54_DFP tool-pack so VS Code `cortex-debug` works |
 
-| Script | Purpose |
-|--------|---------|
-| [flash.py](../flash.py) | Program both boards via MPLAB MDB |
-| [mdb_flash.py](../mdb_flash.py) | Low-level MDB wrapper |
-| [setup_flasher.py](../setup_flasher.py) | Detect + configure debugger COM ports |
-| [setup_compiler.py](../setup_compiler.py) | Compiler environment setup |
-| [setup_debug.py](../setup_debug.py) | Debug session initialization |
+**Zero-to-flashed quick path:**
 
-**Quick start:** run `setup_flasher.py` once, then `flash.py`.
+```bat
+python setup_flasher.py        :: once — detect both EDBG debuggers
+python flash.py                :: programs default.hex → both boards
+```
+
+**Rebuild + flash:**
+
+```bat
+python setup_compiler.py       :: once — pick XC32
+build.bat                      :: overwrites default.hex
+python flash.py                :: re-flash with the new default.hex
+```
+
+See the top-level [readme.md §How To Reproduce](../readme.md#how-to-reproduce)
+for the full walkthrough including the post-flash smoke test.
 
 ## [test-harness/](test-harness/) — Regression & Smoke
 
 | Script | Purpose |
 |--------|---------|
-| [smoke_test.py](test-harness/smoke_test.py) | Broad functional regression guard |
+| [smoke_test.py](test-harness/smoke_test.py) | Broad functional regression guard — 58 checks over boot, PTP FINE, every CLI command, tfuture, cyclic_fire (SQUARE/MARKER/FREE), SW-NTP end-to-end.  On exit, automatically resets both boards and re-establishes PTP sync (GM+FOL FINE) so the hardware is left ready for the next step without a manual reset.  Default ports `--gm-port COM8 --fol-port COM10`. |
+| [overnight_test.py](test-harness/overnight_test.py) | Long-running stability test: periodic `clk_get` sampling + 5-minute drift regressions + optional Saleae phase checks, stops on any keypress with a summary. |
+| [saleae_drift_test.py](test-harness/saleae_drift_test.py) | Short Saleae-based drift check (~30 s end-to-end) — reset → FINE → 1 kHz cyclic_fire on PD10 → short capture → phase-slope regression. |
 | [standalone_demo_test.py](test-harness/standalone_demo_test.py) | Standalone PTP sync demo driver |
 | [meta_cyclic_fire_sweep.py](test-harness/meta_cyclic_fire_sweep.py) | Automated sweep over cyclic-fire parameters |
 | [cyclic_fire_hw_test.py](test-harness/cyclic_fire_hw_test.py) | Cyclic firing hardware test |

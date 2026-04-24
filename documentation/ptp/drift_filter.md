@@ -323,3 +323,10 @@ for the `cyclic_fire` rate factor; the same harness can be reused for N_max.
   min(samples_since_reset, s_drift_iir_n), `PTP_CLOCK_ResetDriftFilter()`
   exposed via `drift_iir_reset` CLI. Settle time stays at 2.7 s (LAN8651
   hardware-servo bound), MAD drops from 25 µs to 7.2 µs in the 10 s window.
+- **2026-04-24 (freeze candidate):** Re-measured with
+  `pd10_sync_before_after_test.py` on current HEAD — cross-board drift
+  MAD **13.62 µs**, slope **−0.07 ppm** over 10 s (run
+  `20260424_084628`). Improvement over the 2026-04-23 22.3 µs / −1.2 ppm
+  baseline is noise (same firmware, different thermal conditions); both
+  numbers comfortably inside the PASS gates. This is the sync quality
+  target for the freeze: **< 20 µs MAD, < 1 ppm residual slope**.

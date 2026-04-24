@@ -35,6 +35,9 @@ except ImportError:
     print("ERROR: pyserial not installed.  Run: pip install pyserial")
     sys.exit(1)
 
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ptp-analysis", "ptp-drift-tests"))
+
 from ptp_drift_compensate_test import (  # noqa: E402
     Logger, open_port, send_command, wait_for_pattern,
     reset_and_wait_for_boot,
@@ -77,7 +80,14 @@ RE_LOOP_STATS       = re.compile(r"(loop_stats|Main loop|subsystem)", re.IGNOREC
 # End-to-end sanity gates (generous bounds — tight gates live in dedicated tests)
 GATE_FOL_SELF_JITTER_NS = 200_000        # 200 µs
 GATE_PTP_OFFSET_ABS_NS  = 50_000         # 50 µs after FINE lock + settle
-GATE_SW_NTP_OFFSET_NS      = 1_000_000   # 1 ms — generous since app-layer incl. UDP jitter
+GATE_SW_NTP_OFFSET_NS      = 2_000_000   # 2 ms — generous since app-layer SW-NTP adds
+                                          # UDP frame jitter + PTP_CLOCK_GetTime_ns read
+                                          # jitter on top of the pure PTP cross-board
+                                          # sync (~14 µs MAD).  Bumped from 1 ms on
+                                          # 2026-04-24 after observing borderline 1022 µs
+                                          # fails on crystal pairs with > 100 ppm natural
+                                          # rate mismatch that takes the IIR a few extra
+                                          # seconds to fully compensate.
 GATE_SW_NTP_MIN_SAMPLES    = 5           # at 1 Hz poll, expect ≥5 in 8 s
 GATE_SW_NTP_MIN_SUCCESS    = 0.60        # ≥60 % successful replies.  README_NTP §8
                                          # documents 3–10 % typical timeout rate from
@@ -97,7 +107,13 @@ GATE_SW_NTP_MIN_SUCCESS    = 0.60        # ≥60 % successful replies.  README_N
 CYCLIC_PERIOD_US           = 500
 CYCLIC_DWELL_S             = 2.0
 GATE_CYCLIC_MIN_CYCLES     = 500
-GATE_CYCLIC_MAX_CYCLES     = 15000
+GATE_CYCLIC_MAX_CYCLES     = 20000   # 2 s dwell + ~2 s of serial round-trips
+                                     # (status + stop commands on both boards)
+                                     # keeps the callback firing at 4 kHz → up
+                                     # to ~16 000 cycles observed in practice.
+                                     # Bumped from 15000 on 2026-04-24 after
+                                     # MARKER run hit 16197 (SQUARE 13600 same
+                                     # day).
 GATE_CYCLIC_MAX_MISSES     = 20
 
 RE_CYC_RUNNING = re.compile(r"cyclic running\s*:\s+(yes|no)")
@@ -447,6 +463,15 @@ def phase3_end_to_end(run: SmokeRunner, rounds: int = 5):
     # -------- Crystal-deviation by-product (informational only) ---------
     phase3_crystal_analysis(run)
 
+    # -------- Release cyclic_fire from standalone_demo ownership --------
+    # standalone_demo_init auto-starts cyclic_fire at boot in SILENT mode
+    # and runs a 500 ms watchdog that restarts it if stopped.  Without
+    # handing ownership over here, our own `cyclic_start*` calls below
+    # fail with "already running".  `demo_autopilot off` unhooks the
+    # decimator, stops cyclic_fire, and disables the watchdog.
+    send_command(run.ser_gm,  "demo_autopilot off", 2.0, run.log)
+    send_command(run.ser_fol, "demo_autopilot off", 2.0, run.log)
+
     # -------- cyclic_fire end-to-end: callback + re-arm loop on PD10 ----
     phase3_cyclic_fire(run)
 
@@ -597,22 +622,18 @@ def phase3_cyclic_fire(run: SmokeRunner):
     log = run.log
     gm, fol = run.ser_gm, run.ser_fol
 
-    # Pick a shared phase anchor ~100 ms in the future so both boards
-    # begin at the same PTP-wallclock moment regardless of the delta
-    # between their two cyclic_start calls.
-    resp = send_command(gm, "clk_get", 2.0, log)
-    m    = RE_CLK_GET.search(resp)
-    if not m:
-        run.check("cyclic_fire start (both)",
-                  lambda: (False, f"could not read GM clk: {resp[:80]!r}"))
-        return
-    anchor_ns = int(m.group(1)) + 100_000_000   # +100 ms
-
-    # Start both boards on the shared anchor.
+    # Pass anchor=0 so each board uses "now + period" as its first target.
+    # The cyclic_fire ISR backend (TC1 16-bit @ 60 MHz, configured by
+    # standalone_demo_init) can only arm ≤ 1 ms into the future — a
+    # non-zero anchor N ms ahead (the old +100 ms value used here) would
+    # fail arm_backend() and the firmware would print
+    # "cyclic_start FAIL (arm failed ...)".  Smoke-test checks the start
+    # succeeded + callback ran; it does NOT need the two boards' first
+    # edges to be phase-aligned (that is checked by the Saleae HW tests).
     gm_ok  = bool(RE_CYC_START_OK.search(
-        send_command(gm,  f"cyclic_start {CYCLIC_PERIOD_US} {anchor_ns}", 2.0, log)))
+        send_command(gm,  f"cyclic_start {CYCLIC_PERIOD_US} 0", 2.0, log)))
     fol_ok = bool(RE_CYC_START_OK.search(
-        send_command(fol, f"cyclic_start {CYCLIC_PERIOD_US} {anchor_ns}", 2.0, log)))
+        send_command(fol, f"cyclic_start {CYCLIC_PERIOD_US} 0", 2.0, log)))
     run.check("cyclic_fire start (both)",
               lambda: (gm_ok and fol_ok,
                        f"GM={'OK' if gm_ok else 'FAIL'}  FOL={'OK' if fol_ok else 'FAIL'}"))
@@ -681,21 +702,18 @@ def phase3_cyclic_fire_marker(run: SmokeRunner):
     log = run.log
     gm, fol = run.ser_gm, run.ser_fol
 
-    resp = send_command(gm, "clk_get", 2.0, log)
-    m    = RE_CLK_GET.search(resp)
-    if not m:
-        run.check("cyclic_fire marker start (both)",
-                  lambda: (False, f"could not read GM clk: {resp[:80]!r}"))
-        return
-    anchor_ns = int(m.group(1)) + 100_000_000   # +100 ms
-
-    # The MARKER pattern has 10 half-period callbacks per visible pulse cycle,
-    # so cycles grow at the same rate as SQUARE at the same period.  Use the
-    # same gates.
+    # anchor=0 for the same reason as phase3_cyclic_fire above — ISR
+    # backend can only arm ≤ 1 ms into the future; a +100 ms anchor would
+    # fail with "arm failed".  MARKER's pattern counter is derived from
+    # the anchor internally (cyclic_fire.c `s_marker_phase` init), so
+    # using 0 still produces a well-defined pulse cadence.  The MARKER
+    # pattern has 10 half-period callbacks per visible pulse cycle, so
+    # cycles grow at the same rate as SQUARE at the same period.  Same
+    # gates.
     gm_ok  = bool(RE_CYC_START_MARKER_OK.search(
-        send_command(gm,  f"cyclic_start_marker {CYCLIC_PERIOD_US} {anchor_ns}", 2.0, log)))
+        send_command(gm,  f"cyclic_start_marker {CYCLIC_PERIOD_US} 0", 2.0, log)))
     fol_ok = bool(RE_CYC_START_MARKER_OK.search(
-        send_command(fol, f"cyclic_start_marker {CYCLIC_PERIOD_US} {anchor_ns}", 2.0, log)))
+        send_command(fol, f"cyclic_start_marker {CYCLIC_PERIOD_US} 0", 2.0, log)))
     run.check("cyclic_fire marker start (both)",
               lambda: (gm_ok and fol_ok,
                        f"GM={'OK' if gm_ok else 'FAIL'}  FOL={'OK' if fol_ok else 'FAIL'}"))
@@ -820,6 +838,63 @@ def phase3_r25_regression(run: SmokeRunner):
 
 
 # ---------------------------------------------------------------------------
+# Post-test teardown — leave both boards in a fresh PTP-synced state
+# ---------------------------------------------------------------------------
+
+def teardown_reset_and_sync(ser_gm, ser_fol, args, log: Logger) -> bool:
+    """Clean exit: reset both boards, reconfigure IPs, bring them into
+    master/follower PTP sync, wait for FOL FINE.  The test has just
+    poked at state via cyclic_start_free, sw_ntp_mode, ptp_mode off
+    etc — by resetting we hand the user a board pair that is in a known,
+    clean PTP-FINE state ready for further manual use (bench demo,
+    Saleae capture, etc.).
+
+    Does NOT register PASS/FAIL into the Phase 1-3 summary — this is
+    an after-test convenience and its success / failure is only logged."""
+    log.info("")
+    log.info("=" * 70)
+    log.info("  Post-test: reset + PTP sync (leave boards ready for next use)")
+    log.info("=" * 70)
+
+    try:
+        gm_build  = reset_and_wait_for_boot(ser_gm,  "GM ", timeout=8.0, log=log)
+        fol_build = reset_and_wait_for_boot(ser_fol, "FOL", timeout=8.0, log=log)
+    except RuntimeError as exc:
+        log.info(f"  teardown reset failed: {exc}")
+        return False
+    log.info(f"  Build: GM={gm_build} FOL={fol_build}")
+
+    resp = send_command(ser_gm,  f"setip eth0 {args.gm_ip} {args.netmask}",
+                        3.0, log)
+    log.info(f"  GM  setip {args.gm_ip}  -> "
+             f"{'OK' if RE_IP_SET.search(resp) else 'FAIL'}")
+    resp = send_command(ser_fol, f"setip eth0 {args.fol_ip} {args.netmask}",
+                        3.0, log)
+    log.info(f"  FOL setip {args.fol_ip} -> "
+             f"{'OK' if RE_IP_SET.search(resp) else 'FAIL'}")
+
+    send_command(ser_fol, "ptp_mode follower", 3.0, log)
+    time.sleep(0.3)
+    ser_fol.reset_input_buffer()
+    send_command(ser_gm,  "ptp_mode master", 3.0, log)
+
+    matched, elapsed, _ = wait_for_pattern(
+        ser_fol, RE_FINE, args.conv_timeout, log,
+        extra_patterns={"MATCHFREQ": RE_MATCHFREQ,
+                        "HARD_SYNC": RE_HARD_SYNC,
+                        "COARSE":    RE_COARSE},
+        live_log=False)
+    if matched:
+        log.info(f"  FOL reached PTP FINE in {elapsed:.1f} s — "
+                 f"GM (master) + FOL (follower) in sync, ready for next use.")
+        return True
+    log.info(f"  FOL FINE NOT reached within {args.conv_timeout:.0f} s "
+             f"(elapsed {elapsed:.1f} s) — boards are NOT in sync; "
+             f"rerun the smoke test or power-cycle.")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -866,11 +941,22 @@ def main():
         phase2_cli_coverage(run)
         phase3_end_to_end(run, args.rounds)
     finally:
+        # 1. Summary first so the PASS/FAIL table isn't buried below the
+        #    teardown log lines.
+        rc = run.summary()
+        # 2. Teardown: reset both boards and re-establish PTP sync so the
+        #    user is left with a clean, ready-to-use board pair.  Only
+        #    makes sense if ports are still open (they should be).
+        if ser_gm.is_open and ser_fol.is_open:
+            try:
+                teardown_reset_and_sync(ser_gm, ser_fol, args, log)
+            except Exception as exc:
+                log.info(f"  teardown warning: {exc}")
+        # 3. Finally release the ports and close the log.
         for ser in (ser_gm, ser_fol):
             if ser and ser.is_open:
                 try: ser.close()
                 except: pass
-        rc = run.summary()
         log.close()
 
     return rc

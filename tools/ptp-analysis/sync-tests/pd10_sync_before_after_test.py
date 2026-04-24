@@ -50,10 +50,19 @@ Usage:
 import argparse
 import csv
 import datetime
+import os
 import statistics
 import sys
 import time
 from pathlib import Path
+
+# After the 498ce7f cleanup-move the sibling scripts now live in separate
+# directories.  Extend sys.path so imports still resolve without relying
+# on the caller setting PYTHONPATH.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)                                            # pd10_sync_check.py
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "test-harness"))  # cyclic_fire_hw_test.py
+sys.path.insert(0, os.path.join(_HERE, "..", "ptp-drift-tests"))     # ptp_drift_compensate_test.py
 
 from cyclic_fire_hw_test import (                            # noqa: E402
     start_saleae_capture, export_capture_csv, parse_edges,

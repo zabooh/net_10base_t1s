@@ -94,22 +94,42 @@ Per run, a `pd10_sync_before_after_<ts>/` directory with:
 - `summary.csv`                       — one row per phase with n, median, MAD, slope, drift-MAD
 - `run_<ts>.log`                      — tee'd console output
 
-## Representative result (run `20260423_210451`)
+## Freeze-state result (run `20260424_084628` — current HEAD)
 
 Board pair: two SAM E54 Curiosity Ultra on a LAN865x 10BASE-T1S link.
-Half-period target: 500 µs. Capture 10 s each phase @ 50 MS/s.
-Default cyclic_period_us = 500 (fire rate 4 kHz).
+PD10 rectangle period 1000 µs (half-period 500 µs). Capture 10 s each
+phase @ 50 MS/s. Default cyclic_period_us = 500 (fire rate 4 kHz).
 
 ### Cross-board drift (unwrapped delta Ch1 − Ch0)
+
+| Metric           | UNSYNC        | **SYNC (freeze)** |
+|------------------|---------------|-------------------|
+| n                | 10 059        | 10 027            |
+| slope            | **+28.72 ppm**| **−0.07 ppm**     |
+| MAD              | **70.76 µs**  | **13.62 µs**      |
+| start → end      | +175 → +545 µs| −52 → −3 µs       |
+
+**Sync reduces cross-board drift MAD by 5.2×.** All PASS gates met
+with wide margin: `|slope| < 5 ppm` (measured −0.07), `MAD < 50 µs`
+(measured 13.62).
+
+### Earlier representative result (run `20260423_210451`, 1 day before)
+
+Kept for history — shows both the LAN865x hardware-servo wander and
+the measurement-window dependence of the MAD floor.
 
 | Metric           | UNSYNC        | SYNC          |
 |------------------|---------------|---------------|
 | n                | 10 066        | 10 054        |
-| slope            | **+231.3 ppm**| **−1.2 ppm**  |
-| MAD              | **494.4 µs**  | **22.3 µs**   |
+| slope            | +231.3 ppm    | −1.2 ppm      |
+| MAD              | 494.4 µs      | 22.3 µs       |
 | start → end      | −65 → +895 µs | −80 → −91 µs  |
 
-**Sync reduces cross-board drift MAD by ~22×.**
+Note: the dramatic difference in UNSYNC slope (+231 ppm vs +28.72 ppm
+between the two runs) is the raw crystal-pair mismatch of the hardware
+on that day — it swings with temperature and between boots of the
+free-running LAN865x timestamping clock.  Only the SYNC numbers should
+be used to judge firmware quality.
 
 ### Per-board half-period stability
 

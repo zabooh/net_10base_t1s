@@ -8,6 +8,7 @@
   - [3.1 Phase 1 — Boot + PTP FINE](#31-phase-1--boot--ptp-fine)
   - [3.2 Phase 2 — CLI coverage](#32-phase-2--cli-coverage)
   - [3.3 Phase 3 — End-to-end](#33-phase-3--end-to-end)
+- [3.4 Post-test teardown](#34-post-test-teardown)
 - [4. What It Deliberately Omits](#4-what-it-deliberately-omits)
 - [5. Usage](#5-usage)
 - [6. Exit Codes and Log File](#6-exit-codes-and-log-file)
@@ -146,6 +147,35 @@ The same analysis is implemented in `tfuture_quick_check.py`. If you
 need numerical cross-validation across many runs use that tool; the
 smoke test just prints the current values once per run.
 
+### 3.4 Post-test teardown
+
+After the PASS/FAIL summary prints, the test runs an **automatic
+teardown phase** that does NOT contribute to the summary but leaves
+the hardware in a clean, immediately-usable state:
+
+1. **Reset both boards** and wait for the `[APP] Build:` boot banner
+   (same flow as Phase 1).
+2. **Re-configure IPs** via `setip eth0 …` on both boards.
+3. **Start PTP**: `ptp_mode follower` on FOL, `ptp_mode master` on GM.
+4. **Wait for FOL `PTP FINE`** (usually 2-3 s).
+
+Rationale: Phase 3 ends with the firmware in an unusual state —
+`cyclic_start_free` has force-reset PTP_CLOCK, SW-NTP mode was toggled,
+`demo_autopilot off` was sent, and various trace toggles happened.
+Without the teardown, a user who wanted to immediately run a Saleae
+capture or another CLI session would first need to power-cycle or run
+a separate reset script.  The teardown makes that unnecessary: the
+final log line reports either
+
+```
+  FOL reached PTP FINE in 2.1 s — GM (master) + FOL (follower) in sync,
+  ready for next use.
+```
+
+or, on failure, a clear "NOT in sync" message prompting a power-cycle.
+Teardown failures do **not** change the smoke-test exit code — the
+PASS/FAIL summary remains the source of truth for CI pipelines.
+
 ---
 
 ## 4. What It Deliberately Omits
@@ -167,11 +197,15 @@ If you need to validate those commands, they each have a dedicated test
 
 ## 5. Usage
 
+Run from [tools/test-harness/](../../tools/test-harness/):
+
 ```bash
-# Full run (~3 minutes) — reset boards, wait for FINE, all phases
+cd tools/test-harness
+
+# Full run (~60 s) — reset boards, wait for FINE, all phases + teardown
 python smoke_test.py
 
-# Fast iteration (~45 s) — skip Phase 1, assume PTP is already running
+# Fast iteration (~45 s) — skip Phase 1 reset+FINE, use boards as-is
 python smoke_test.py --no-reset
 
 # Stop at first failure (for debugging)

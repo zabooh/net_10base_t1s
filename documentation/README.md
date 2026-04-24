@@ -4,6 +4,12 @@ This directory contains project documentation for the PTP-10BASE-T1S firmware (A
 
 The top-level [readme.md](../readme.md) has the project overview. Risks and open questions live in [RISKS.md](../RISKS.md).
 
+> **Freeze-state sync quality (2026-04-24):** cross-board PD10 drift
+> MAD 13.6 µs, slope −0.07 ppm over 10 s, both PASS gates met
+> (`|slope| < 5 ppm`, `MAD < 50 µs`). Canonical test:
+> [../tools/ptp-analysis/sync-tests/pd10_sync_before_after_test.py](../tools/ptp-analysis/sync-tests/pd10_sync_before_after_test.py).
+> Full numbers in [testing/pd10_sync_before_after_tests.md](testing/pd10_sync_before_after_tests.md).
+
 > **Note:** `documentation/` (not `docs/`) — the `docs/` directory holds Microchip Harmony Oxygen-generated web-help and must stay untouched.
 
 ## Topics

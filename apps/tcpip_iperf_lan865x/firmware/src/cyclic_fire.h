@@ -58,6 +58,22 @@ bool     cyclic_fire_start_ex(uint32_t period_us, uint64_t phase_anchor_ns,
 void     cyclic_fire_stop(void);
 bool     cyclic_fire_is_running(void);
 
+/* Distinguishes the three failure modes of cyclic_fire_start{_ex}() so
+ * callers can emit an informative error instead of the legacy "already
+ * running or PTP_CLOCK not valid" (which also fires on arm-backend
+ * failure — e.g. phase_anchor_ns so far in the future that the ISR
+ * backend's 16-bit TC1 window can't reach it). */
+typedef enum {
+    CYCLIC_FIRE_START_OK               = 0,
+    CYCLIC_FIRE_START_ALREADY_RUNNING  = 1,
+    CYCLIC_FIRE_START_PTP_INVALID      = 2,
+    CYCLIC_FIRE_START_ARM_FAILED       = 3,
+} cyclic_fire_start_rc_t;
+
+/* Result of the most recent cyclic_fire_start{_ex}() call.  The CLI
+ * wrapper in cyclic_fire_cli.c reads this to print a specific reason. */
+extern cyclic_fire_start_rc_t s_last_start_rc;
+
 uint32_t cyclic_fire_get_period_us(void);
 uint64_t cyclic_fire_get_cycle_count(void);
 uint64_t cyclic_fire_get_missed_count(void);
