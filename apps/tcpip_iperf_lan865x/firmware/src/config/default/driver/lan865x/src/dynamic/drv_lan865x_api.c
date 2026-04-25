@@ -39,53 +39,15 @@ Microchip or any third party.
 
 *******************************************************************************/
 #include <stdarg.h>
-#include <string.h>
 #include "configuration.h"
 #include "definitions.h"
 #include "drv_lan865x_local.h"
 #include "driver/lan865x/drv_lan865x.h"
 #include "tc6/tc6.h"
-#include "../../../../../../ptp_ts_ipc.h"
 
-/* ---------------------------------------------------------------------------
- * nIRQ change-notification interrupt (EIC EXTINT14 — PC14, active-low).
- * The ISR captures a TC0 tick at the earliest possible moment so that
- * sysTickAtRx is accurate to the nIRQ assertion rather than to the later
- * SPI-callback moment (improvement from ~200 µs error to < 5 µs).
- * ---------------------------------------------------------------------------*/
-static volatile bool     s_nirq_pending = false;
-static volatile uint64_t s_nirq_tick    = 0u;
-
-void EIC_EXTINT_14_Handler(void)
-{
-    s_nirq_tick    = SYS_TIME_Counter64Get();
-    s_nirq_pending = true;
-    EIC_REGS->EIC_INTFLAG = (1u << 14u);   /* W1C — clear EXTINT14 flag */
-}
-
-static void _InitNIrqEIC(void)
-{
-    /* Enable EIC APB-A clock */
-    MCLK_REGS->MCLK_APBAMASK |= MCLK_APBAMASK_EIC_Msk;
-
-    /* Use OSCULP32K (CKSEL=1) — no GCLK peripheral clock needed */
-    EIC_REGS->EIC_CTRLA = EIC_CTRLA_CKSEL_Msk;
-
-    /* CONFIG[1] covers EXTINT8..15.  EXTINT14 sits at bits 27:24.
-     * SENSE=0x2 (FALL) — nIRQ is active-low; trigger on falling edge. */
-    EIC_REGS->EIC_CONFIG[1] = (EIC_REGS->EIC_CONFIG[1] & ~(0xFu << 24u))
-                             | (0x2u << 24u);
-
-    /* Enable EXTINT14 interrupt */
-    EIC_REGS->EIC_INTENSET = (1u << 14u);
-
-    /* Enable EIC and wait for sync */
-    EIC_REGS->EIC_CTRLA |= EIC_CTRLA_ENABLE_Msk;
-    while ((EIC_REGS->EIC_SYNCBUSY & EIC_SYNCBUSY_ENABLE_Msk) != 0u) {}
-
-    /* Unmask in NVIC */
-    NVIC_EnableIRQ(EIC_EXTINT_14_IRQn);
-}
+/* PTP extension hooks — strong overrides live in ptp_drv_ext.c */
+__attribute__((weak)) void DRV_LAN865X_OnStatus0_Hook(uint8_t idx, uint32_t status0) { (void)idx; (void)status0; }
+__attribute__((weak)) void DRV_LAN865X_OnPtpFrame_Hook(uint8_t idx, const uint8_t *frame, uint16_t len, const uint64_t *rxTimestamp) { (void)idx; (void)frame; (void)len; (void)rxTimestamp; }
 
 /******************************************************************************
 *  DEFINES & MACROS
@@ -154,17 +116,6 @@ static const TCPIP_MAC_OBJECT* drvLAN865xObj[DRV_LAN865X_INSTANCES_NUMBER]=
 
 // Local information
 static DRV_LAN865X_DriverInfo drvLAN865XDrvInst[DRV_LAN865X_INSTANCES_NUMBER];
-/* TX Timestamp Capture Available bits (STATUS0 bits 8-10) saved by _OnStatus0 before W1C.
- * Read and atomically cleared by DRV_LAN865X_GetAndClearTsCapture(). */
-static volatile uint32_t drvTsCaptureStatus0[DRV_LAN865X_INSTANCES_NUMBER];
-/* TC0 tick latched at the moment _OnStatus0 saw the TTSCAA/B/C bits set.
- * Paired with drvTsCaptureStatus0 above.  The value comes from s_nirq_tick,
- * which was captured in the EXTINT-14 ISR when the LAN865x raised nIRQ for
- * the TX-timestamp-available status change.  This gives the GM state machine
- * an ISR-precision anchor tick (~5 µs jitter) to pair with the TTSCA
- * wallclock reading, instead of reading SYS_TIME_Counter64Get() at task
- * level (~100 µs jitter) several ms later at FollowUp-TX-done. */
-static volatile uint64_t drvTsCaptureNirqTick[DRV_LAN865X_INSTANCES_NUMBER];
 static uint8_t drvLAN865xNumOfDrivers = 0;
 static OSAL_MUTEX_HANDLE_TYPE  drvLAN865xClntMutex;
 /******************************************************************************
@@ -275,8 +226,6 @@ SYS_MODULE_OBJ DRV_LAN865X_Initialize(SYS_MODULE_INDEX index, SYS_MODULE_INIT * 
 
     (void)TCPIP_Helper_ProtSglListInitialize(&pDrvInst->rxFreePackets);
     (void)TCPIP_Helper_ProtSglListInitialize(&pDrvInst->rxWaitingForPickupPackets);
-
-    _InitNIrqEIC();
 
     return (SYS_MODULE_OBJ)pDrvInst;
 }
@@ -410,16 +359,10 @@ void DRV_LAN865X_Tasks(SYS_MODULE_OBJ object)
                 TC6_UnlockExtendedStatus(pDrvInst->drvTc6);
             }
         }
-        if (s_nirq_pending) {
-            s_nirq_pending = false;
+        if (!SYS_PORT_PinRead(pDrvInst->drvCfg.interruptPin)) {
             _Lock(&pDrvInst->drvMutex);
             (void)TC6_Service(pDrvInst->drvTc6, false);
             _Unlock(&pDrvInst->drvMutex);
-            /* Re-arm if pin still asserted — catches a second falling edge
-             * that may have occurred during the service call. */
-            if (!SYS_PORT_PinRead(pDrvInst->drvCfg.interruptPin)) {
-                s_nirq_pending = true;
-            }
         }
     }
     if (pDrvInst->needService) {
@@ -1410,12 +1353,6 @@ void TC6_CB_OnRxEthernetSlice(TC6_t *pInst, const uint8_t *pRx, uint16_t offset,
     }
 }
 
-/* PTP_RxTimestampEntry_t and PTP_RxFrameEntry_t defined in ptp_ts_ipc.h (included above) */
-volatile PTP_RxTimestampEntry_t g_ptp_rx_ts = {0u, false};
-
-/* Direct PTP frame capture (see ptp_ts_ipc.h) */
-volatile PTP_RxFrameEntry_t g_ptp_raw_rx = {{0u}, 0u, 0u, 0u, false};
-
 /**
  * \brief Callback when ever an Ethernet packet was received. This will notify the integrator, that now all chunks very reported by TC6_CB_OnRxEthernetPacket and the data can be processed.
  * \note This function must be implemented by the integrator.
@@ -1428,11 +1365,7 @@ volatile PTP_RxFrameEntry_t g_ptp_raw_rx = {{0u}, 0u, 0u, 0u, false};
 void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_t *rxTimestamp, void *pGlobalTag)
 {
     (void)pInst;
-    /* Store RX hardware timestamp for PTP task (see ptp_ts_ipc.h) */
-    if (rxTimestamp != NULL) {
-        g_ptp_rx_ts.rxTimestamp = *rxTimestamp;
-        g_ptp_rx_ts.valid       = true;
-    }
+    (void)rxTimestamp;
     TCPIP_MAC_PACKET *macPkt = NULL;
     DRV_LAN865X_DriverInfo *pDrvInst = _Dereference(pGlobalTag);
     if (NULL != pDrvInst) {
@@ -1447,41 +1380,8 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
             macPkt->pMacLayer = macPkt->pDSeg->segLoad;
             macPkt->pNetLayer = macPkt->pMacLayer + sizeof(TCPIP_MAC_ETHERNET_HEADER);
 
-            /* --- Direct PTP frame capture (independent of PacketHandlerRegister) ---
-             * Check EtherType at bytes 12-13 of the raw Ethernet frame.
-             * If 0x88F7 (PTP): copy to g_ptp_raw_rx for APP_Tasks to process.
-             * The macPkt still goes to rxWaitingForPickupPackets normally;
-             * pktEth0Handler will acknowledge it when the stack delivers it. */
-            if (len >= 14u &&
-                macPkt->pDSeg->segLoad[12] == 0x88u &&
-                macPkt->pDSeg->segLoad[13] == 0xF7u)
-            {
-                uint16_t copyLen = (len > (uint16_t)PTP_RAW_BUF_SIZE) ?
-                                   (uint16_t)PTP_RAW_BUF_SIZE : len;
-                (void)memcpy((uint8_t *)g_ptp_raw_rx.data,
-                             macPkt->pDSeg->segLoad, copyLen);
-                g_ptp_raw_rx.length      = copyLen;
-                g_ptp_raw_rx.rxTimestamp = (rxTimestamp != NULL) ? *rxTimestamp : 0u;
-                /* Only update sysTickAtRx for frames that carry a hardware RX
-                 * timestamp (= SYNC).  FollowUp frames have rxTimestamp==NULL
-                 * and arrive ~1-4 ms after SYNC.  Overwriting sysTickAtRx with
-                 * the FollowUp tick would create a systematic offset in
-                 * PTP_CLOCK_GetTime_ns() because the anchor pair
-                 * (wallclock=t2_SYNC, tick=tick_FollowUp) would be inconsistent. */
-                if (rxTimestamp != NULL) {
-                    /* Use the tick captured in the EIC ISR at nIRQ assertion
-                     * time rather than the current tick.  This reduces the
-                     * sysTickAtRx error from ~200 µs (poll latency + SPI time)
-                     * to < 5 µs (fixed LAN865x RX-pipeline delay after SFD).
-                     * The remaining ~10 ms SFD-to-nIRQ delay of the LAN865x
-                     * itself is compensated in PTP_FOL processFollowUp() via
-                     * PTP_FOL_ANCHOR_OFFSET_NS. */
-                    g_ptp_raw_rx.sysTickAtRx = (s_nirq_tick != 0u)
-                                             ? s_nirq_tick
-                                             : SYS_TIME_Counter64Get();
-                }
-                g_ptp_raw_rx.pending     = true;
-            }
+            /* PTP extension hook (no-op by default; ptp_drv_ext.c overrides). */
+            DRV_LAN865X_OnPtpFrame_Hook(pDrvInst->index, macPkt->pDSeg->segLoad, len, rxTimestamp);
 
             if (0xFF == macPkt->pDSeg->segLoad[0]) {
                 macPkt->pktFlags = TCPIP_MAC_PKT_FLAG_BCAST;
@@ -2352,10 +2252,9 @@ static void _OnStatus1(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
     if (success) {
         uint8_t i;
         bool reinit = false;
+        PRINT_LIMIT("LAN865x_%d ",pDrvInst->index);
         for (i = 0u; i < 32u; i++) {
             if (0u != (value & (1u << i))) {
-                if (i == 28u) { continue; } /* gPTP_PA_TS_EG_Status: fires every Sync, not an error — suppress */
-                PRINT_LIMIT("LAN865x_%d ", pDrvInst->index);
                 switch (i) {
                     case 0:
                         PRINT_LIMIT("Status1.RX_Non_Recoverable_Error\r\n");
@@ -2397,6 +2296,9 @@ static void _OnStatus1(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
                         break;
                     case 27:
                         PRINT_LIMIT("Status1.MCLK_GEN_Status\r\n");
+                        break;
+                    case 28:
+                        PRINT_LIMIT("Status1.gPTP_PA_TS_EG_Status\r\n");
                         break;
                     case 29:
                         PRINT_LIMIT("Status1.Extended_Block_Status\r\n");
@@ -2444,20 +2346,11 @@ static void _OnStatus0(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
         if (success) {
             bool reinit = false;
             uint8_t i;
-            /* Save TTSCAA/B/C bits (8-10) before W1C clear so the GM state machine
-             * can retrieve them via DRV_LAN865X_GetAndClearTsCapture().
-             * Also latch the nIRQ tick that triggered this STATUS0 read — it
-             * corresponds (approximately) to the real-time moment of the SFD
-             * on the wire, and gives the GM a low-jitter anchor tick. */
-            if (0u != (value & 0x0700u)) {
-                for (i = 0u; i < DRV_LAN865X_INSTANCES_NUMBER; i++) {
-                    if (pDrvInst == &drvLAN865XDrvInst[i]) {
-                        drvTsCaptureStatus0[i] |= (value & 0x0700u);
-                        drvTsCaptureNirqTick[i] = s_nirq_tick;
-                        break;
-                    }
-                }
-            }
+            /* PTP extension hook (no-op by default; ptp_drv_ext.c overrides).
+             * MUST run before the W1C clear below so the hook can save
+             * TTSCAA/B/C (bits 8-10) for the GM state machine. */
+            DRV_LAN865X_OnStatus0_Hook(pDrvInst->index, value);
+            PRINT_LIMIT("LAN865x_%d ",pDrvInst->index);
             while (!TC6_WriteRegister(pInst, addr, value, CONTROL_PROTECTION, _OnClearStatus0, NULL)) {
                 (void)TC6_Service(pInst, true);
             }
@@ -2465,44 +2358,47 @@ static void _OnStatus0(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
                 if (0u != (value & (1u << i))) {
                     switch (i) {
                         case 0:
-                            PRINT_LIMIT("LAN865x_%d Status0.Transmit Protocol Error\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.Transmit Protocol Error\r\n");
                             break;
                         case 1:
-                            PRINT_LIMIT("LAN865x_%d Status0.Transmit Buffer Overflow Error\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.Transmit Buffer Overflow Error\r\n");
                             break;
                         case 2:
-                            PRINT_LIMIT("LAN865x_%d Status0.Transmit Buffer Underflow Error\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.Transmit Buffer Underflow Error\r\n");
                             break;
                         case 3:
-                            PRINT_LIMIT("LAN865x_%d Status0.Receive Buffer Overflow Error\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.Receive Buffer Overflow Error\r\n");
                             break;
                         case 4:
-                            PRINT_LIMIT("LAN865x_%d Status0.Loss of Framing Error\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.Loss of Framing Error\r\n");
                             reinit = true;
                             break;
                         case 5:
-                            PRINT_LIMIT("LAN865x_%d Status0.Header Error\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.Header Error\r\n");
                             break;
                         case 6:
-                            PRINT_LIMIT("LAN865x_%d Status0.Reset Complete\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.Reset Complete\r\n");
                             break;
                         case 7:
-                            PRINT_LIMIT("LAN865x_%d Status0.PHY Interrupt\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.PHY Interrupt\r\n");
                             break;
                         case 8:
+                            PRINT_LIMIT("Status0.Transmit Timestamp Capture Available A\r\n");
                             break;
                         case 9:
+                            PRINT_LIMIT("Status0.Transmit Timestamp Capture Available B\r\n");
                             break;
                         case 10:
+                            PRINT_LIMIT("Status0.Transmit Timestamp Capture Available C\r\n");
                             break;
                         case 11:
-                            PRINT_LIMIT("LAN865x_%d Status0.Transmit Frame Check Sequence Error\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.Transmit Frame Check Sequence Error\r\n");
                             break;
                         case 12:
-                            PRINT_LIMIT("LAN865x_%d Status0.Control Data Protection Error\r\n", pDrvInst->index);
+                            PRINT_LIMIT("Status0.Control Data Protection Error\r\n");
                             break;
                         default:
-                            PRINT_LIMIT("LAN865x_%d Status0.Unknown Bit=%d reg-val=0x%d\r\n", pDrvInst->index, i, value);
+                            PRINT_LIMIT("Status0.Unknown Bit=%d reg-val=0x%d\r\n", i, value);
                             break;
                     }
                 }
@@ -2558,46 +2454,13 @@ static void _RxPacketAck(TCPIP_MAC_PACKET* pkt, const void* param)
     }
 }
 
-/* --------------------------------------------------------------------------
- * DRV_LAN865X_SendRawEthFrame
- * Send a raw Ethernet frame through TC6 with a caller-selected TSC flag.
- * Use tsc=0x01 for Sync (to arm Timestamp Capture A) and tsc=0x00 otherwise.
- * -------------------------------------------------------------------------- */
-bool DRV_LAN865X_SendRawEthFrame(uint8_t idx, const uint8_t *pBuf, uint16_t len,
-                                  uint8_t tsc, DRV_LAN865X_RawTxCallback_t cb,
-                                  void *pTag)
+/* Returns the internal TC6 instance pointer (cast to void *) for the given
+ * driver index, or NULL if the index is out of range or the driver is not
+ * yet ready.  Used by ptp_drv_ext.c so the PTP-side wrappers can call into
+ * the TC6 layer without exposing drvLAN865XDrvInst publicly. */
+void *DRV_LAN865X_GetTc6Inst(uint8_t idx)
 {
-    bool result = false;
-    if (idx < DRV_LAN865X_INSTANCES_NUMBER) {
-        DRV_LAN865X_DriverInfo *pDrv = &drvLAN865XDrvInst[idx];
-        if (SYS_STATUS_READY == pDrv->state) {
-            result = TC6_SendRawEthernetPacket(pDrv->drvTc6, pBuf, len, tsc,
-                                               (TC6_RawTxCallback_t)(void *)cb, pTag);
-        }
-    }
-    return result;
-}
-
-bool DRV_LAN865X_IsReady(uint8_t idx)
-{
-    return (idx < DRV_LAN865X_INSTANCES_NUMBER) &&
-           (drvLAN865XDrvInst[idx].state == SYS_STATUS_READY);
-}
-
-uint32_t DRV_LAN865X_GetAndClearTsCapture(uint8_t idx)
-{
-    if (idx >= DRV_LAN865X_INSTANCES_NUMBER) { return 0u; }
-    uint32_t val = drvTsCaptureStatus0[idx];
-    drvTsCaptureStatus0[idx] = 0u;
-    return val;
-}
-
-uint64_t DRV_LAN865X_GetTsCaptureNirqTick(uint8_t idx)
-{
-    /* Read-only — the value is valid until the next TS-capture event.
-     * Caller should snapshot it into a local variable alongside any
-     * DRV_LAN865X_GetAndClearTsCapture() call, to keep the pairing
-     * atomic-enough for the GM state machine's purposes. */
-    if (idx >= DRV_LAN865X_INSTANCES_NUMBER) { return 0u; }
-    return drvTsCaptureNirqTick[idx];
+    if (idx >= DRV_LAN865X_INSTANCES_NUMBER) { return NULL; }
+    if (drvLAN865XDrvInst[idx].state != SYS_STATUS_READY) { return NULL; }
+    return drvLAN865XDrvInst[idx].drvTc6;
 }

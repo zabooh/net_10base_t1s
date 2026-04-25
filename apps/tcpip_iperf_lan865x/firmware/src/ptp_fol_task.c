@@ -23,6 +23,7 @@ Key differences vs. the noIP version:
 #include "ptp_clock.h"
 #include "ptp_ts_ipc.h"
 #include "config/default/driver/lan865x/drv_lan865x.h"
+#include "ptp_drv_ext.h"
 #include "config/default/system/time/sys_time.h"
 #include "ptp_log.h"
 #include "ptp_offset_trace.h"

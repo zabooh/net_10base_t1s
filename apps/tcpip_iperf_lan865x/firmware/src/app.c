@@ -47,6 +47,7 @@
 #include "ptp_log.h"
 #include "ptp_rx.h"
 #include "driver/lan865x/drv_lan865x.h"
+#include "ptp_drv_ext.h"
 #include "system/time/sys_time.h"
 #include "system/console/sys_console.h"
 #define TCPIP_THIS_MODULE_ID    TCPIP_MODULE_MANAGER
@@ -113,6 +114,7 @@ void APP_Initialize ( void )
     /* Place the App state machine in its initial state. */
     appData.state = APP_STATE_INIT;
 
+    PTP_DRV_EXT_Init();   /* EIC EXTINT-14 (LAN865x nIRQ tick latch) */
     Command_Init();
     sw_ntp_init();
     tfuture_init();
