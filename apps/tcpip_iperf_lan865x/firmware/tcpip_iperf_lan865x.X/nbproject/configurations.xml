@@ -538,12 +538,35 @@
         <itemPath>../src/third_party/wolfssl/wolfssl/certs_test.h</itemPath>
       </logicalFolder>
       <itemPath>../src/app.h</itemPath>
-      <itemPath>../src/ptp_clock.h</itemPath>
-      <itemPath>../src/ptp_gm_task.h</itemPath>
-      <itemPath>../src/ptp_fol_task.h</itemPath>
+      <itemPath>../src/app_log.h</itemPath>
+      <itemPath>../src/button_led.h</itemPath>
+      <itemPath>../src/cyclic_fire.h</itemPath>
+      <itemPath>../src/cyclic_fire_cli.h</itemPath>
+      <itemPath>../src/cyclic_fire_isr.h</itemPath>
+      <itemPath>../src/demo_cli.h</itemPath>
       <itemPath>../src/filters.h</itemPath>
-      <itemPath>../src/ptp_ts_ipc.h</itemPath>
+      <itemPath>../src/iperf_control.h</itemPath>
+      <itemPath>../src/lan_regs_cli.h</itemPath>
+      <itemPath>../src/loop_stats.h</itemPath>
+      <itemPath>../src/loop_stats_cli.h</itemPath>
+      <itemPath>../src/pd10_blink.h</itemPath>
+      <itemPath>../src/pd10_blink_cli.h</itemPath>
+      <itemPath>../src/ptp_cli.h</itemPath>
+      <itemPath>../src/ptp_clock.h</itemPath>
+      <itemPath>../src/ptp_fol_task.h</itemPath>
+      <itemPath>../src/ptp_gm_task.h</itemPath>
       <itemPath>../src/ptp_log.h</itemPath>
+      <itemPath>../src/ptp_offset_trace.h</itemPath>
+      <itemPath>../src/ptp_rx.h</itemPath>
+      <itemPath>../src/ptp_ts_ipc.h</itemPath>
+      <itemPath>../src/standalone_demo.h</itemPath>
+      <itemPath>../src/sw_ntp.h</itemPath>
+      <itemPath>../src/sw_ntp_cli.h</itemPath>
+      <itemPath>../src/sw_ntp_offset_trace.h</itemPath>
+      <itemPath>../src/test_exception_cli.h</itemPath>
+      <itemPath>../src/tfuture.h</itemPath>
+      <itemPath>../src/tfuture_cli.h</itemPath>
+      <itemPath>../src/watchdog.h</itemPath>
     </logicalFolder>
     <logicalFolder name="ExternalFiles"
                    displayName="Important Files"
@@ -869,12 +892,35 @@
         <itemPath>../src/third_party/wolfssl/wolfssl/wolfcrypt/src/sha512.c</itemPath>
       </logicalFolder>
       <itemPath>../src/app.c</itemPath>
-      <itemPath>../src/main.c</itemPath>
-      <itemPath>../src/ptp_clock.c</itemPath>
-      <itemPath>../src/ptp_gm_task.c</itemPath>
-      <itemPath>../src/ptp_fol_task.c</itemPath>
+      <itemPath>../src/button_led.c</itemPath>
+      <itemPath>../src/cyclic_fire.c</itemPath>
+      <itemPath>../src/cyclic_fire_cli.c</itemPath>
+      <itemPath>../src/cyclic_fire_isr.c</itemPath>
+      <itemPath>../src/demo_cli.c</itemPath>
+      <itemPath>../src/exception_handler.c</itemPath>
       <itemPath>../src/filters.c</itemPath>
+      <itemPath>../src/iperf_control.c</itemPath>
+      <itemPath>../src/lan_regs_cli.c</itemPath>
+      <itemPath>../src/loop_stats.c</itemPath>
+      <itemPath>../src/loop_stats_cli.c</itemPath>
+      <itemPath>../src/main.c</itemPath>
+      <itemPath>../src/pd10_blink.c</itemPath>
+      <itemPath>../src/pd10_blink_cli.c</itemPath>
+      <itemPath>../src/ptp_cli.c</itemPath>
+      <itemPath>../src/ptp_clock.c</itemPath>
+      <itemPath>../src/ptp_fol_task.c</itemPath>
+      <itemPath>../src/ptp_gm_task.c</itemPath>
       <itemPath>../src/ptp_log.c</itemPath>
+      <itemPath>../src/ptp_offset_trace.c</itemPath>
+      <itemPath>../src/ptp_rx.c</itemPath>
+      <itemPath>../src/standalone_demo.c</itemPath>
+      <itemPath>../src/sw_ntp.c</itemPath>
+      <itemPath>../src/sw_ntp_cli.c</itemPath>
+      <itemPath>../src/sw_ntp_offset_trace.c</itemPath>
+      <itemPath>../src/test_exception_cli.c</itemPath>
+      <itemPath>../src/tfuture.c</itemPath>
+      <itemPath>../src/tfuture_cli.c</itemPath>
+      <itemPath>../src/watchdog.c</itemPath>
     </logicalFolder>
   </logicalFolder>
   <projectmakefile>Makefile</projectmakefile>
@@ -938,7 +984,7 @@
         <property key="exclude-floating-point" value="false"/>
         <property key="expand-pragma-config" value="false"/>
         <property key="extra-include-directories"
-                  value="../src;../src/config/default;../src/config/default/library;../src/config/default/library/tcpip/src;../src/config/default/library/tcpip/src/common;../src/packs/ATSAME54P20A_DFP;../src/packs/CMSIS/;../src/packs/CMSIS/CMSIS/Core/Include;../src/third_party/wolfssl;../src/third_party/wolfssl/wolfssl"/>
+                  value="..;../src;../src/config/default;../src/config/default/library;../src/config/default/library/tcpip/src;../src/config/default/library/tcpip/src/common;../src/packs/ATSAME54P20A_DFP;../src/packs/CMSIS/;../src/packs/CMSIS/CMSIS/Core/Include;../src/third_party/wolfssl;../src/third_party/wolfssl/wolfssl"/>
         <property key="generate-16-bit-code" value="false"/>
         <property key="generate-micro-compressed-code" value="false"/>
         <property key="isolate-each-function" value="true"/>
@@ -958,7 +1004,7 @@
         <property key="post-instruction-scheduling" value="default"/>
         <property key="pre-instruction-scheduling" value="default"/>
         <property key="preprocessor-macros"
-                  value="HAVE_CONFIG_H;WOLFSSL_IGNORE_FILE_WARN"/>
+                  value="__DEBUG;HAVE_CONFIG_H;WOLFSSL_IGNORE_FILE_WARN;XPRJ_default=default"/>
         <property key="scalar-model" value="default"/>
         <property key="strict-ansi" value="false"/>
         <property key="support-ansi" value="false"/>
@@ -1057,7 +1103,7 @@
         <property key="exceptions" value="true"/>
         <property key="exclude-floating-point" value="false"/>
         <property key="extra-include-directories"
-                  value="../src;../src/config/default;../src/packs/ATSAME54P20A_DFP;../src/packs/CMSIS/;../src/packs/CMSIS/CMSIS/Core/Include"/>
+                  value="..;../src;../src/config/default;../src/packs/ATSAME54P20A_DFP;../src/packs/CMSIS/;../src/packs/CMSIS/CMSIS/Core/Include"/>
         <property key="generate-16-bit-code" value="false"/>
         <property key="generate-micro-compressed-code" value="false"/>
         <property key="isolate-each-function" value="true"/>
@@ -1066,7 +1112,7 @@
         <property key="place-data-into-section" value="false"/>
         <property key="post-instruction-scheduling" value="default"/>
         <property key="pre-instruction-scheduling" value="default"/>
-        <property key="preprocessor-macros" value=""/>
+        <property key="preprocessor-macros" value="__DEBUG;XPRJ_default=default"/>
         <property key="rtti" value="true"/>
         <property key="strict-ansi" value="false"/>
         <property key="toplevel-reordering" value=""/>
