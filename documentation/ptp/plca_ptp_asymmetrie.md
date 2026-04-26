@@ -548,6 +548,220 @@ Annex H implementation (sub-µs again) is required.
 
 ---
 
+## 12. Roadmap to a Full Annex H Implementation in This Project
+
+This section maps the abstract Annex H requirements to concrete
+software work for the current `cross-driverless` codebase
+(Harmony + LAN8651, 2-node setup).  It answers the question
+*"what would have to be added to scale this demonstrator to a
+fully Annex-H-compliant T1S+PTP node?"*
+
+### 12.1 What is already in place
+
+| Module | Role today |
+|---|---|
+| `ptp_drv_ext.{c,h}` | EIC EXTINT-14 ISR, Reg-init state machine, TX/RX hooks |
+| `ptp_clock.{c,h}` | PTP wallclock + anchor tick |
+| `ptp_gm_task.{c,h}` | Sends Sync + FollowUp, captures TX timestamp via TTSCAA |
+| `ptp_fol_task.{c,h}` | Receives Sync + FollowUp, RX timestamp via `g_ptp_raw_rx`, IIR filter |
+| `ptp_rx.{c,h}` | RX demux between GM and FOL paths |
+| `filters.{c,h}` | Adaptive IIR for drift tracking |
+
+→ **What is missing**: no `Pdelay_Req` / `Pdelay_Resp` protocol,
+no PLCA-status awareness, no variance filter, no NodeID-bias
+model, no beacon reference.
+
+### 12.2 The six new building blocks Annex H requires
+
+| # | Building block | What it does |
+|---|---|---|
+| 1 | **Pdelay protocol** | full `Pdelay_Req` / `Pdelay_Resp` / `Pdelay_Resp_FollowUp` triplets, capturing all four timestamps t1–t4 |
+| 2 | **PLCA status reader** | live read of LAN8651 fields `PLCA_STATUS`, burst count, empty slots, own NodeID, max NodeID |
+| 3 | **Cycle observer** | estimates the live PLCA cycle duration via beacon-to-beacon intervals or slot-boundary inference |
+| 4 | **Variance filter** | discards Pdelay samples with high spread; median or Kalman over 16–64 samples |
+| 5 | **NodeID-bias compensator** | from `(source_id, target_id, slot_duration)` subtracts the theoretical PLCA wait time on both directions |
+| 6 | **Per-hop topology** | Pdelay only between direct neighbours on the bus, not end-to-end |
+
+### 12.3 Implementation phases
+
+#### Phase 1 — Hardware plumbing (~3 days)
+
+**New in `ptp_drv_ext.{c,h}`:**
+
+```c
+typedef struct {
+    uint8_t  curSlot;
+    uint8_t  ownNodeId;
+    uint8_t  maxNodeId;
+    uint16_t burstCount;
+    uint32_t emptySlotCount;
+    bool     plcaActive;
+} PLCA_Status_t;
+
+bool     DRV_LAN865X_GetPlcaStatus(uint8_t idx, PLCA_Status_t *out);
+uint64_t DRV_LAN865X_GetLastBeaconTick(uint8_t idx);  // 0 if never
+uint32_t DRV_LAN865X_GetSlotDurationNs(uint8_t idx);  // typ. 20000
+```
+
+LAN8651 registers to read:
+
+- `0x00040A04` — PLCA_STATUS
+- `0x00040A05` — PLCA_NCOL (collision counter)
+- `0x00040A07` — PLCA_DROP_FRAME_CNT
+- possibly a second EIC pin latch for beacon detection in parallel with the existing nIRQ
+
+> **Critical unknown**: beacon detection.  If the LAN8651 does not
+> assert nIRQ on beacon, the cycle observer must SPI-poll
+> `PLCA_STATUS` — higher load, lower resolution.  **Verify in the
+> datasheet before committing to an implementation.**
+
+#### Phase 2 — Pdelay protocol (~3 days)
+
+**New file: `ptp_pdelay_task.{c,h}`**
+
+```c
+typedef struct {
+    uint64_t t1_ns;     // Pdelay_Req TX (local)
+    uint64_t t2_ns;     // Pdelay_Req RX (remote, in Resp_FollowUp)
+    uint64_t t3_ns;     // Pdelay_Resp TX (remote, in Resp_FollowUp)
+    uint64_t t4_ns;     // Pdelay_Resp RX (local)
+    uint8_t  remoteNodeId;
+} PdelayMeasurement_t;
+
+void PTP_PDELAY_Init(uint8_t periodMs);
+void PTP_PDELAY_Tasks(void);
+bool PTP_PDELAY_GetLatest(uint8_t remoteId, PdelayMeasurement_t *out);
+```
+
+State machine: every ~1 s a Pdelay triplet to each neighbour.
+Uses `DRV_LAN865X_SendRawEthFrame()` with the `tsc` flag for
+TX-timestamp capture, identical to the Sync path.
+
+#### Phase 3 — Cycle observer (~2 days)
+
+**New file: `plca_observer.{c,h}`**
+
+Either:
+- timestamps the beacon per cycle (if HW support is available), or
+- infers slot boundaries from Pdelay round-trip timing.
+
+Output:
+
+```c
+typedef struct {
+    uint32_t cycleDurationNs;       // measured, filtered
+    uint32_t cycleDurationVarNs;    // 1-σ
+    uint64_t lastBeaconTickNs;
+    uint8_t  activeNodeMask;        // bit i = node i recently seen
+} PLCA_Observation_t;
+
+void PLCA_OBS_Tasks(void);
+void PLCA_OBS_GetLatest(PLCA_Observation_t *out);
+```
+
+#### Phase 4 — NodeID-bias compensator (~1 day)
+
+**New file: `annex_h_compensator.{c,h}`**
+
+```c
+int64_t ANNEX_H_BiasNs(uint8_t fromId, uint8_t toId,
+                       uint8_t maxId, uint32_t slotNs);
+// Returns expected one-way slot wait in ns
+
+int64_t ANNEX_H_CleanPdelay(const PdelayMeasurement_t *raw,
+                            const PLCA_Observation_t *obs);
+// Cleaned per-hop path delay
+```
+
+#### Phase 5 — Variance filter (~1 day)
+
+**Extend `filters.{c,h}`:**
+
+```c
+typedef struct {
+    int64_t buf[64];
+    uint8_t idx;
+    uint8_t count;
+} PdelayVarFilter_t;
+
+bool    FILTER_PdelayUpdate(PdelayVarFilter_t *f, int64_t newSample);
+int64_t FILTER_PdelayMedian(const PdelayVarFilter_t *f);
+int64_t FILTER_PdelayMad(const PdelayVarFilter_t *f);  // robust spread
+```
+
+Sample acceptance rule: only if `|sample - median| < 3 × MAD`.
+
+#### Phase 6 — Stack integration (~2 days)
+
+| File | Change |
+|---|---|
+| `ptp_fol_task.c` | uses `ANNEX_H_CleanPdelay()` instead of naive `roundTrip / 2` |
+| `ptp_gm_task.c` | sends beacon-aware Sync intervals; address-aware Pdelay_Resp |
+| `ptp_clock.c` | anchor optionally on last beacon tick instead of nIRQ tick |
+| `ptp_rx.c` | dispatches Pdelay frames to `ptp_pdelay_task.c` |
+| `ptp_drv_ext.c` | polls PLCA status periodically in the Reg-init state machine |
+
+#### Phase 7 — Configuration + diagnostics (~1 day)
+
+- **Build config** in `configuration.h`: `MAX_PLCA_NODES`,
+  `EXPECTED_SLOT_NS`, `PDELAY_PERIOD_MS`
+- **CLI extensions** in `ptp_cli.c`: `ptp pdelay show`,
+  `ptp plca status`, `ptp annex_h debug`
+- **Trace output** via `ptp_offset_trace.c` for per-neighbour Pdelay
+
+### 12.4 Effort summary
+
+| Phase | Effort |
+|---|---|
+| 1 — HW plumbing | 3 days |
+| 2 — Pdelay protocol | 3 days |
+| 3 — Cycle observer | 2 days |
+| 4 — Bias compensator | 1 day |
+| 5 — Variance filter | 1 day |
+| 6 — Stack integration | 2 days |
+| 7 — Config + CLI | 1 day |
+| **Implementation subtotal** | **13 days (~3 weeks)** |
+| Testing on 2 nodes | 2 days |
+| Testing on 3 nodes (additional hardware needed) | 3–5 days |
+| **Total to green light** | **~4 weeks full-time** |
+
+### 12.5 Hardware prerequisite (critical)
+
+For 3+ nodes you need **3+ LAN8651 boards** in parallel on a
+single bus.  Today the project has master + slave (2 boards).
+Without a 3-node setup, Annex H cannot be verified.
+
+### 12.6 What to verify before starting implementation
+
+1. **LAN8651 datasheet**: does the chip have a `BEACON_DETECTED`
+   interrupt, or must one poll?
+2. **Minimum slot duration**: does the Pdelay period (1 s) fit the
+   typical PLCA cycle length (30–80 µs)?
+3. **`MicrochipTech/LAN865x-TimeSync` repository**: their bare-metal
+   state machine (UNINIT / MATCHFREQ / HARDSYNC / COARSE / FINE) is
+   exactly this Annex H pattern.  Read it before designing your
+   own — you will save 2 days.
+
+### 12.7 Strategic recommendation
+
+This is a **substantial engineering investment** (~4 weeks
+full-time + 3 boards).  For today's 2-node demonstrator it is
+**not required** — basic gPTP is sufficient (see §9 above).
+The Annex H extension only pays off when:
+
+- the demo must scale to 4+ nodes (e.g. an automotive gateway demo)
+- a conference/fair showcase is planned: *"first complete T1S+PTP
+  implementation with Annex H"* — that is a unique selling point
+  (see README_cross.md §9.8 — no public open-source implementation
+  exists today)
+- as a Microchip showcase for the LAN8651 PLCA functionality
+
+A separate `PROMPT_annex_h_implementation.md` (analogous to
+`PROMPT_mcc_ptp_component.md`) can capture this roadmap as a
+self-contained brief for whoever picks the work up.
+
+---
+
 ## References
 
 - IEEE 802.1AS-2020 (gPTP with Annex H)
