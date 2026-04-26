@@ -23,6 +23,7 @@ The top-level [readme.md](../readme.md) has the project overview. Risks and open
 - [implementation.md](ptp/implementation.md) — Full PTP / IEEE 1588-2008 implementation spec
 - [ntp_reference.md](ptp/ntp_reference.md) — Software NTP as application-layer time sync reference
 - [drift_filter.md](ptp/drift_filter.md) — Adaptive IIR drift filter design
+- [README_cross.md](ptp/README_cross.md) — Cross-build (CMake + MPLAB X), driver-minimization journey, MCC tooling-bug analysis, and Zephyr/Harmony future-platform options
 
 ### [hardware/](hardware/) — Hardware & Diagnostics
 - [exception_dump.md](hardware/exception_dump.md) — Exception dump + watchdog + find_exception.py

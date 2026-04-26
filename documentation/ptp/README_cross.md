@@ -1,16 +1,16 @@
 # README — Cross-Build (CMake/Makefile + MPLAB X)
 
 Dieses Dokument beschreibt den Stand des `cross`-Branches: das Projekt
-[`apps/tcpip_iperf_lan865x`](apps/tcpip_iperf_lan865x/) wird nun **parallel** über
+[`apps/tcpip_iperf_lan865x`](../../apps/tcpip_iperf_lan865x/) wird nun **parallel** über
 zwei Build-Wege gebaut:
 
 1. **CMake/Makefile** (Hauptweg, aktiv genutzt) — über
-   [firmware/Makefile](apps/tcpip_iperf_lan865x/firmware/Makefile) und
-   [firmware/cmake/](apps/tcpip_iperf_lan865x/firmware/cmake/)
+   [firmware/Makefile](../../apps/tcpip_iperf_lan865x/firmware/Makefile) und
+   [firmware/cmake/](../../apps/tcpip_iperf_lan865x/firmware/cmake/)
 2. **MPLAB X IDE** — über
-   [firmware/tcpip_iperf_lan865x.X/](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/),
+   [firmware/tcpip_iperf_lan865x.X/](../../apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/),
    gesteuert durch
-   [nbproject/configurations.xml](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/nbproject/configurations.xml)
+   [nbproject/configurations.xml](../../apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/nbproject/configurations.xml)
 
 Ziel des Branches: Embedded-Entwicklern eine **vorzeigbare PTP-Implementierung
 für den LAN8651** zur Verfügung zu stellen, die auch in MPLAB X gebaut und
@@ -55,7 +55,7 @@ Das MPLAB X-Projekt war stark veraltet — der CMake/Makefile-Build hatte 23 neu
 | `preprocessor-macros` | `""` | `__DEBUG;XPRJ_default=default` |
 
 → Damit deckt sich der MPLAB X-Build vollständig mit den
-   Compile-Optionen aus [firmware/cmake/.../rule.cmake](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/cmake/tcpip_iperf_lan865x/rule.cmake).
+   Compile-Optionen aus [firmware/cmake/.../rule.cmake](../../apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/cmake/tcpip_iperf_lan865x/rule.cmake).
 
 Commit dieser Änderung: `db64350 build(mplabx): sync configurations.xml with current sources`
 
@@ -73,7 +73,7 @@ genau diese Datei zu überschreiben — **die Regeneration MUSS abgelehnt werden
 (im MCC-Merge-Dialog auf **Reject** klicken).
 
 Datei:
-[`apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c`](apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c)
+[`apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c`](../../apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c)
 
 ### Was im Treiber für PTP zwingend ergänzt wurde
 
@@ -541,7 +541,7 @@ ptp_drv_ext.c        EIC-ISR
 
 #### Wiring
 
-- [`app.c`](apps/tcpip_iperf_lan865x/firmware/src/app.c): `APP_Initialize()` ruft
+- [`app.c`](../../apps/tcpip_iperf_lan865x/firmware/src/app.c): `APP_Initialize()` ruft
   `PTP_DRV_EXT_Init()`. `APP_Tasks()` ruft `PTP_DRV_EXT_Tasks(0u)` periodisch
   (no-op bis `IsReady()` ⇒ Reg-Init State-Machine läuft einmal durch).
 - `ptp_gm_task.c` und `ptp_fol_task.c` gaten optional auf
@@ -626,7 +626,7 @@ Vergleichsbasis: [github.com/Microchip-MPLAB-Harmony/net_10base_t1s](https://git
 
 ### Eigene Tooling-Adds (in `tcpip_iperf_lan865x.X/`)
 
-- [`cmake/`](apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/cmake/) —
+- [`cmake/`](../../apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/cmake/) —
   CMake-Build-System (entspricht 1:1 dem MPLAB X-Build)
 - `.vscode/`, `.gitignore`, `check_serial_tk.pyw`
 
@@ -995,7 +995,7 @@ Entwickler PTP-HW-Timestamping einfach im MCC-GUI aktivieren können —
 ohne irgendwelchen Code von Hand anzufassen.
 
 Der vollständige Implementierungs-Plan steht in
-[`PROMPT_mcc_ptp_component.md`](PROMPT_mcc_ptp_component.md) und ist
+[`PROMPT_mcc_ptp_component.md`](../../PROMPT_mcc_ptp_component.md) und ist
 sowohl als Brief für einen Coding-Agent als auch als Engineer-Spec
 geschrieben.
 
