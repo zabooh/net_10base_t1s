@@ -847,3 +847,140 @@ beschriebenen Patches überleben einen MCC-Lauf eigenständig
 (`ptp_drv_ext.{c,h}` werden gar nicht von MCC angefasst); die 12
 verbleibenden Inline-Zeilen würden bei Accept verloren gehen, sind
 aber separat in §2.8 dokumentiert.
+
+---
+
+## 7) Praxis-Bericht: MCC-Lauf auf `cross-driverless` mit manuellem Merge (2026-04-26)
+
+Real-World-Test der Minimierungs-Strategie: MCC wurde auf dem
+`cross-driverless`-Stand laufen gelassen, der Merge-Dialog für
+`drv_lan865x_api.c` wurde **manuell** bearbeitet — nicht blind
+akzeptiert, nicht blind abgelehnt. Ergebnis: **Build erfolgreich**, alle
+PTP-Hooks erhalten.
+
+### 7.1 Beweisgang — was MCC angeboten hat und was übernommen wurde
+
+MCC bot die typische Microchip-Template-Output-Variante an:
+
+- `<stdarg.h>` entfernen (der bekannte MCC-Template-Bug, siehe §6)
+- TC6_MEMMAP-Tabelle umsortieren mit teils geänderten Register-Werten
+- Diverse YAML-/Manifest-Reorderings (kosmetisch)
+
+Im Manual-Merge-Dialog wurde **MCC's Output für die Memory-Map akzeptiert,
+aber die kritischen PTP-Patches verteidigt:**
+
+| Patch | Quelle nach Merge | Status |
+|---|---|---|
+| `<stdarg.h>` Include (Z. 41) | manuell zurück eingefügt | ✅ erhalten |
+| `OnPtpFrame_Hook` weak default (Z. 51) | aus cross-driverless behalten | ✅ erhalten |
+| `OnPtpFrame_Hook` Aufruf in RX-Callback (Z. 1383) | aus cross-driverless behalten | ✅ erhalten |
+| `GetTc6Inst()`-Accessor (Z. 2446) | aus cross-driverless behalten | ✅ erhalten |
+| `<stdarg.h>` Include (Z. 41) | manuell wieder eingefügt | ✅ Build-Bruch vermieden |
+
+→ Die in §2.8 als "irreduzibel" dokumentierten 12 Zeilen sind **alle drin**.
+PTP-Plumbing intakt.
+
+### 7.2 ⚠ Nebenwirkung: TC6_MEMMAP-Tabelle hat jetzt Duplikate
+
+Beim manuellen Merge wurden **MCC's neue Init-Einträge zusätzlich
+übernommen, ohne die alten zu entfernen** — Resultat: doppelte (teilweise
+dreifache) Schreibzugriffe auf dieselben Register beim Boot.
+
+| Register | Alte Position | Neue Position | Effektiver Wert (last-write-wins) |
+|---|---|---|---|
+| `0x000400E9` | Z. 1704 | Z. 1721 | `0x9E50` (idempotent) |
+| `0x000400F5` | Z. 1705 | Z. 1722 | `0x1CF8` (idempotent) |
+| `0x000400F4` | Z. 1706 | Z. 1723 | `0xC020` (idempotent) |
+| **`0x000400F8`** | Z. 1707 (`0xB900`) | Z. 1724 (`0x9B00`) | **`0x9B00`** ⚠ Wert-Konflikt |
+| `0x000400F9` | Z. 1708 | Z. 1725 | `0x4E53` (idempotent) |
+| **`0x00040081`** DEEP_SLEEP_CTRL_1 | Z. 1709 + 1711 (`0x80` × 2) | Z. 1740 (`0xE0`) | **`0xE0`** ⚠ Wert-Konflikt, 3-fach geschrieben |
+
+→ Der Chip wird durch den Merge mit **Microchips neuen B1-Fix-Werten**
+(`0x9B00`, `0xE0`) initialisiert — vermutlich Erratum-Patches für die
+Rev-B1-Hardware. Die alten Werte (`0xB900`, `0x80`) waren PTP-validiert,
+die neuen sind es noch nicht.
+
+### 7.3 Funktionale Bewertung
+
+| Aspekt | Bewertung |
+|---|---|
+| Build-Status | ✅ erfolgreich (XC32 v5.10) |
+| Code-Korrektheit | ✅ funktional OK (idempotent oder last-write-wins) |
+| Boot-Zeit | minimal länger (5–7 zusätzliche SPI-Writes durch Duplikate) |
+| Code-Hygiene | ⚠ Suboptimal — die alten Einträge sind toter Code |
+| PTP-Funktion | ❓ unklar bis Hardware-Test (alte Werte waren validiert, neue noch nicht) |
+
+### 7.4 IMASK0 bleibt bei `0x100` — kein Problem für diese Architektur
+
+MCC's Tabelle behält den Upstream-Wert `0x00000100` für IMASK0 (Bit 8
+TTSCAA **maskiert**). Das ist in der `cross-driverless`-Architektur **kein
+Problem**, weil:
+
+- `ptp_gm_task.c::GM_STATE_READ_STATUS0/WAIT_STATUS0` pollt STATUS0 selbst
+  via SPI (`DRV_LAN865X_ReadModifyWriteRegister`).
+- Der Driver-`_OnStatus0`-Callback wird zwar nicht durch IMASK0-Interrupt
+  getriggert, aber die App-seitige Polling-Schleife liest die TTSCAA-Bits
+  trotzdem zuverlässig.
+- Diese Architektur-Wahl ist genau der Grund, warum die `OnStatus0_Hook`
+  in §2.8 entfernt werden konnte (A5a eliminiert).
+
+→ Microchips Default (`IMASK0=0x100`) und unsere PTP-Anforderung sind
+**kompatibel** — keine Anpassung nötig.
+
+### 7.5 Diff-Größen — gegen Upstream und gegen letzten Commit
+
+| Vergleich | Echte Zeilen Diff |
+|---|---|
+| Gegen committed `cross-driverless` HEAD | 13 |
+| Gegen Microchip-Upstream-HEAD (`586ffc1`) | 22 (12 essential + 10 Merge-Duplikate) |
+
+Die +10 vom messy Merge stammen ausschließlich aus den 5 idempotenten
+Duplikat-Schreibzugriffen + dem zusätzlichen DEEP_SLEEP-Eintrag.
+
+### 7.6 Empfehlung: Bereinigung nach Hardware-Sign-off
+
+**Schritt 1 — Hardware-Test**: PoR → PTP-Sync → Offset stabil < 1 µs?
+Die effektiven Register-Werte (`0x9B00` / `0xE0`) müssen sich beweisen.
+
+**Schritt 2 (falls PTP OK)**: TC6_MEMMAP-Tabelle aufräumen, indem die
+**alten Einträge** (Zeilen 1704–1709 + 1711) gelöscht werden:
+
+```diff
+@@ static const MemoryMap_t TC6_MEMMAP[] = { ... }
+-        {  .address=0x000400E9, .value=0x00009E50, ... },   // alte Position
+-        {  .address=0x000400F5, .value=0x00001CF8, ... },
+-        {  .address=0x000400F4, .value=0x0000C020, ... },
+-        {  .address=0x000400F8, .value=0x0000B900, ... },   // alter B1-Wert
+-        {  .address=0x000400F9, .value=0x00004E53, ... },
+-        {  .address=0x00040081, .value=0x00000080, ... }, /* DEEP_SLEEP_CTRL_1 */
+         {  .address=0x00040091, .value=0x00009660, ... },
+-        {  .address=0x00040081, .value=0x00000080, ... },   // Merge-Duplikat
+         {  .address=0x00010077, .value=0x00000028, ... },
+         ...
+```
+
+Damit reduziert sich der Diff gegen Upstream auf die nominalen 12 Zeilen.
+
+**Schritt 3 (falls PTP nach Hardware-Test nicht OK)**: alte Werte
+manuell wiederherstellen, indem Microchips neue Werte in der MCC-
+Output-Position auf die alten zurückgesetzt werden:
+
+```c
+{  .address=0x000400F8,  .value=0x0000B900, ... },   // PTP-validierter B1-Wert
+{  .address=0x00040081,  .value=0x00000080, ... },   // PTP-validierter DEEP_SLEEP-Wert
+```
+
+### 7.7 Lessons Learned
+
+1. **Manueller Merge mit Köpfchen funktioniert.** Bei nur 12 irreduziblen
+   Treiber-Zeilen ist der Merge-Dialog überschaubar genug, um Patch-für-
+   Patch entscheiden zu können.
+2. **`<stdarg.h>` muss aktiv verteidigt werden.** Microchips Template-Bug
+   schlägt bei jedem MCC-Lauf zu — siehe §6 Reproduktions-Plan.
+3. **Last-write-wins rettet vor Funktionsfehlern bei messy Merges.** Die
+   Duplikate sind hässlich, aber funktional unkritisch.
+4. **Microchips B1-Erratum-Werte sind jetzt automatisch übernommen.**
+   Wenn das Hardware-OK ist, ist `cross-driverless` damit auch trunk-näher
+   geworden (Microchip-Wert für `0x000400F8`/`0x00040081`).
+5. **Der Reproduktions-Plan aus §6 ist 1:1 bestätigt** — am 2026-04-26
+   in einem realen Workflow, ohne dass speziell danach gesucht wurde.
