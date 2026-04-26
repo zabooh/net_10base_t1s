@@ -23,7 +23,7 @@ The top-level [readme.md](../readme.md) has the project overview. Risks and open
 - [implementation.md](ptp/implementation.md) — Full PTP / IEEE 1588-2008 implementation spec
 - [ntp_reference.md](ptp/ntp_reference.md) — Software NTP as application-layer time sync reference
 - [drift_filter.md](ptp/drift_filter.md) — Adaptive IIR drift filter design
-- [plca_ptp_asymmetrie.md](ptp/plca_ptp_asymmetrie.md) — PLCA-Slot-Asymmetrie und PTP-Kompensation auf 10BASE-T1S (Annex-H-Hintergrund)
+- [plca_ptp_asymmetrie.md](ptp/plca_ptp_asymmetrie.md) — PLCA slot asymmetry and PTP compensation on 10BASE-T1S (Annex H background)
 - [README_cross.md](ptp/README_cross.md) — Cross-build (CMake + MPLAB X), driver-minimization journey, MCC tooling-bug analysis, and Zephyr/Harmony future-platform options
 
 ### [hardware/](hardware/) — Hardware & Diagnostics
