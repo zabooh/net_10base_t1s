@@ -984,3 +984,384 @@ Output-Position auf die alten zurückgesetzt werden:
    geworden (Microchip-Wert für `0x000400F8`/`0x00040081`).
 5. **Der Reproduktions-Plan aus §6 ist 1:1 bestätigt** — am 2026-04-26
    in einem realen Workflow, ohne dass speziell danach gesucht wurde.
+
+---
+
+## 8) Nächstes Ziel: PTP als wählbare MCC-Komponente
+
+§2–§7 dokumentieren den heutigen **manuellen** Patch-Workflow. Das nächste
+Ziel ist, diesen Workflow durch eine **MCC-Checkbox** abzulösen, sodass
+Entwickler PTP-HW-Timestamping einfach im MCC-GUI aktivieren können —
+ohne irgendwelchen Code von Hand anzufassen.
+
+Der vollständige Implementierungs-Plan steht in
+[`PROMPT_mcc_ptp_component.md`](PROMPT_mcc_ptp_component.md) und ist
+sowohl als Brief für einen Coding-Agent als auch als Engineer-Spec
+geschrieben.
+
+### 8.1 End-State
+
+Wenn ein Entwickler das `tcpip_iperf_lan865x`-Projekt (oder irgendein
+anderes LAN8651-Projekt) in MPLAB X öffnet und MCC startet, sieht er
+auf der LAN865x-Treiber-Komponente eine zusätzliche Checkbox:
+
+```
+☐ Enable PTP / IEEE 1588 hardware timestamping
+```
+
+Toggle ON + "Generate" klicken → MCC kopiert die PTP-Files ins Projekt,
+fügt sie dem Build hinzu, applied die 12-Zeilen-Treiber-Patches, und
+fertig. Toggle OFF + "Generate" → MCC räumt alles wieder weg, das
+Projekt ist byte-identisch zum upstream-pristinen Stand.
+
+### 8.2 Was MCC bei aktivierter Checkbox automatisch ins Projekt legt
+
+| Stufe | Datei | Zweck |
+|---|---|---|
+| **Kern** (zwingend) | `ptp_drv_ext.h` | Public API der Treiber-Erweiterung |
+| | `ptp_drv_ext.c` | EIC-EXTINT-14-ISR + Reg-Init-State-Machine + Wrapper |
+| | `ptp_ts_ipc.h` | IPC-Struct zwischen Treiber und PTP-Stack |
+| **PTP-Stack** | `ptp_clock.{c,h}` | PTP-Uhr (Wallclock, Anker-Tick) |
+| | `ptp_fol_task.{c,h}` | Slave-State-Machine |
+| | `ptp_gm_task.{c,h}` | Master-State-Machine |
+| | `ptp_rx.{c,h}` | RX-Handler-Glue |
+| | `ptp_log.{c,h}` | Rate-limitiertes Logging |
+| | `filters.{c,h}` | Tiefpass/IIR für Offset & Drift |
+| **Optional v2** | `ptp_cli.{c,h}` | UART-CLI für `ptp status` etc. |
+| | `ptp_offset_trace.{c,h}` | Live-Offset-Tracing |
+| | `lan_regs_cli.{c,h}` | LAN-Register-Read/Write |
+| | `loop_stats{,_cli}.{c,h}` | Hauptschleifen-Diagnose |
+
+→ **11 Kern-Files + 8 optionale Demo-Files** = 19 Dateien, alle
+automatisch durch MCC platziert.
+
+### 8.3 Was MCC an bestehenden Dateien automatisch ändert
+
+| Datei | Änderung | Mechanismus |
+|---|---|---|
+| `drv_lan865x_api.c` | +12 Zeilen (`<stdarg.h>` + Hooks + Accessor) | über erweitertes FreeMarker-Template oder Post-Gen-Patch |
+| `drv_lan865x.h` | +1 Zeile (Accessor-Prototyp) | dito |
+| `configurations.xml` | `<itemPath>` für alle PTP-Files | MCC's Standard-Source-Emission |
+| `cmake/file.cmake` | analog für CMake-Build | dito |
+
+### 8.4 Was der Entwickler weiterhin selbst tun muss (Minimum: 3 Zeilen)
+
+`app.c` gehört dem Anwender und wird nicht von MCC regeneriert:
+
+```c
+#include "ptp_drv_ext.h"           /* einmal oben */
+...
+void APP_Initialize(void) {
+    PTP_DRV_EXT_Init();             /* einmal beim Boot */
+    /* ... */
+}
+void APP_Tasks(void) {
+    PTP_DRV_EXT_Tasks(0u);          /* periodisch in der Hauptschleife */
+    /* ... */
+}
+```
+
+→ **3 Zeilen Hand-Edit** statt heute ~50 Zeilen verteilt über mehrere
+Files.
+
+### 8.5 Implementierungs-Phasen (siehe `PROMPT_mcc_ptp_component.md`)
+
+| Phase | Inhalt | Aufwand |
+|---|---|---|
+| 0 | Discovery — Microchips Component-Pattern verstehen, Option A vs B | 1 Tag |
+| 1 | Component-Skelett — leere Checkbox in MCC-GUI sichtbar | 1 Tag |
+| 2 | File-Emission — PTP-Files werden bei Toggle-ON kopiert | 2 Tage |
+| 3 | Inline-Patch-Injection — die 12 Treiber-Zeilen automatisch einfügen | 3 Tage (kritisch) |
+| 4 | `app.c`-Integration via Help-Text oder Snippet | 0.5 Tage |
+| 5 | `configurations.xml`-Glue verifizieren | 0.5 Tage |
+| 6 | Hardware-Sign-off auf der Demo-Plattform | 1 Tag |
+| 7 | Upstream-PR an Microchip (CC: Jing Richter-Xu, Thorsten Kummermehr) | offen |
+| **Total** | | **~9 Werktage** + PR-Review |
+
+### 8.6 Drei Optionen für Phase 3 (Patch-Injection)
+
+Phase 3 ist die einzige offene Design-Frage:
+
+| Option | Wie | Realismus |
+|---|---|---|
+| **3.A** Microchips Template via PR um `<#if PTP_ENABLED>`-Blöcke erweitern | sauberste Lösung, aber Microchip muss zustimmen | mittel |
+| **3.B** `definitions.h.ftl`-Hook (wenn upstream-Treiber die Hooks bereits hat) | nur bei Microchip-Mitwirkung | mittel |
+| **3.C** Post-Generation-Script (Python/sed) — patcht die Datei nach jedem MCC-Lauf | pragmatisch, robust, hässlich | hoch |
+
+Empfehlung: zuerst 3.A versuchen (Upstream-PR), bei Ablehnung 3.C als
+robuster Fallback.
+
+### 8.7 Konsequenzen für die heutigen Branches
+
+Sobald die MCC-Komponente fertig ist:
+
+- **`cross-driverless` wird obsolet** — sein 12-Zeilen-Treiber-Patch
+  wird automatisch von der MCC-Komponente erzeugt, seine
+  `ptp_drv_ext.{c,h}` werden automatisch kopiert.
+- **`README_cross.md` §2–§7 wird historisches Dokument** — es beschreibt
+  den Pre-MCC-Component-Zustand und die manuellen Recovery-Workflows,
+  die niemand mehr braucht.
+- **Microchips MCC-Template-Bug aus §6** wird mit der Komponente
+  defensiv umschifft (`<stdarg.h>` wird vom Patch wieder hinzugefügt) —
+  sollte aber **trotzdem** als separates Issue bei Microchip gemeldet
+  werden, weil er auch andere LAN865x-Anwender betrifft, die nichts
+  mit PTP zu tun haben.
+
+### 8.8 Vergleich: heute vs. nach MCC-Integration
+
+| Aspekt | Heute (cross-driverless) | Mit MCC-Komponente |
+|---|---|---|
+| Setup auf neuem Projekt | manuell 13 Files kopieren, 12 Treiber-Zeilen patchen, `app.c` editieren, `configurations.xml` editieren | **Eine Checkbox in MCC anklicken** |
+| MCC-Lauf-Risiko | 12-Zeilen-Patch geht verloren wenn falsch akzeptiert | Patch wird vom Template **erzeugt**, nicht angegriffen |
+| Verteilung an andere Entwickler | "Nimm meinen Branch" | "Aktivier die Komponente in MCC" |
+| Long-term Wartbarkeit | Patches driften mit jedem Microchip-Update | Komponente versioniert sich mit dem Net-Package |
+| Demo-Wert | Forscherprojekt | Off-the-shelf-Capability |
+
+→ Das ist der Übergang vom **maintained Fork** zum **shipping Feature**.
+
+---
+
+## 9) Alternative Plattform: Zephyr RTOS
+
+§8 beschreibt den Weg über Microchips Harmony-Tooling. Es gibt eine
+**zweite, möglicherweise elegantere Möglichkeit**: die Arbeit auf
+Zephyr RTOS portieren statt in Harmony einzubetten.
+
+### 9.1 Was Zephyr bereits hat (Stand Anfang 2026, **bitte verifizieren**)
+
+| Komponente | Status |
+|---|---|
+| **gPTP-Subsystem** (`subsys/net/lib/ptp/`) | ✅ vorhanden, IEEE 802.1AS, getestet |
+| **SAM E54 Board-Support** | ✅ vorhanden |
+| **LAN8651 Ethernet-Treiber** (`drivers/ethernet/eth_lan865x.c` o. ä.) | ✅ vorhanden, **aber typischerweise ohne HW-Timestamping-API** |
+| **DT-Bindings für LAN865x** | ✅ vorhanden |
+
+### 9.2 Was wahrscheinlich fehlt: die Glue-Layer
+
+Damit Zephyrs gPTP HW-Timestamps vom LAN8651 bekommt, muss der Treiber
+folgende standardisierte Zephyr-APIs implementieren:
+
+| Zephyr-API | Zweck | Harmony-Äquivalent (heute) |
+|---|---|---|
+| `eth_driver_api.get_ptp_clock` | gibt PTP-Clock-Device-Reference zurück | `PTP_CLOCK_GetTime_ns()` + Anker-Tick |
+| `net_pkt_set_timestamp_ns()` im RX-Pfad | schreibt HW-RX-Timestamp ins `net_pkt`-Meta | `OnPtpFrame_Hook` → `g_ptp_raw_rx.rxTimestamp` |
+| `net_pkt_set_tx_timestamping()` + Async-Callback | TX-Timestamp-Capture nach Sync-Send | `DRV_LAN865X_SendRawEthFrame(tsc=0x01)` + TTSCAA-Polling |
+| Eigener `ptp_clock` driver-class | exponiert die LAN8651-TSU als Kernel-Clock | TC0-Tick + Anchor-Konstruktion |
+
+### 9.3 Mapping: Harmony-Refaktorisierung → Zephyr-Treiber
+
+Die heutigen 12 unverzichtbaren Zeilen plus `ptp_drv_ext.c` würden in
+Zephyr-API-Sprache übersetzt werden:
+
+| Heute (Harmony) | In Zephyr |
+|---|---|
+| TC6_MEMMAP-Patches (IMASK0, FTSE, TXM-Filter, PADCTRL, PPSCTL) | in `eth_lan865x_init()` als `tc6_write_register()`-Sequenz |
+| EIC-EXTINT-14-ISR mit Tick-Latch | `gpio_callback` auf nIRQ-Pin + `k_uptime_get_ns()`-Snapshot |
+| TTSCAA-save-before-W1C-Race | identisch, aber im Zephyr-Driver einfacher zu lösen |
+| `OnPtpFrame_Hook` für RX-Timestamp | direkt `net_pkt_set_timestamp_ns()` im RX-Callback |
+| `SendRawEthFrame(tsc=…)` | `eth_lan865x_send()` mit zusätzlichem TS-Hint oder Socket-Option |
+
+→ Konzeptionell **dieselbe Engineering-Arbeit**, aber in einer
+sauberer standardisierten Umgebung.
+
+### 9.4 Vergleich Harmony-MCC-Komponente vs. Zephyr-Treiber-PR
+
+| Aspekt | §8 (Harmony MCC-Komponente) | §9 (Zephyr-Treiber-Erweiterung) |
+|---|---|---|
+| HW-Timestamping-API | nicht standardisiert (`DRV_LAN865X_*`) | standardisiert (`eth_driver_api`, `ptp_clock`) |
+| gPTP-Stack | nicht im Standard-Lieferumfang | vorhanden, getestet |
+| Treiber-Erweiterung als Toggle | schwer (siehe `PROMPT_mcc_ptp_component.md` Phase 3) | natürlich: `Kconfig` + `CONFIG_ETH_LAN865X_PTP=y` |
+| Upstream-PR-Aufwand | hoch (Microchip-internes Approval) | normal (Zephyr-Community, transparent) |
+| Reichweite (wer profitiert) | nur MPLAB-X-/Harmony-Anwender | jeder Zephyr-Anwender für LAN8651 |
+
+→ **Zephyr könnte das saubere Endziel sein**, Harmony die kurzfristige
+Demonstrator-Plattform.
+
+### 9.5 ⚠ Vor Investition zwingend verifizieren
+
+Mein Wissensstand ist Anfang 2026 — Zephyr-Master ändert sich schnell.
+Folgende Checks sind Voraussetzung, bevor man Zeit investiert:
+
+```bash
+# Zephyr-Repo clone (oder via west)
+git clone https://github.com/zephyrproject-rtos/zephyr
+cd zephyr
+
+# Treiber-Stand prüfen
+git grep -l 'PTP\|timestamp\|gptp\|ptp_clock' drivers/ethernet/eth_lan865x*
+git log --oneline drivers/ethernet/eth_lan865x* | head -20
+```
+
+Plus offene Pull Requests durchsuchen:
+
+- https://github.com/zephyrproject-rtos/zephyr/pulls?q=lan8651
+- https://github.com/zephyrproject-rtos/zephyr/pulls?q=lan865x
+- https://github.com/zephyrproject-rtos/zephyr/pulls?q=gptp+timestamp
+
+Möglich, dass jemand bereits dran arbeitet — oder es ist schon
+gemerged. Der Ergebnis dieser 30-Minuten-Recherche entscheidet, ob:
+
+- **Fall A**: Lücke existiert → §9 ist machbar, parallel oder statt §8
+- **Fall B**: Schon im Werk → kein Aufwand nötig, nur ggf. eigenes
+  Projekt auf Zephyr umstellen
+- **Fall C**: Pull Request offen → mit dem Author Kontakt aufnehmen,
+  ggf. mitarbeiten
+
+### 9.6 Strategische Empfehlung
+
+| Wenn dir wichtig ist … | dann mach … |
+|---|---|
+| schnell ein Off-the-shelf-Demo für Microchip-Kunden | §8 (MCC-Komponente in Harmony) |
+| eine saubere, plattformübergreifende, standardisierte Lösung | §9 (Zephyr-Treiber) |
+| beides — Maximum Reichweite | beides parallel, §9 mit höherer Priorität wegen besserer Reuse |
+
+§8 und §9 schließen sich **nicht** aus. Die Domain-Arbeit (Register-
+Sequenzen, TTSCAA-Race, FTSE-Bit, RX-Timestamp-Pipeline) ist
+plattform-unabhängig — nur die Art, sie zu verpacken, unterscheidet
+sich.
+
+### 9.7 Recherche-Ergebnis 2026-04-26: Niemand arbeitet öffentlich daran
+
+Eine systematische Recherche im Zephyr-Repo, in offenen/closed PRs,
+Issues, Microchips eigenem Zephyr-Fork und im breiteren TC6-Ökosystem
+hat folgendes ergeben:
+
+#### Negativ-Befunde (Feld ist leer)
+
+| Quelle | Befund |
+|---|---|
+| `drivers/ethernet/eth_lan865x.c` auf `main` (Commit `db13c4f`, 2026-04-22) | **null** PTP-Plumbing. Keine `get_ptp_clock`, keine `net_pkt_set_timestamp_ns`, keine `CONFIG_PTP`/`CONFIG_NET_PKT_TIMESTAMP`-Guards, keine TSU-Register-Zugriffe. |
+| Open Pull Requests | **0 Treffer** für `lan865x`+`ptp` / `lan8651`+`ptp` / `oa_tc6`+`ptp`. Auch keine geschlossenen PRs. Auch keine abgelehnten Versuche. |
+| Microchips eigener Maintainer **Parthiban Veerasooran** | 5 PRs zum LAN865x-Treiber 2025–2026, **keiner** berührt Timestamping. |
+| Issues (inkl. Umbrella `#38352 "IEEE 1588-2008 support"`) | LAN865x nirgends erwähnt. |
+| `MicrochipTech/zephyr` (öffentlicher Microchip-Fork) | "No branches match" für `ptp` / `timestamp` / `lan865x` / `1588`. |
+| `eth_adin2111.c` (Analog Devices, gleiche TC6-Klasse) | **kein** PTP. Es gibt **keine** Vorlage für TC6+PTP in Zephyr. |
+
+→ **Konfidenz hoch, dass das Feld öffentlich leer ist.**
+   Nur Microchips private interne Branches sind nicht einsehbar.
+
+#### Wertvolle Begleit-Funde
+
+| Fund | Bedeutung |
+|---|---|
+| **`MicrochipTech/LAN865x-TimeSync`** ([github.com/MicrochipTech/LAN865x-TimeSync](https://github.com/MicrochipTech/LAN865x-TimeSync)) | Bare-Metal-Referenz: SAM-E54, Dual-gPTP-Grandmaster+Follower, fertige TSU-Register-Sequenz, State-Machine UNINIT/MATCHFREQ/HARDSYNC/COARSE/FINE. **4 Sterne, 2 Commits**, kein Zephyr-Port. **Idealer algorithmischer Spickzettel.** |
+| **Linux-Mainline 2025-08** | Parthiban Veerasooran (Microchip) fügte LAN865x-TSU-Konfiguration zum Linux-Treiber hinzu (Patchew `20250818060514.52795-3`). Microchip kennt das Problem und arbeitet aktiv an Linux-PTP-Support — aber Zephyr-Equivalent steht aus. |
+| **Zephyr PR #106867** "Add APIs for accurate PHY latency handling for PTP clocks" (go2sh, 2026-04-05, **offen**) | Möglicher Vorläufer / Dependency, beobachten. |
+| **`drivers/ptp_clock/ptp_clock_nxp_enet.c`** | Reifes Zephyr-PTP-Template, ideale Architektur-Vorlage für `ptp_clock_lan865x.c`. |
+
+#### Empfehlung aus der Recherche
+
+✅ **Grünes Licht für Zephyr-Investment** — das Feld ist öffentlich leer.
+
+**Vor Investment-Start:**
+
+- **Email an Parthiban Veerasooran** (`parthiban.veerasooran@microchip.com`)
+  — er ist der aktive LAN865x-Zephyr-Maintainer. Email schließt private
+  oder noch nicht öffentliche Microchip-Aktivität aus, die der
+  GitHub-Suche entgeht. Ein 5-Zeilen-Email kann Wochen vermeintlich
+  doppelter Arbeit ersparen.
+
+**Empfohlene Implementierungs-Reihenfolge:**
+
+1. **Algorithmische Vorlage**: `MicrochipTech/LAN865x-TimeSync` clonen
+   und die TSU-Init-Sequenz + gPTP-State-Machine studieren. Das ist
+   der nächste Verwandte unserer eigenen Harmony-Implementierung.
+2. **API-Architektur-Vorlage**: `drivers/ptp_clock/ptp_clock_nxp_enet.c`
+   als Zephyr-Pattern-Referenz nehmen.
+3. **Treiber-Erweiterung**: `eth_lan865x.c` um `get_ptp_clock`,
+   RX-Timestamp via `net_pkt_set_timestamp_ns()`, TX-Timestamping
+   ergänzen. Plus eigener `ptp_clock_lan865x.c` für die TSU-als-
+   Kernel-Clock.
+4. **Watch**: PR #106867 (PHY-Latency-API) — könnte vor unserer
+   Arbeit landen und wird dann eine Dependency.
+5. **Reviewer-Coordination**: Parthiban Veerasooran (Microchip) und
+   Lukasz Majewski (originaler LAN8651-Zephyr-Treiber-Autor) als
+   wahrscheinliche Reviewer der spätere RFC-PR ansprechen.
+
+#### Quellen (für die Verifikation)
+
+- [eth_lan865x.c auf main](https://github.com/zephyrproject-rtos/zephyr/blob/main/drivers/ethernet/eth_lan865x.c)
+- [Commit-Historie](https://github.com/zephyrproject-rtos/zephyr/commits/main/drivers/ethernet/eth_lan865x.c)
+- [PR-Suche: lan865x](https://github.com/zephyrproject-rtos/zephyr/pulls?q=is%3Apr+lan865x)
+- [Issues: lan865x](https://github.com/zephyrproject-rtos/zephyr/issues?q=is%3Aissue+lan865x)
+- [Issue #38352 IEEE 1588-2008](https://github.com/zephyrproject-rtos/zephyr/issues/38352)
+- [PR #106867 PHY latency API](https://github.com/zephyrproject-rtos/zephyr/pull/106867)
+- [LAN865x Linux TSU patch (Aug 2025)](https://patchew.org/linux/20250818060514.52795-1-parthiban.veerasooran@microchip.com/20250818060514.52795-3-parthiban.veerasooran@microchip.com/)
+- [MicrochipTech/LAN865x-TimeSync](https://github.com/MicrochipTech/LAN865x-TimeSync)
+- [MicrochipTech/zephyr Fork](https://github.com/MicrochipTech/zephyr)
+- [Zephyr PTP-Doku](https://docs.zephyrproject.org/latest/connectivity/networking/api/ptp.html)
+- [ptp_clock_nxp_enet.c Template](https://github.com/zephyrproject-rtos/zephyr/blob/main/drivers/ptp_clock/ptp_clock_nxp_enet.c)
+
+### 9.8 Wider gefasst: kein einziger 10BASE-T1S-Chip in Zephyr hat PTP
+
+§9.7 hat den LAN8651 fokussiert untersucht. Eine breitere Sicht zeigt:
+**das gesamte T1S-Ökosystem in Zephyr ist heute PTP-frei.**
+
+| T1S-Chip | Zephyr-Treiber vorhanden? | PTP / Timestamping im Treiber? |
+|---|---|---|
+| Microchip **LAN8651** (`eth_lan865x.c`) | ✅ ja | ❌ nein |
+| Microchip **LAN867x** (gleicher Treiber) | ✅ ja | ❌ nein |
+| Analog Devices **ADIN2111** / **ADIN1100** (`eth_adin2111.c`) | ✅ ja | ❌ nein |
+| Generic **OA-TC6** library (`subsys/net/lib/oa_tc6/`) | ✅ ja | ❌ nein |
+
+→ Es gibt **keinen einzigen Referenz-Treiber für TC6+PTP** in Zephyr.
+   Wer das implementiert, ist nicht *einer von vielen*, sondern *der
+   erste*.
+
+#### Warum eigentlich? (Strukturelle Gründe)
+
+1. **T1S ist neu.** IEEE 802.3cg (10BASE-T1S) wurde erst 2020
+   ratifiziert. Die meisten gPTP-Implementierungen sind älter und
+   auf klassische 100/1000BASE-Tx-Architekturen ausgelegt.
+2. **T1S ist Half-Duplex mit PLCA-Multidrop.** Die meisten
+   PTP-Profile gehen von dedizierten Full-Duplex-Links aus. T1S
+   braucht das gPTP-PLCA-Profil (IEEE 802.1AS-2020 Annex), das
+   nicht in jedem Software-Stack umgesetzt ist.
+3. **TC6 SPI MAC-PHYs sind architektonisch ungewöhnlich.** Der
+   RX-Hardware-Timestamp wird im SPI-Footer (RTSA-Bit + 8 Byte)
+   geliefert — nicht über eine standardisierte MII-PHY-Schnittstelle.
+   Die generischen PTP-Treiber-Patterns von Zephyr (z. B. `eth_stm32_hal`,
+   `eth_nxp_enet`) passen nicht 1:1.
+4. **Hardware-Verfügbarkeit ist erst seit kurzem.** LAN8651 Rev. B1
+   mit produktionsreifer TSU ist 2024–2025. ADIN2111-PTP-Support
+   ähnlich. Vorher gab es schlicht nichts zu integrieren.
+
+#### Strategische Konsequenz
+
+| Heute | Nach erfolgreicher LAN8651+PTP-Integration in Zephyr |
+|---|---|
+| Du implementierst PTP für *einen* Nischen-Chip | Du etablierst das **erste T1S+PTP-Pattern** für Zephyr |
+| Reichweite: Nutzer von LAN8651 + Harmony | Reichweite: das gesamte Zephyr-T1S-Ökosystem |
+| ADIN2111-Anwender gucken in die Röhre | ADIN2111 lässt sich danach mit demselben Pattern nachziehen |
+| Microchip-spezifischer Workaround | Pattern-Setter für die Zephyr-Subsystem-Architektur |
+
+#### Aufwand-Korrektur
+
+Aufwand etwas größer als naiv geschätzt — weil:
+
+- Es ist **kein simpler Treiber-Add** sondern ein neues Pattern in
+  der Zephyr-Subsystem-Architektur (TC6+PTP gibt es noch nicht).
+- Reviewer (Maintainer von `subsys/net/lib/ptp/` und
+  `drivers/ethernet/`) werden konservativ sein und genau hingucken.
+- Der erste PR muss **gut** sein — er setzt den Standard, wie alle
+  nachfolgenden T1S-Chip-Treiber es kopieren werden.
+
+Aber genau das macht den Beitrag wertvoller. Eine sauber gebaute
+`eth_lan865x` PTP-Erweiterung würde nicht nur dieses Projekt
+unterstützen — sie würde **das gesamte T1S-Ökosystem in Zephyr
+freischalten**.
+
+#### Aufwand-Empfehlung (überarbeitet)
+
+| Phase | Aufwand |
+|---|---|
+| Recherche / Architektur-Design (in Abstimmung mit Zephyr-Maintainern) | 3–5 Tage |
+| Treiber-Implementierung (LAN8651-spezifisch) | 5–8 Tage |
+| `ptp_clock_lan865x.c` als TSU-Wrapper | 2–3 Tage |
+| Tests / Sample-Application | 2 Tage |
+| RFC-PR + Review-Iterationen | offen, ~Wochen |
+| **Total bis Merge** | **~3–4 Wochen vollständige Engineering-Zeit** |
+
+Plus Begleitarbeit: Email an Parthiban Veerasooran (siehe §9.7),
+Watch auf PR #106867, Coordination mit Lukasz Majewski (LAN8651-
+Treiber-Originator).
