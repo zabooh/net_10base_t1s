@@ -217,15 +217,53 @@ make[2]: *** [build/.../drv_lan865x_api.o] Error 1
 BUILD FAILED
 ```
 
-Ursache: Die MCC-Regeneration entfernt am Dateianfang `#include <stdarg.h>`,
-während `PrintRateLimited()` (Zeile 1532) weiterhin `va_start()` und `va_end()`
-verwendet. Mit `-Werror -Wall` (Standard-Build-Flags des Projekts) wird die
-implicit-declaration zur Fehler.
+#### Wichtige Klarstellung: das ist ein Microchip-Template-Bug, nicht ein Konflikt mit diesem Fork
 
-→ **Selbst die rein kosmetisch wirkende `<stdarg.h>`-Entfernung kompiliert
-nicht durch.** Wer die MCC-Vorschläge unbesehen akzeptiert, hat sofort einen
-nicht baubaren Tree — und selbst nach Wieder-Hinzufügen von `<stdarg.h>` fehlt
-weiterhin die komplette PTP-Hardware-Timestamping-Infrastruktur aus §2.1–2.6.
+Auf den ersten Blick wirkt das so, als ob ein Eingriff dieses Forks mit MCC's
+Output kollidiert. **Tut es nicht.** Die nüchterne Beweislage:
+
+| Variante des Treibers | `<stdarg.h>` | `PrintRateLimited()` | Build? |
+|---|---|---|---|
+| Microchip Upstream HEAD (GitHub, Stand 2023-10-27) | ✅ vorhanden | ✅ vorhanden | ✅ baut |
+| `cross` / `cross-minimize` / `cross-driverless` (dieser Fork) | ✅ vorhanden | ✅ vorhanden | ✅ baut |
+| **MCC-Regeneration (heutige Tooling-Version)** | ❌ **entfernt** | ✅ vorhanden | ❌ **bricht** |
+
+Wer einen frischen, unmodifizierten Upstream-Clone nimmt und blind
+MCC drüberlaufen lässt, bekommt **denselben** `va_start`-Fehler.
+Reproduktionsschritt:
+
+```bash
+git clone https://github.com/Microchip-MPLAB-Harmony/net_10base_t1s
+# in MPLAB X öffnen → MCC starten → "Generate" → Build versuchen
+# → derselbe Fehler
+```
+
+Der Bug steckt im **MCC-Component-Template** für den LAN865x-Treiber
+(irgendwo unter `~/.mchp_packs/Microchip/...` oder in der
+Harmony-Net-Component-Definition). Microchip hat zwischen 2023-10-27
+und heute den `<stdarg.h>`-Eintrag aus dem Template entfernt, ohne die
+`PrintRateLimited()`-Funktion mit zu entfernen — ein klassischer
+Tooling-Drift-Bug.
+
+`PrintRateLimited()` ist übrigens echter Microchip-Code, von Thorsten
+Kummermehr (Microchip) am 2023-10-27 in Commit `1846c05` eingeführt
+("Update LAN865x application to latest Harmony3 packages [MH3-86573]").
+Es ist eine reine Anti-Flood-Logging-Hilfe (max. 5 Prints / 1 s, danach
+`[skipped N]`). Kein PTP-Bezug.
+
+#### Was das praktisch bedeutet
+
+→ **Der `va_start`-Fehler ist trotzdem dein Freund.** Egal ob Ursache
+ein Microchip-Template-Bug ist oder die PTP-Patches: er signalisiert
+*sofort und laut*, dass der Treiber durch MCC verändert wurde. Wer die
+MCC-Vorschläge unbesehen akzeptiert, hat einen nicht baubaren Tree —
+und selbst nach Wieder-Hinzufügen von `<stdarg.h>` fehlt weiterhin
+die komplette PTP-Hardware-Timestamping-Infrastruktur aus §2.1–2.6.
+
+→ **Microchip-Issue/PR wäre der richtige Weg.** Trivialer 1-Zeilen-Fix
+im Template — `#include <stdarg.h>` zurück oder `PrintRateLimited()`
+in `#ifdef SYS_CONSOLE_PRINT` einklammern. Nicht dein Problem zu
+lösen, aber gut zu wissen, an wen du dich wenden müsstest.
 
 ### Recovery, falls die MCC-Änderung versehentlich akzeptiert wurde
 
@@ -455,6 +493,85 @@ Inhalt von `ptp_drv_ext.h`:
 6. Diese 35 Zeilen als `essential.patch` speichern, Workflow dokumentieren:
    "MCC ablehnen → Patch re-apply".
 
+### 2.8 Implementierung — Endstand `cross-driverless`
+
+Die Refaktorisierung ist in zwei Stufen umgesetzt worden:
+
+| Branch | Treiber-Diff | Headerdiff | Total |
+|---|---|---|---|
+| `cross` (Ausgangsstand) | ~237 Zeilen | 62 Zeilen | **~299** |
+| `cross-minimize` (Commit `b0d7b8c`) | 58 Zeilen | 3 Zeilen | **61** |
+| `cross-driverless` (aktuell) | **11 Zeilen** | **1 Zeile** | **12** |
+
+Insgesamt **25× kleiner** als der Ausgangsstand. Build sauber mit XC32 v5.10
+(`-Werror -Wall`).
+
+#### Was eliminiert wurde (5 von 7 Patches verschwinden komplett)
+
+| | Eingriff | Eliminiert via |
+|---|---|---|
+| A1 | TC6_MEMMAP-Edits (IMASK0, DEEP_SLEEP, TXM-Filter `0x40040..45`) | `PTP_DRV_EXT_Tasks()`-State-Machine — Last-Write-Wins **nach** `IsReady()`. Schreibt 7 Register im App-Code via `DRV_LAN865X_WriteRegister()`. |
+| A2 | CONFIG0 FTSE+FTSS-Bits | dito — RMW (mask=0xC0, value=0xC0) auf CONFIG0 in derselben State-Machine |
+| A3 | Cases 46/47 PADCTRL+PPSCTL | dito — 2 Writes (PADCTRL RMW value=0x100 mask=0x300, PPSCTL value=0x7D) |
+| A4 | `DELAY_UNLOCK_EXT 100→5` | revertiert auf upstream `100u`. Die neue Architektur (TX-Match aktiv, TXMCTL pro-Sync arm'd) macht den Workaround überflüssig — kein TTSCMA-Trigger mehr. |
+| A5a | OnStatus0_Hook (TTSCAA save-before-W1C) | komplett entfernt. `ptp_gm_task.c` hatte längst einen SPI-Fallback (`GM_STATE_READ_STATUS0`/`WAIT_STATUS0`); `GetAndClearTsCapture()` gibt jetzt immer `0u` zurück → Fallback wird zum einzigen Pfad. |
+
+#### Was unvermeidbar im Treiber bleiben muss (irreduzible 12 Zeilen)
+
+| | Eingriff | Begründung (im Code als Kommentar fixiert) |
+|---|---|---|
+| **A5b** | `DRV_LAN865X_OnPtpFrame_Hook` (1 weak decl + 1 hook call = 2 Zeilen) | **Echte API-Lücke.** Der 64-Bit RX-Hardware-Timestamp kommt **ausschließlich** über den `rxTimestamp`-Parameter von `TC6_CB_OnRxEthernetPacket`. Die Upstream-Treiber **propagiert ihn nicht** in `TCPIP_MAC_PACKET`. Bei `TCPIP_STACK_PacketHandlerRegister`-Zeitpunkt ist er unwiederbringlich verloren. Ohne diesen Hook ist `t2_ns` (PTP-Slave Sync-Empfangszeit) immer 0 → Slave-Sync kaputt. |
+| **A6** | `DRV_LAN865X_GetTc6Inst()`-Accessor (5 Zeilen Body + 1 Zeilen-Header-Decl) | Das `drvLAN865XDrvInst[]`-Array ist `static` im Treiber. Der private `TC6_t*` ist nur über diesen Accessor zugänglich — und er wird gebraucht für `TC6_SendRawEthernetPacket(g, …, tsc=0x01, …)`, der die TX-Capture-A für PTP-Sync arm'd. Keine andere Microchip-API erlaubt das `tsc`-Flag. |
+
+Beide Patches sind in der Datei mit einem `/* … irreducible — see ptp_drv_ext.c … */`-Kommentar markiert, damit sie bei zukünftigen MCC-Reviews nicht gelöscht werden.
+
+#### Neue Struktur in `ptp_drv_ext.{c,h}`
+
+```
+ptp_drv_ext.h        Public API + 2 Hook-Prototypen
+ptp_drv_ext.c        EIC-ISR
+                     PTP_DRV_EXT_Init()
+                     PTP_DRV_EXT_Tasks()              ← NEU: 24-State Reg-Init
+                     PTP_DRV_EXT_RegisterInitDone()   ← NEU: Predicate für ptp_*-Tasks
+                     OnPtpFrame_Hook strong impl
+                     SendRawEthFrame, IsReady,
+                     GetAndClearTsCapture (= 0u),
+                     GetTsCaptureNirqTick (= s_nirq_tick)
+```
+
+#### Wiring
+
+- [`app.c`](apps/tcpip_iperf_lan865x/firmware/src/app.c): `APP_Initialize()` ruft
+  `PTP_DRV_EXT_Init()`. `APP_Tasks()` ruft `PTP_DRV_EXT_Tasks(0u)` periodisch
+  (no-op bis `IsReady()` ⇒ Reg-Init State-Machine läuft einmal durch).
+- `ptp_gm_task.c` und `ptp_fol_task.c` gaten optional auf
+  `PTP_DRV_EXT_RegisterInitDone()` bevor sie die ersten Frames absetzen.
+
+#### Konsequenz für MCC-Workflow
+
+| Szenario | vor `cross-driverless` | jetzt |
+|---|---|---|
+| MCC-Lauf, Treiber-Override **abgelehnt** | 61 Zeilen recovern | **12 Zeilen recovern** (`git checkout HEAD -- 2 files`) |
+| MCC-Lauf, Treiber-Override **akzeptiert** (Versehen) | Compile- + Link-Fehler sofort | dasselbe — die 2 verbleibenden Patches lösen ebenfalls Build-Bruch aus |
+| Driver-Drift im täglichen Arbeiten | 61 Zeilen pflegen | **12 Zeilen** pflegen |
+
+#### Caveats (vor Hardware-Sign-off prüfen)
+
+1. **`DELAY_UNLOCK_EXT 5→100`-Revert** ist nicht hardware-verifiziert. Bei
+   Wiederauftreten von TTSCMA-Events einfach als Einzeiler-Patch zurück.
+2. **`OnStatus0_Hook`-Entfernung** — `gm_task`-SPI-Fallback ist langsamer als
+   der In-Driver-Hook (extra SPI-Roundtrip). Toleriert via `gm_wait_ticks`,
+   aber Sync-Genauigkeit auf Hardware noch nicht in dieser Config bestätigt.
+3. **Race-Window beim Boot:** die ersten ~2 ms nach `IsReady()` läuft der
+   Chip mit Upstream-Default-Config (TXMCTL=0x02, FTSE aus, IMASK0=0x100).
+   Erste PTP-Frames in dieser Phase wären miskonfiguriert; PTP_GM/FOL gaten
+   aber sowieso auf Driver-Readiness, sollte in der Praxis kein Issue sein.
+4. **Hardware-Sign-off steht aus** — Build clean, aber kein PoR-to-Sync-Lauf
+   in dieser Config. Vor Merge in `master` zwingend testen:
+   - GM sendet Sync mit gültigem TX-Timestamp
+   - Slave empfängt Sync mit `g_ptp_raw_rx.rxTimestamp != 0` und `sysTickAtRx != 0`
+   - PTP-Offset stabilisiert sich auf < 1 µs
+
 ---
 
 ## 3) Was ein MCC-Lauf typischerweise sonst noch anfasst
@@ -524,3 +641,209 @@ Vergleichsbasis: [github.com/Microchip-MPLAB-Harmony/net_10base_t1s](https://git
 
 Beide Builds sind kompile-äquivalent: gleiche Source-Dateien, gleiche
 Include-Pfade, gleiche Preprocessor-Defines.
+
+---
+
+## 6) Reproduktions-Plan: MCC's `<stdarg.h>`-Removal-Bug
+
+§2 dokumentiert, dass MCC's Regeneration von `drv_lan865x_api.c`
+einen Build-Fehler erzeugt (`va_start` ohne `<stdarg.h>`-Include). Die
+Behauptung: Der Bug liegt in **Microchips LAN865x-MCC-Component-Template**,
+nicht in irgendeinem Code dieses Forks.
+
+Dieser Abschnitt definiert ein **reproduzierbares Test-Protokoll**, mit
+dem die Behauptung **unabhängig von diesem Repository** nachgewiesen
+werden kann — etwa als Beleg für einen Microchip-Bug-Report oder zur
+Validierung dieses README.
+
+### Voraussetzungen
+
+- Test-Verzeichnis abseits von `c:/work/ptp/check4/...`
+- Installiert: MPLAB X IDE, XC32, MCC-Plugin, `git` (Versionen werden
+  in Schritt 7 erfasst)
+- Internet-Zugang für `git clone` und Harmony-Package-Download
+- `~/.mchp_packs/`-Cache **bewahren** — das ist die forensisch
+  interessante Stelle (nicht löschen vor Schritt 8)
+
+### Schritt 1: Test-Workspace anlegen
+
+```bash
+mkdir c:\work\ptp\bugtest && cd c:\work\ptp\bugtest
+```
+
+### Schritt 2: Frischen Upstream-Clone ziehen
+
+```bash
+git clone https://github.com/Microchip-MPLAB-Harmony/net_10base_t1s
+cd net_10base_t1s
+git log -1 --oneline   # SHA notieren — Beleg-Stand
+```
+
+### Schritt 3: Upstream-Konsistenz-Check (Vorbedingung)
+
+Der Upstream selbst muss konsistent sein, sonst ist der Test wertlos:
+
+```bash
+grep '#include <stdarg.h>' \
+  apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c
+# erwartet: #include <stdarg.h>
+
+grep -c 'PrintRateLimited' \
+  apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c
+# erwartet: ≥ 3 Treffer (Macro, Decl, Def)
+```
+
+Beide Bedingungen müssen erfüllt sein → Upstream-Datei ist intern
+konsistent, der Bug existiert *noch nicht*.
+
+### Schritt 4: MCC laufen lassen (ohne weitere Änderungen)
+
+1. MPLAB X starten
+2. Projekt öffnen: `apps/tcpip_iperf_lan865x/firmware/tcpip_iperf_lan865x.X/`
+3. MCC-Tab öffnen ("Load existing configuration" wenn nötig)
+4. **Keine Konfiguration ändern**
+5. **"Generate"** klicken
+6. Im Merge-Dialog **alle vorgeschlagenen Änderungen akzeptieren**
+   (insbesondere die für `drv_lan865x_api.c`)
+
+### Schritt 5: Diff dokumentieren — Beweissicherung
+
+```bash
+git diff apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c \
+  > mcc_regen_diff.patch
+```
+
+Erwartete Diff-Zeile (mindestens):
+
+```diff
+-#include <stdarg.h>
++
+```
+
+Patch-File mit Datum und MCC-Version benennen (z. B.
+`mcc_regen_diff_2026-04-25_mcc564.patch`).
+
+### Schritt 6: Build versuchen, Fehler erfassen
+
+```bash
+build.bat rebuild > build_failure.log 2>&1
+```
+
+Erwarteter Inhalt der Log-Datei:
+
+```
+.../drv_lan865x_api.c: In function 'PrintRateLimited':
+1532:9: error: implicit declaration of function 'va_start'
+        [-Werror=implicit-function-declaration]
+1534:9: error: implicit declaration of function 'va_end'
+cc1.exe: all warnings being treated as errors
+BUILD FAILED.
+```
+
+Log aufbewahren.
+
+### Schritt 7: Tooling-Fingerprint festhalten
+
+Auszufüllen für den Test-Lauf — als Information für den Bug-Report:
+
+| Eigenschaft | Wert |
+|---|---|
+| MPLAB X Version | `____________` (z. B. 6.25 / 6.30) |
+| XC32 Version | `____________` (z. B. 4.60 / 5.00 / 5.10) |
+| MCC Plugin Version | `____________` (z. B. 5.6.4) |
+| Harmony Net Package Version | `____________` (z. B. v3.14.5 / v3.15.0) |
+| Harmony Core Package Version | `____________` (z. B. v3.16.0) |
+| CSP Package Version | `____________` (z. B. v3.25.1) |
+| Microchip net_10base_t1s Repo SHA | `____________` |
+| Datum des Test-Laufs | `____________` |
+
+### Schritt 8: Forensik im MCC-Cache
+
+Wo genau wurde der `<stdarg.h>`-Eintrag aus dem Template entfernt?
+
+```bash
+# Suchen wo der MCC-LAN865x-Driver-Template lebt:
+ls "$USERPROFILE/.mchp_packs/Microchip/" 2>/dev/null
+
+# Files mit PrintRateLimited:
+grep -rln 'PrintRateLimited' "$USERPROFILE/.mchp_packs/" 2>/dev/null
+
+# Files mit stdarg im selben Component-Verzeichnis:
+grep -rln 'stdarg' "$USERPROFILE/.mchp_packs/" 2>/dev/null
+
+# Ftl-Template-Files (das ist wahrscheinlich der Übeltäter):
+find "$USERPROFILE/.mchp_packs/" -name 'drv_lan865x_api*' 2>/dev/null
+```
+
+Erwartung: Mindestens eine Template-/Quelldatei (`.ftl`, `.c`,
+`.c.ftl`) im Harmony-Net-Package, die `PrintRateLimited()` enthält
+**aber nicht** das `<stdarg.h>`-Include. Pfad, Datei und
+Component-Manifest-Version festhalten — das ist der konkrete Ort des
+Microchip-Bugs.
+
+### Schritt 9: Ergebnis-Tabelle ausfüllen
+
+| Eigenschaft | Wert |
+|---|---|
+| Upstream-HEAD enthält `<stdarg.h>` + `PrintRateLimited` | ✅ |
+| Upstream-HEAD baut sauber (ohne MCC-Run) | ✅ |
+| MCC-regen entfernt `<stdarg.h>` | _____ (erwartet: ✅) |
+| MCC-regen behält `PrintRateLimited()` | _____ (erwartet: ✅) |
+| Build mit `-Werror -Wall` schlägt fehl mit `va_start`-Error | _____ (erwartet: ✅) |
+| Test ohne irgendeinen Fork-Eingriff durchgeführt | ✅ (Pristine-Upstream-Clone) |
+| **Schlussfolgerung** | Bug liegt im MCC-Template, nicht in diesem Fork |
+
+### Schritt 10: (Optional) Microchip-Bug-Report einreichen
+
+Aus den Beweisen aus Schritten 5/6/7/8 einen Issue auf
+[github.com/Microchip-MPLAB-Harmony/net_10base_t1s/issues](https://github.com/Microchip-MPLAB-Harmony/net_10base_t1s/issues)
+oder über `support.microchip.com` einreichen.
+
+**Vorschlag für Issue-Titel:**
+
+> `drv_lan865x_api.c::PrintRateLimited()` uses `va_start`/`va_end` but
+> MCC-regenerated version drops `#include <stdarg.h>` → build fails
+> with `-Werror`
+
+**Issue-Body-Skelett:**
+
+```
+## Reproduction
+1. git clone https://github.com/Microchip-MPLAB-Harmony/net_10base_t1s
+2. Open in MPLAB X, run MCC "Generate" without changing config.
+3. Accept all proposed merges.
+4. Build: fails with the error below.
+
+## Environment
+[Tabelle aus Schritt 7 einkleben]
+
+## Error output
+[build_failure.log einkleben]
+
+## Diff produced by MCC
+[mcc_regen_diff.patch einkleben]
+
+## Root cause (suspected)
+The MCC component template at <Pfad aus Schritt 8> defines
+`PrintRateLimited()` (which uses `va_start`/`va_end`) but does not
+emit the matching `#include <stdarg.h>` into the regenerated source
+file.
+
+## Suggested fix
+Either: (a) restore `#include <stdarg.h>` in the LAN865x
+driver template, or (b) wrap the `PrintRateLimited()` definition
+in `#ifdef SYS_CONSOLE_PRINT` so the variadic-macro dependency
+disappears when console printing is disabled.
+```
+
+### Was dieser Plan beweist (und was nicht)
+
+✅ **Bewiesen:** der Bug ist in MCC's Tooling, nicht in diesem Fork —
+weil er auch im pristine Upstream-Clone reproduzierbar ist.
+
+❌ **Nicht bewiesen (außerhalb des Scopes):** ob die *PTP-Patches*
+dieses Forks andere Probleme mit MCC haben. Die §2.1–2.6/2.8
+beschriebenen Patches überleben einen MCC-Lauf eigenständig
+(`ptp_drv_ext.{c,h}` werden gar nicht von MCC angefasst); die 12
+verbleibenden Inline-Zeilen würden bei Accept verloren gehen, sind
+aber separat in §2.8 dokumentiert.
