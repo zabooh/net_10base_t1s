@@ -553,6 +553,7 @@
       <itemPath>../src/pd10_blink_cli.h</itemPath>
       <itemPath>../src/ptp_cli.h</itemPath>
       <itemPath>../src/ptp_clock.h</itemPath>
+      <itemPath>../src/ptp_drv_ext.h</itemPath>
       <itemPath>../src/ptp_fol_task.h</itemPath>
       <itemPath>../src/ptp_gm_task.h</itemPath>
       <itemPath>../src/ptp_log.h</itemPath>
@@ -908,6 +909,7 @@
       <itemPath>../src/pd10_blink_cli.c</itemPath>
       <itemPath>../src/ptp_cli.c</itemPath>
       <itemPath>../src/ptp_clock.c</itemPath>
+      <itemPath>../src/ptp_drv_ext.c</itemPath>
       <itemPath>../src/ptp_fol_task.c</itemPath>
       <itemPath>../src/ptp_gm_task.c</itemPath>
       <itemPath>../src/ptp_log.c</itemPath>
