@@ -275,6 +275,12 @@ void APP_Tasks ( void )
              * threshold can fire with tick-level precision. */
             tfuture_service();
 
+            /* Drive the PTP-specific register-init state machine.  Becomes
+             * a no-op once PTP_DRV_EXT_RegisterInitDone() returns true.
+             * Replaces the inline driver patches (TC6_MEMMAP / case 46/47
+             * tweaks) that previously lived in drv_lan865x_api.c. */
+            PTP_DRV_EXT_Tasks(0u);
+
             /* === FOL/GM: process a buffered PTP frame ===
              * Filled by TC6_CB_OnRxEthernetPacket at driver level. */
             PTP_RX_Poll();

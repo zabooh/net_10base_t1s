@@ -45,8 +45,9 @@ Microchip or any third party.
 #include "driver/lan865x/drv_lan865x.h"
 #include "tc6/tc6.h"
 
-/* PTP extension hooks — strong overrides live in ptp_drv_ext.c */
-__attribute__((weak)) void DRV_LAN865X_OnStatus0_Hook(uint8_t idx, uint32_t status0) { (void)idx; (void)status0; }
+/* PTP RX-timestamp hook: irreducible — the 64-bit RX timestamp is delivered ONLY
+ * via the rxTimestamp parameter of TC6_CB_OnRxEthernetPacket (chip RTSA stream).
+ * Strong override lives in ptp_drv_ext.c.  See README_cross.md §2.4. */
 __attribute__((weak)) void DRV_LAN865X_OnPtpFrame_Hook(uint8_t idx, const uint8_t *frame, uint16_t len, const uint64_t *rxTimestamp) { (void)idx; (void)frame; (void)len; (void)rxTimestamp; }
 
 /******************************************************************************
@@ -58,7 +59,7 @@ __attribute__((weak)) void DRV_LAN865X_OnPtpFrame_Hook(uint8_t idx, const uint8_
 #define RESET_LOW_TIME_MS       (1u)
 #define RESET_HIGH_TIME_MS      (7u)
 #define PLCA_TIMER_DELAY        (1000u)
-#define DELAY_UNLOCK_EXT        (5u)    /* reduced: TTSCAA appears ~1ms after EXST; 100ms caused TTSCMA */
+#define DELAY_UNLOCK_EXT        (100u)
 #define CONTROL_PROTECTION      (true)
 
 #define GET_TICKS()             SYS_TIME_CountToMS(SYS_TIME_CounterGet())
@@ -1379,10 +1380,7 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
             pDrvInst->rxStats.nRxPendBuffers++;
             macPkt->pMacLayer = macPkt->pDSeg->segLoad;
             macPkt->pNetLayer = macPkt->pMacLayer + sizeof(TCPIP_MAC_ETHERNET_HEADER);
-
-            /* PTP extension hook (no-op by default; ptp_drv_ext.c overrides). */
-            DRV_LAN865X_OnPtpFrame_Hook(pDrvInst->index, macPkt->pDSeg->segLoad, len, rxTimestamp);
-
+            DRV_LAN865X_OnPtpFrame_Hook(pDrvInst->index, macPkt->pDSeg->segLoad, len, rxTimestamp); /* PTP irreducible hook */
             if (0xFF == macPkt->pDSeg->segLoad[0]) {
                 macPkt->pktFlags = TCPIP_MAC_PKT_FLAG_BCAST;
             } else {
@@ -1708,18 +1706,16 @@ static bool _InitMemMap(DRV_LAN865X_DriverInfo * pDrvInst)
         {  .address=0x000400F4,  .value=0x0000C020,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400F8,  .value=0x0000B900,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400F9,  .value=0x00004E53,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
+        {  .address=0x00040081,  .value=0x00000080,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* DEEP_SLEEP_CTRL_1 */
         {  .address=0x00040091,  .value=0x00009660,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x00010077,  .value=0x00000028,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* MAC_TI: 40 ns/tick */
-        /* TX-Match pattern for PTP Sync detection (used by GM to capture TX timestamp) */
-        {  .address=0x00040041,  .value=0x00000088,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMPATH: EtherType high byte 0x88 */
-        {  .address=0x00040042,  .value=0x0000F710,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMPATL: EtherType low 0xF7 + PTP Sync 0x10 */
-        {  .address=0x00040043,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMMSKH: no masking (exact match) */
-        {  .address=0x00040044,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMMSKL: no masking */
-        {  .address=0x00040045,  .value=0x0000001E,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMLOC: byte offset 30 */
+        {  .address=0x00010077,  .value=0x00000028,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
+        {  .address=0x00040043,  .value=0x000000FF,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
+        {  .address=0x00040044,  .value=0x0000FFFF,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
+        {  .address=0x00040045,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x00040053,  .value=0x000000FF,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x00040054,  .value=0x0000FFFF,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x00040055,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x00040040,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* TXMCTL: disabled at startup; armed per-Sync with MACTXTSE only */
+        {  .address=0x00040040,  .value=0x00000002,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x00040050,  .value=0x00000002,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400B0,  .value=0x00000103,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /*SQI CONFIGURATION*/
         {  .address=0x000400B1,  .value=0x00000910,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
@@ -1733,8 +1729,7 @@ static bool _InitMemMap(DRV_LAN865X_DriverInfo * pDrvInst)
         {  .address=0x000400B9,  .value=0x00000E13,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400BA,  .value=0x00001C25,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
         {  .address=0x000400BB,  .value=0x0000002B,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  },
-        {  .address=0x0000000C,  .value=0x00000000,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* IMASK0: all unmasked, incl. bit 8 (TTSCAA) so _OnStatus0 fires on timestamp capture */
-        {  .address=0x00040081,  .value=0x000000E0,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* DEEP_SLEEP_CTRL_1 */
+        {  .address=0x0000000C,  .value=0x00000100,  .mask=0x00000000,  .op=MemOp_Write,  .secure=true  }, /* IMASK0 */
         
     };
 
@@ -1993,17 +1988,7 @@ static bool _InitConfig(DRV_LAN865X_DriverInfo * pDrvInst)
             break;
 
         case 46:
-            /* PADCTRL (0x000A0088): RMW value=0x100, mask=0x300 — enables TX timestamp output
-             * Reference: TC6_ptp_master_init() in noIP-SAM-E54-Curiosity-PTP-Grandmaster */
-            if (TC6_ReadModifyWriteRegister(tc, 0x000A0088u /* PADCTRL */, 0x00000100u, 0x00000300u, CONTROL_PROTECTION, NULL, NULL)) {
-                pDrvInst->initSubState++;
-            }
-            break;
-
-        case 47:
-            /* PPSCTL (0x000A0239): value=0x7D (=125) — enables PPS clock required for TSU counter
-             * Reference: TC6_ptp_master_init() in noIP-SAM-E54-Curiosity-PTP-Grandmaster */
-            if (TC6_WriteRegister(tc, 0x000A0239u /* PPSCTL */, 0x0000007Du, CONTROL_PROTECTION, NULL, NULL)) {
+            if (TC6_WriteRegister(tc, 0x000400E0, 0x0000C000, CONTROL_PROTECTION, NULL, NULL)) {
                 done = true;
             }
             break;
@@ -2084,10 +2069,8 @@ static bool _InitUserSettings(DRV_LAN865X_DriverInfo * pDrvInst)
             }
             break;
         case 8:
-            /* Cut Through / Store and Forward mode + Frame Timestamping */
+            /* Cut Through / Store and Forward mode */
             regVal = 0x9026u;
-            regVal |= 0x80u; /* FTSE: Frame Timestamp Enable (required for TTSCAA TX capture) */
-            regVal |= 0x40u; /* FTSS: 64-bit timestamps (TC6 driver strips 8 bytes on RTSA) */
             if (true == pDrvInst->drvCfg.txCutThrough) {
                 regVal |= 0x200u;
             }
@@ -2346,10 +2329,6 @@ static void _OnStatus0(TC6_t *pInst, bool success, uint32_t addr, uint32_t value
         if (success) {
             bool reinit = false;
             uint8_t i;
-            /* PTP extension hook (no-op by default; ptp_drv_ext.c overrides).
-             * MUST run before the W1C clear below so the hook can save
-             * TTSCAA/B/C (bits 8-10) for the GM state machine. */
-            DRV_LAN865X_OnStatus0_Hook(pDrvInst->index, value);
             PRINT_LIMIT("LAN865x_%d ",pDrvInst->index);
             while (!TC6_WriteRegister(pInst, addr, value, CONTROL_PROTECTION, _OnClearStatus0, NULL)) {
                 (void)TC6_Service(pInst, true);
@@ -2454,13 +2433,7 @@ static void _RxPacketAck(TCPIP_MAC_PACKET* pkt, const void* param)
     }
 }
 
-/* Returns the internal TC6 instance pointer (cast to void *) for the given
- * driver index, or NULL if the index is out of range or the driver is not
- * yet ready.  Used by ptp_drv_ext.c so the PTP-side wrappers can call into
- * the TC6 layer without exposing drvLAN865XDrvInst publicly. */
-void *DRV_LAN865X_GetTc6Inst(uint8_t idx)
-{
-    if (idx >= DRV_LAN865X_INSTANCES_NUMBER) { return NULL; }
-    if (drvLAN865XDrvInst[idx].state != SYS_STATUS_READY) { return NULL; }
-    return drvLAN865XDrvInst[idx].drvTc6;
-}
+/* PTP TC6 instance accessor: irreducible — TC6_SendRawEthernetPacket needs the
+ * private TC6_t* (created in TC6_Init) to arm tsc=1 capture for PTP Sync TX.
+ * drvLAN865XDrvInst[] is file-static; no other public path exposes it. */
+void *DRV_LAN865X_GetTc6Inst(uint8_t idx) { return (idx >= DRV_LAN865X_INSTANCES_NUMBER) ? NULL : ((drvLAN865XDrvInst[idx].state == SYS_STATUS_READY) ? drvLAN865XDrvInst[idx].drvTc6 : NULL); }

@@ -774,10 +774,7 @@ TCPIP_MAC_RES DRV_LAN865X_WriteRegister(uint8_t idx, uint32_t addr, uint32_t val
 */
 TCPIP_MAC_RES DRV_LAN865X_ReadModifyWriteRegister(uint8_t idx, uint32_t addr, uint32_t value, uint32_t mask, bool protected, DRV_LAN865X_RegCallback_t modifyCallback, void *pTag);
 
-/* Returns the internal TC6 instance pointer (as void*) for the given driver
- * index, or NULL if the driver is not yet ready.  Used by ptp_drv_ext.c. */
-void *DRV_LAN865X_GetTc6Inst(uint8_t idx);
-
+void *DRV_LAN865X_GetTc6Inst(uint8_t idx); /* PTP irreducible: see drv_lan865x_api.c */
 
 #ifdef __cplusplus
 }
