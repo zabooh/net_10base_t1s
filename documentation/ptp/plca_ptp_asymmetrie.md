@@ -47,6 +47,30 @@ Standard PTP assumes **point-to-point connections** with the following propertie
 
 PLCA = **Physical Layer Collision Avoidance**: token-passing mechanism in the PHY that regulates slot-based access.
 
+#### Topology comparison
+
+```
+Standard Ethernet (point-to-point full-duplex):
+
+     ┌─────────┐         TX          ┌─────────┐
+     │ Node A  │ ──────────────────► │ Node B  │
+     │         │ ◄────────────────── │         │
+     └─────────┘         RX          └─────────┘
+       dedicated link, both can transmit simultaneously
+
+
+10BASE-T1S (multidrop half-duplex, PLCA-arbitrated):
+
+   ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐
+   │ Node A │  │ Node B │  │ Node C │  │ Node D │
+   │ ID = 0 │  │ ID = 1 │  │ ID = 2 │  │ ID = 3 │
+   └───┬────┘  └───┬────┘  └───┬────┘  └───┬────┘
+       │          │           │           │
+       ●──────────●───────────●───────────●─────►  shared twisted pair
+                                  one transmitter at a time
+                                  (PLCA token passing)
+```
+
 ---
 
 ## 3. Where the Timestamp Is Taken
@@ -130,6 +154,23 @@ PLCA cycle:
 - Slot 2: C is allowed to send
 - Repeat
 
+#### PLCA cycle timeline
+
+```
+Time →  (slot duration = 20 µs typical)
+
+   Cycle N                       Cycle N+1
+   ┌─────┬─────┬─────┬─────┐     ┌─────┬─────┬─────┬─────┐
+   │  A  │  B  │  C  │  D  │     │  A  │  B  │  C  │  D  │
+   │ID=0 │ID=1 │ID=2 │ID=3 │ ... │ID=0 │ID=1 │ID=2 │ID=3 │
+   └─────┴─────┴─────┴─────┘     └─────┴─────┴─────┴─────┘
+   0    20    40    60    80    100   120   140   160   180 µs
+   ◄───── one cycle (80 µs) ─────►
+
+Each node may transmit only inside its own slot.  Outside its slot
+it must defer — even for time-critical PTP frames.
+```
+
 #### Example: A measures Pdelay to C
 
 **Step 1:** A sends `Pdelay_Req` to C
@@ -149,6 +190,27 @@ C → A:  ~2 Slots Wartezeit + Übertragungszeit
 
 Standard gPTP computes `path_delay = round_trip / 2`. This assumption is wrong because the directions have different wait times.
 
+#### Visualised: the asymmetric round-trip
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Node A (ID=0)
+    participant Bus as PLCA bus
+    participant C as Node C (ID=2)
+
+    Note over A,C: Slot 0 — A's turn
+    A->>Bus: Pdelay_Req (sent immediately)
+    Bus->>C: arrives during slot 0
+
+    Note over A,C: Slot 1 — B's turn (C must wait)
+    Note over A,C: Slot 2 — C's turn
+    C->>Bus: Pdelay_Resp (finally allowed)
+    Bus->>A: arrives during slot 2
+
+    Note over A: Round-trip seen by A = 2 slots × 20 µs = 40 µs<br/>True one-way path delay ≈ 1 µs<br/>Naive (round_trip / 2) = 20 µs ← wrong by 20×
+```
+
 ### The Asymmetry Scales
 
 **With 8 nodes (T1S maximum):**
@@ -160,6 +222,27 @@ Asymmetrie zwischen ID 0 und 7:   bis zu 50 µs
 ```
 
 PTP target: < 1 µs accuracy. 50 µs of asymmetry would be 50x too large.
+
+#### Naive Pdelay error vs. NodeID distance
+
+For an 8-node bus, slot duration = 20 µs, asking each remote node for
+its Pdelay:
+
+```
+Distance   Asymmetry   Naive-Pdelay   Visualization (1 char ≈ 5 µs)
+to target  in slots    bias              0     20    40    60    80 µs
+─────────  ─────────   ────────────    ────────────────────────────────
+   1          1          +10 µs        ██
+   2          2          +20 µs        ████
+   3          3          +30 µs        ██████
+   4          4          +40 µs        ████████
+   5          5          +50 µs        ██████████
+   6          6          +60 µs        ████████████
+   7          7          +70 µs        ██████████████  ← worst case
+
+PTP target (red line):                 │ < 1 µs
+                                       └► all rows already exceed it.
+```
 
 **Without Annex H compensation, PTP on multidrop T1S is unusable.**
 
@@ -223,6 +306,31 @@ The PLCA beacon from the coordinator and the cycle start can differ. On beacon l
 ## 6. What Annex H Actually Defines
 
 Annex H is **more realistic** than the simple formula and uses several mechanisms in combination:
+
+#### How the five mechanisms feed into a corrected Pdelay
+
+```mermaid
+flowchart LR
+    A[Raw round-trip<br/>measurements]
+    B[PLCA beacon<br/>timestamps]
+    C[Observed cycle<br/>duration]
+    D[NodeID position]
+
+    A --> F[Conservative<br/>filter]
+    B --> R[Beacon-relative<br/>reference]
+    C --> R
+    R --> F
+    D --> X[NodeID-bias<br/>compensation]
+
+    F --> P{Per-hop<br/>Pdelay<br/>estimator}
+    X --> P
+    P --> O[Cleaned path delay<br/>&lt; 1 µs accuracy]
+
+    style O fill:#cfc,stroke:#0a0
+    style A fill:#fcc,stroke:#a00
+```
+
+The five sub-mechanisms are:
 
 ### 6.1 PLCA Beacon Timestamp
 
@@ -408,6 +516,35 @@ NodeID and max NodeID provide only a worst-case estimate. True compensation requ
 | 8 nodes, no compensation | 50-150 µs |
 | 8 nodes, static ID compensation | 5-20 µs |
 | 8 nodes, full Annex H implementation | < 1 µs |
+
+#### Visualised on a log scale
+
+```
+Achievable accuracy on a 10BASE-T1S bus
+(log scale: each step is ×10)
+
+       <0.1µs   1µs    10µs    100µs   1ms
+        │       │       │       │       │
+2 nodes,│  █████│       │       │       │   < 1 µs    ✅ PTP target met
+PTPv2+HW│       │       │       │       │
+        │       │       │       │       │
+8 nodes,│       │       │       │       │
+no comp.│       │       │  █████│██████ │   50-150 µs ❌ unusable
+        │       │       │       │       │
+8 nodes,│       │       │       │       │
+static  │       │       │██████ │       │   5-20 µs   ⚠ marginal
+        │       │       │       │       │
+8 nodes,│       │       │       │       │
+Annex H │       │  █████│       │       │   < 1 µs    ✅ PTP target met
+        │       │       │       │       │
+        ◄───────┴───────┴───────┴───────►
+                            error magnitude (log scale)
+```
+
+The takeaway: with up to 2 nodes, basic gPTP plus hardware
+timestamping reaches sub-µs accuracy.  Once 3+ nodes share the bus,
+either a static NodeID-compensation (still ~10 µs error) or a full
+Annex H implementation (sub-µs again) is required.
 
 ---
 
