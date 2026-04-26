@@ -760,6 +760,122 @@ A separate `PROMPT_annex_h_implementation.md` (analogous to
 `PROMPT_mcc_ptp_component.md`) can capture this roadmap as a
 self-contained brief for whoever picks the work up.
 
+### 12.8 Autonomous execution via a 4-board test rig
+
+The implementation phases above describe **what** has to be built;
+they do not describe **who** builds it.  The classic answer is "an
+embedded engineer over ~4 weeks".  The modern answer — given that
+the work is mostly mechanical translation of a known algorithm into
+firmware — is *"an AI agent over ~4 weeks of wall-clock time, with
+~5 days of human hardware-prep up front"*.
+
+The enabling infrastructure is documented in
+[`PROMPT_annex_h_test_rig.md`](../../PROMPT_annex_h_test_rig.md)
+at the repo root.  Briefly:
+
+#### Setup
+
+```
+                                shared 10BASE-T1S bus
+   ●─────────●─────────●─────────●
+   │         │         │         │
+  B0        B1        B2        B3        ← 4× SAM-E54 + LAN8651
+   │         │         │         │
+   ▼         ▼         ▼         ▼
+  PPS+GPIO   PPS+GPIO  PPS+GPIO  PPS+GPIO  (each: 2 channels)
+   │ │       │ │       │ │       │ │
+   ▼ ▼       ▼ ▼       ▼ ▼       ▼ ▼
+   ┌──────────────────────────────┐
+   │   Saleae Logic — 8 channels  │   ground-truth measurement
+   │  100 MHz, 10 ns resolution   │
+   └──────────────────────────────┘
+                  │
+                  ▼
+           Python orchestrator
+       (build / flash / capture /
+        analyse / pass-fail-gate)
+                  │
+                  ▼
+              AI agent
+```
+
+Each board's LAN8651 PPS pin (the chip's hardware TSU output) goes
+to one Saleae channel as ground truth.  Each MCU also drives an
+independent GPIO toggle from its software-disciplined PTP clock,
+on a second Saleae channel — that exposes whether the *software*
+clock follows the *hardware* clock.
+
+#### Inner loop
+
+The AI agent receives a per-phase goal (e.g. *"implement Phase 4
+— bias compensator until scenario s03 passes"*).  Then:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  AI agent inner loop (≤ 20 iterations per phase goal):  │
+│                                                         │
+│    edit code  ──►  cmake build  ──►  mdb flash × 4      │
+│        ▲                                    │           │
+│        │                                    ▼           │
+│        │         Saleae 60-s capture  ◄── PTP runs      │
+│        │              │                                 │
+│        │              ▼                                 │
+│        │         analyse_pps.py                         │
+│        │         metrics{max_offset_ns, drift_ppm,      │
+│        │                 asymmetry_signature, ...}      │
+│        │              │                                 │
+│        │              ▼                                 │
+│        │       gates passed?                            │
+│        │              │                                 │
+│        └──── no ──────┤                                 │
+│                       │                                 │
+│                      yes                                │
+│                       ▼                                 │
+│                     DONE                                │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### Why the test-rig changes the calculus of §12.7
+
+| Aspect | Without rig (manual) | With rig (AI-driven) |
+|---|---|---|
+| Human engineering hours | ~160 (4 weeks full-time) | ~5 days hardware setup, then minimal supervision |
+| Iteration latency | hours per cycle (manual flash, scope re-attach, eyeball offsets) | ~5 minutes per cycle |
+| Pass/fail certainty | qualitative ("looks good on the scope") | quantitative (`max_offset_ns < 1000`) |
+| Reproducibility | depends on bench setup | fully scripted in `boards.yaml` + scenarios |
+| Risk of regressing earlier phases | high — no automated regression net | low — every iteration runs all earlier scenarios |
+
+→ **The recommendation in §12.7 is no longer either "skip Annex H"
+or "spend 4 weeks of engineer time".**  The third option is now:
+*"build the rig over a week, then let the agent do the implementation
+work"*.  Net cost roughly halves and the result is a documented,
+self-verifying implementation rather than a one-off lab hack.
+
+#### Quality gates the rig enforces
+
+| Phase | Scenario | Pass gate |
+|---|---|---|
+| 1 — HW plumbing | s01 (2-node baseline) + `ptp plca status` returns valid | functional + `max_offset < 1 µs` |
+| 2 — Pdelay protocol | s01 + `ptp pdelay show` returns t1..t4 on all neighbours | round-trip < 100 µs, no NACKs |
+| 3 — Cycle observer | s01 + cycle-jitter < 5 µs over 1 min | `cycleVarNs < 5000` |
+| 4 — Bias compensator | s03 (3-node static-ID compensation) | `max_offset < 20 µs` |
+| 5 — Variance filter | s05 (4-node burst load) | `max_offset < 2 µs under load` |
+| 6 — Stack integration | s04 + s05 + s06 | `max_offset < 1 µs over 5 min` |
+| 7 — Config + CLI | all `ptp ...` CLI commands pass scripted invocation | functional |
+
+The agent's stop criterion for the whole roadmap is: **all of
+s01–s06 pass simultaneously on a fresh build**.
+
+#### What still needs a human
+
+- Soldering the PPS leads and GPIO-toggle pins (one-time, ~half a day)
+- Buying the Saleae and 4 boards
+- Reviewing the agent's PR before it goes to upstream Microchip / Zephyr
+- Sign-off after a successful Annex H passing all six scenarios
+
+Everything else — code, build, flash, measure, analyse, iterate — is
+in the agent's loop.
+
 ---
 
 ## References
