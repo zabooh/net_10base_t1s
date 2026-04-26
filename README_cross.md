@@ -1365,3 +1365,103 @@ freischalten**.
 Plus Begleitarbeit: Email an Parthiban Veerasooran (siehe §9.7),
 Watch auf PR #106867, Coordination mit Lukasz Majewski (LAN8651-
 Treiber-Originator).
+
+### 9.9 Vertiefung: das gPTP-PLCA-Profil (IEEE 802.1AS-2020 Annex H)
+
+§9.8 erwähnt am Rande, dass T1S nicht nur Standard-gPTP braucht,
+sondern das **PLCA-Profil** des 802.1AS-2020-Standards. Da das ein
+Schlüssel-Detail für die Implementierungs-Komplexität ist, hier die
+Vertiefung.
+
+#### Warum Standard-gPTP auf T1S nicht reicht
+
+Standard-gPTP (IEEE 802.1AS) nimmt implizit folgendes an:
+
+| Annahme | Standard-Ethernet (100/1000BASE-Tx) | 10BASE-T1S |
+|---|---|---|
+| Topologie | Punkt-zu-Punkt (PHY-zu-PHY) | **Multidrop-Bus** — N Knoten teilen einen Draht |
+| Duplex | Full-Duplex (separate TX/RX-Lanes) | **Half-Duplex** — alle Knoten senden auf demselben Draht |
+| Medium-Access | Switch / Bridge entscheidet | **PLCA** — Token-Passing im PHY (Physical Layer Collision Avoidance) |
+
+PLCA = jeder Knoten bekommt einen reservierten Burst-Slot pro
+PLCA-Zyklus. Sendet nur in seinem Slot, sonst nicht. Vergleichbar mit
+einem Round-Robin im PHY.
+
+#### Was naives gPTP auf T1S kaputt macht
+
+1. **Pdelay-Messung wird asymmetrisch.**
+   gPTPs Path-Delay-Mechanismus (`Pdelay_Req` / `Pdelay_Resp`) misst
+   die Linkverzögerung. Auf T1S muss der Antwortende warten, bis sein
+   PLCA-Slot kommt, bevor er senden darf. Diese Slot-Wartezeit (bis zu
+   Millisekunden) verfälscht den berechneten Path-Delay massiv.
+
+2. **PLCA-Slot-Latency variiert pro Knoten.**
+   Knoten mit niedriger `nodeId` bekommen ihren Slot früher als Knoten
+   mit hoher `nodeId`. Standard-gPTP hat keinen Mechanismus, das zu
+   kompensieren — der Slave sieht jeweils einen `nodeId`-abhängigen
+   Bias.
+
+3. **Sync-Intervall-Annahmen passen nicht.**
+   Burst-zu-Burst-Latency auf T1S kann das standardisierte 125ms-
+   Sync-Intervall sprengen, je nach Bus-Auslastung. Sync-Frames
+   verzögern sich, das gPTP-Timing-Modell stimmt nicht mehr.
+
+4. **Asymmetrische TX-Burst-Latency.**
+   Wenn ein Knoten in seinem Slot mehrere Frames bursted, sind die
+   TX-Timestamps innerhalb des Bursts dicht beisammen, der
+   Slot-zu-Slot-Übergang dauert dann lange.
+
+#### Was Annex H des 802.1AS-2020 löst
+
+Die 2020er-Revision von IEEE 802.1AS hat einen **(informativen)
+Annex H** für PLCA-basierte 10BASE-T1S-Netze. Inhalt sinngemäß:
+
+- **Slot-aware Pdelay-Korrektur**: Path-Delay-Berechnung unter
+  Berücksichtigung des PLCA-Slot-Indexes von Master- und Slave-Knoten
+- **Modifizierte Sync-Intervall-Empfehlungen** — länger als 125ms,
+  damit Burst-zu-Burst-Latenz nicht den Sync-Mechanismus stresst
+- **PLCA-Beacon als zusätzliche Time-Reference** — das PLCA-Beacon-
+  Frame (vom PHY selbst gesendet) kann als sekundäre Synchronisations-
+  Quelle dienen
+- **Time-Aware-Bridge-Verhalten** für T1S-zu-Tx-Brücken
+
+#### Welche Stacks es heute haben
+
+| Stack | gPTP-PLCA-Profil-Support? |
+|---|---|
+| **Linux Kernel** | beginnt — Parthibans LAN865x-TSU-Patch (2025-08) ist ein Vorbereitungsschritt |
+| **Microchip MicroAutoMotive Stack** (proprietär) | ja, aktiv vermarktet für T1S-Automotive |
+| **`MicrochipTech/LAN865x-TimeSync`** (Bare-Metal-Referenz) | ja — die UNINIT/MATCHFREQ/HARDSYNC/COARSE/FINE-State-Machine implementiert genau das |
+| **Zephyr `subsys/net/lib/ptp/`** | ❌ Standard-802.1AS, **kein** PLCA-Annex |
+| **Dieses Repo** (`cross-driverless`) | ❌ vereinfachtes 802.1AS Master+Slave, **kein** PLCA-Annex |
+
+#### Praktische Konsequenz für diesen Demonstrator
+
+Auf einem **2-Knoten-T1S-Bus** (heutiger Demo-Setup) ist das
+PLCA-Profil **nicht zwingend** — Standard-gPTP funktioniert
+hinreichend, weil die PLCA-Slot-Latenz konstant ist und sich beim
+Master/Slave-Pair rauskürzt.
+
+Sobald auf **3+ Knoten** skaliert wird, kommt es zu:
+
+- Slave-spezifischer Offset-Bias je nach `nodeId`
+- Pdelay-Drift mit der PLCA-Bus-Auslastung
+- Verlust der Sync-Genauigkeit unter Last
+
+→ Das **PLCA-Profil ist ein eigenständiges Folge-Feature** zum
+Basis-PTP-Support. Erst Basis-Support fertig, dann Annex-H. Die
+Reihenfolge:
+
+1. **Phase A (heute, dieses Repo)**: Basis-gPTP für 2-Knoten-Setup
+2. **Phase B (zukünftig)**: PLCA-Profil-Erweiterung für N>2 Knoten
+
+#### Implikation für die Zephyr-Strategie
+
+Die in §9.7/9.8 vorgeschlagene Zephyr-PTP-Implementierung **soll
+zunächst Phase A abdecken** — Standard-gPTP mit HW-Timestamping über
+den TSU. Das deckt 95% der Demo-Use-Cases ab.
+
+**Phase B** (Annex H) als separater PR, nachdem die Basis stabil
+gemerged ist. Das ist auch politisch sinnvoll: ein PR mit "Standard-
+gPTP+HW-Timestamping für LAN8651" wird leichter akzeptiert als ein
+Mega-PR der gleichzeitig auch ein neues PTP-Profil mitbringt.
