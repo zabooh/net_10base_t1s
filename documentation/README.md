@@ -25,6 +25,11 @@ The top-level [readme.md](../readme.md) has the project overview. Risks and open
 - [drift_filter.md](ptp/drift_filter.md) — Adaptive IIR drift filter design
 - [plca_ptp_asymmetrie.md](ptp/plca_ptp_asymmetrie.md) — PLCA slot asymmetry and PTP compensation on 10BASE-T1S (Annex H background)
 - [README_cross.md](ptp/README_cross.md) — Cross-build (CMake + MPLAB X), driver-minimization journey, MCC tooling-bug analysis, and Zephyr/Harmony future-platform options
+- [readme_results.md](ptp/readme_results.md) — Feasibility analysis for 1 µs sync on 3–8 nodes: AN1847 review, 2-node limitations of the current implementation, why full 802.1AS multidrop is non-trivial, island-vs-deployment-scenario assessment, and a comparison of the project's added value over AN1847
+- [readme_upgrade.md](ptp/readme_upgrade.md) — Concrete upgrade notes for the `mult-sync` branch: how this AN1847-style implementation differs from Microchip's reference (auto-mode, static path delay, GM-MAC fixation, multi-state servo, build flag `PTP_AN1847_STYLE`)
+
+### [pdf/](pdf/) — Vendor PDF Reference
+- [readme_pdf.md](pdf/readme_pdf.md) — Indexed cross-reference of the Microchip PDFs backing the PTP / Annex H analysis (datasheet, AN1847 time-synch, AN1760 configuration, ER1075 errata, AN6067 topology discovery, plus Linux/Zephyr driver application notes)
 
 ### [hardware/](hardware/) — Hardware & Diagnostics
 - [exception_dump.md](hardware/exception_dump.md) — Exception dump + watchdog + find_exception.py

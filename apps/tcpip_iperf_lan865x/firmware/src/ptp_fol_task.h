@@ -132,6 +132,24 @@ Adapted from noIP-SAM-E54-Curiosity-PTP-Follower/ptp_task.h for Harmony TCP/IP b
 #define HARDSYNC_COARSE_THRESHOLD   300
 #define HARDSYNC_FINE_THRESHOLD     500
 
+/* -------------------------------------------------------------------------
+ * AN1847 simple-follower mode
+ * ----------------------------------------------------------------------
+ * On the `mult-sync` branch the follower is built in AN1847 style: only
+ * Sync + Follow_up are exchanged, no Pdelay round-trip.  The path delay
+ * between the GM and each follower is a static configurable constant
+ * (CLI: `ptp_path_delay <ns>`), instead of being measured.  This removes
+ * the Pdelay broadcast collision problem on PLCA multidrop and lets >2
+ * nodes coexist on the bus (Node 0 = Master, all others = Followers).
+ *
+ * Default = enabled.  Set to 0 to fall back to the full Pdelay-style
+ * implementation (which works for 2 PTP nodes only — see
+ * documentation/ptp/readme_results.md §11/§12).
+ */
+#ifndef PTP_AN1847_STYLE
+#define PTP_AN1847_STYLE 1
+#endif
+
 typedef enum
 {
     PTP_DISABLED,
@@ -364,9 +382,34 @@ void PTP_FOL_SetMac(const uint8_t *pMac);
 
 /**
  * Return the last calculated mean path delay in nanoseconds.
- * Returns 0 when no Delay_Resp has been received yet.
+ * In AN1847 mode this returns the static configured value.
+ * In legacy Pdelay mode, returns 0 until a Delay_Resp has been received.
  */
 int64_t PTP_FOL_GetMeanPathDelay(void);
+
+/**
+ * Set the static path delay (master ↔ follower one-way) in nanoseconds.
+ * Used in AN1847 mode to compensate the Sync arrival timestamp without
+ * running the Pdelay round-trip protocol.  Typical values: 0 ns for
+ * sub-meter cables, ~5 ns/m for longer links.  CLI: `ptp_path_delay <ns>`.
+ */
+void PTP_FOL_SetStaticPathDelay(int64_t ns);
+
+/**
+ * Return the currently configured static path delay (ns).
+ */
+int64_t PTP_FOL_GetStaticPathDelay(void);
+
+/**
+ * Auto-select PTP_MASTER vs PTP_SLAVE based on the LAN865x PLCA local
+ * node ID:
+ *   plcaLocalId == 0  →  PTP_MASTER  (and runs PTP_GM_Init internally)
+ *   plcaLocalId != 0  →  PTP_SLAVE
+ * Convention from AN1847 / mult-sync branch: Node 0 = PLCA Coordinator =
+ * Grandmaster, all other nodes are followers.  Call once after
+ * PTP_FOL_Init() and the LAN865x driver are ready.
+ */
+void PTP_FOL_AutoSelectMode(uint8_t plcaLocalId);
 
 /**
  * Service function for PTP Follower - must be called periodically (e.g., every 1ms).

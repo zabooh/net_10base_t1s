@@ -19,6 +19,7 @@ Key differences vs. the noIP version:
 #include <math.h>
 #include <stdlib.h>
 #include "ptp_fol_task.h"
+#include "ptp_gm_task.h"          /* PTP_GM_Init in PTP_FOL_AutoSelectMode */
 #include "filters.h"
 #include "ptp_clock.h"
 #include "ptp_ts_ipc.h"
@@ -94,6 +95,20 @@ static int64_t  fol_t4_ns               = 0;
 /* Mean path delay and corrected offset (both in ns) */
 static int64_t  fol_mean_path_delay     = 0;
 static bool     fol_delay_valid         = false;  /* at least one Delay_Resp received */
+
+/* -------------------------------------------------------------------------
+ * AN1847 simple-follower state
+ * ----------------------------------------------------------------------
+ *  - fol_static_path_delay_ns: replaces dynamic Pdelay-derived
+ *    fol_mean_path_delay when PTP_AN1847_STYLE is enabled.
+ *  - fol_locked_gm_mac / fol_gm_mac_locked: lock onto the first-seen
+ *    grandmaster's source MAC after the first accepted Sync; reject all
+ *    later Syncs from a different sender.  Provides simple Source-Identity
+ *    validation in lieu of BMCA on multidrop.
+ * ---------------------------------------------------------------------- */
+static int64_t  fol_static_path_delay_ns = 0;     /* CLI: ptp_path_delay <ns> */
+static uint8_t  fol_locked_gm_mac[6]     = {0u};
+static bool     fol_gm_mac_locked        = false;
 
 /* -------------------------------------------------------------------------
  * Delay_Req TX hardware timestamp capture (t3) — mirrors GM TTSCA read
@@ -697,6 +712,10 @@ static void fol_tx_callback(void *pInst, const uint8_t *pTx, uint16_t len,
  * inside a single FollowUp processing pass). */
 static void fol_delay_req_timeout_service(void)
 {
+#if PTP_AN1847_STYLE
+    /* AN1847 mode: no Pdelay request is ever issued, no timeout to service. */
+    return;
+#else
     if (!fol_delay_req_pending) {
         return;
     }
@@ -707,8 +726,10 @@ static void fol_delay_req_timeout_service(void)
         }
         fol_delay_req_pending = false;
     }
+#endif
 }
 
+#if !PTP_AN1847_STYLE
 /* Build and send a Delay_Req frame.
  * t1, t2 are the timestamps from the latest processed FollowUp so that the
  * (t2-t1) term used for delay calculation matches the same Sync cycle.
@@ -778,6 +799,7 @@ static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
     fol_ttsca_state   = fol_config0_set ? FOL_TTSCA_WRITE_TXMPATL
                                         : FOL_TTSCA_CONFIG0_READ;
 }
+#endif /* !PTP_AN1847_STYLE */
 
 /* Parse a received Delay_Resp and update the mean path delay. */
 /* Finalize a Delay_Req/Resp calculation.  Called either directly from
@@ -799,6 +821,7 @@ static void complete_delay_calc(int64_t t1, int64_t t2, int64_t t3, bool hw, int
     }
 }
 
+#if !PTP_AN1847_STYLE
 static void processDelayResp(delayRespMsg_t *ptpPkt, uint64_t rxTimestamp)
 {
     (void)rxTimestamp;
@@ -871,6 +894,7 @@ static void processDelayResp(delayRespMsg_t *ptpPkt, uint64_t rxTimestamp)
     fol_delay_req_pending = false;
     complete_delay_calc(t1_ns, t2_ns, t3_used, fol_t3_hw_valid, fol_t4_ns);
 }
+#endif /* !PTP_AN1847_STYLE */
 
 /* -------------------------------------------------------------------------
  * Slave-node reset
@@ -897,6 +921,12 @@ static void resetSlaveNode(void)
     fol_t3_ns                = 0;
     fol_t4_ns                = 0;
     fol_delay_req_seq_id      = 0u;
+
+    /* AN1847 mode: clear the GM-MAC lock so a fresh master can be picked up
+     * after the reset.  The static path-delay setting is preserved across
+     * resets (CLI-configured value should survive Sync drop-outs). */
+    fol_gm_mac_locked = false;
+    memset(fol_locked_gm_mac, 0, 6);
     fol_delay_req_sent_seq_id = 0u;
 
     /* Reset HW t3 capture state machine */
@@ -1094,13 +1124,19 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
 
     offset     = (int64_t)t2 - (int64_t)t1;
 
-    /* Apply IEEE 1588 mean path delay correction when a Delay_Resp has been
-     * received.  The corrected offset is:
-     *   offset_from_master = ((t2-t1) - (t4-t3)) / 2
-     *                      = (t2-t1) - mean_path_delay               */
+    /* Path-delay correction.  In AN1847 mode (default on mult-sync branch)
+     * a static configured constant is subtracted — no Pdelay measurement.
+     * In legacy mode the dynamic (t4-t3-t2+t1)/2 result is used once a
+     * Delay_Resp has been received.
+     *   offset_from_master = (t2 - t1) - path_delay
+     */
+#if PTP_AN1847_STYLE
+    offset -= fol_static_path_delay_ns;
+#else
     if (fol_delay_valid) {
         offset -= fol_mean_path_delay;
     }
+#endif
 
     /* Record the finalized offset value into the ring buffer for off-line
      * statistical analysis.  Truncates to int32 (offset in FINE state is
@@ -1237,15 +1273,19 @@ static void processFollowUp(followUpMsg_t *ptpPkt)
                 (int)offset, (long long)fol_mean_path_delay);
     }
 
+#if !PTP_AN1847_STYLE
     /* Initiate Delay_Req / Delay_Resp exchange for path delay measurement.
      * Only send when a valid MAC is available and the clock is at least
-     * in MATCHFREQ state so the t3 software-clock reading is meaningful. */
+     * in MATCHFREQ state so the t3 software-clock reading is meaningful.
+     * Disabled in AN1847 mode — the static path-delay constant is used
+     * in lieu of a measured value (see fol_static_path_delay_ns). */
     if (fol_src_mac[0] != 0u || fol_src_mac[1] != 0u || fol_src_mac[2] != 0u ||
         fol_src_mac[3] != 0u || fol_src_mac[4] != 0u || fol_src_mac[5] != 0u) {
         if (syncStatus >= MATCHFREQ) {
             sendDelayReq(t1, t2);
         }
     }
+#endif
 }
 
 void PTP_FOL_SetVerbose(bool verbose) {
@@ -1264,12 +1304,45 @@ void PTP_FOL_SetTrace(bool enable) {
 void handlePtp(uint8_t *pData, uint32_t size, uint32_t sec, uint32_t nsec)
 {
     (void)size;
+    ethHeader_t *ethHdr = (ethHeader_t *)pData;
     ptpHeader_t *ptpPkt = (ptpHeader_t *)(pData + sizeof(ethHeader_t));
     uint8_t messageType = ptpPkt->tsmt & 0x0Fu;
 
     if (messageType == (uint8_t)MSG_FOLLOW_UP) {
+#if PTP_AN1847_STYLE
+        /* Reject Follow_up frames from a sender other than the locked GM.
+         * Sync may be the first frame seen and locks the MAC; Follow_up
+         * arriving from a different MAC after lock means a second master
+         * is active on the bus — silent drop. */
+        if (fol_gm_mac_locked &&
+            memcmp(ethHdr->srcMacAddr, fol_locked_gm_mac, 6) != 0) {
+            return;
+        }
+#endif
         processFollowUp((followUpMsg_t *)ptpPkt);
     } else if (messageType == (uint8_t)MSG_SYNC) {
+#if PTP_AN1847_STYLE
+        /* Source-MAC fixation: lock onto the first-seen master and reject
+         * Sync frames from any other source thereafter.  Replaces BMCA on
+         * multidrop where standard 802.1AS is not defined. */
+        if (!fol_gm_mac_locked) {
+            memcpy(fol_locked_gm_mac, ethHdr->srcMacAddr, 6);
+            fol_gm_mac_locked = true;
+            PTP_LOG("[FOL] Locked onto GM MAC %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+                    fol_locked_gm_mac[0], fol_locked_gm_mac[1], fol_locked_gm_mac[2],
+                    fol_locked_gm_mac[3], fol_locked_gm_mac[4], fol_locked_gm_mac[5]);
+        } else if (memcmp(ethHdr->srcMacAddr, fol_locked_gm_mac, 6) != 0) {
+            /* Sync from a different sender — ignore.  Logged once per
+             * occurrence at trace level only to avoid log flooding if a
+             * second master exists. */
+            if (ptp_trace_enabled) {
+                PTP_LOG("[FOL] Sync from non-GM MAC %02X:%02X:%02X:%02X:%02X:%02X — ignored\r\n",
+                        ethHdr->srcMacAddr[0], ethHdr->srcMacAddr[1], ethHdr->srcMacAddr[2],
+                        ethHdr->srcMacAddr[3], ethHdr->srcMacAddr[4], ethHdr->srcMacAddr[5]);
+            }
+            return;
+        }
+#endif
         processSync((syncMsg_t *)ptpPkt);
         if (syncReceived) {
             TS_SYNC.receipt_prev        = TS_SYNC.receipt;
@@ -1277,8 +1350,15 @@ void handlePtp(uint8_t *pData, uint32_t size, uint32_t sec, uint32_t nsec)
             TS_SYNC.receipt.nanoseconds = nsec;
         }
     } else if (messageType == (uint8_t)MSG_DELAY_RESP) {
+#if PTP_AN1847_STYLE
+        /* AN1847 mode: no Pdelay round-trip.  Drop unsolicited Delay_Resp
+         * frames silently — they may originate from a legacy node on the
+         * same bus. */
+        (void)sec; (void)nsec;
+#else
         uint64_t rxTs = ((uint64_t)sec << 32u) | (uint64_t)nsec;
         processDelayResp((delayRespMsg_t *)ptpPkt, rxTs);
+#endif
     } else {
         PTP_LOG("[FOL] Unknown msgType=%u, ignored\r\n", (unsigned)messageType);
     }
@@ -1384,7 +1464,37 @@ void PTP_FOL_SetMac(const uint8_t *pMac)
 
 int64_t PTP_FOL_GetMeanPathDelay(void)
 {
+#if PTP_AN1847_STYLE
+    return fol_static_path_delay_ns;
+#else
     return fol_delay_valid ? fol_mean_path_delay : 0;
+#endif
+}
+
+void PTP_FOL_SetStaticPathDelay(int64_t ns)
+{
+    fol_static_path_delay_ns = ns;
+}
+
+int64_t PTP_FOL_GetStaticPathDelay(void)
+{
+    return fol_static_path_delay_ns;
+}
+
+void PTP_FOL_AutoSelectMode(uint8_t plcaLocalId)
+{
+    if (plcaLocalId == 0u) {
+        /* Node 0 is the PLCA Coordinator and the AN1847 grandmaster.
+         * Bring up GM mode so Sync + Follow_up are emitted to the bus. */
+        PTP_FOL_SetMode(PTP_MASTER);
+        PTP_GM_Init();
+        PTP_LOG("[FOL] AutoSelectMode: PLCA id=0 -> PTP_MASTER\r\n");
+    } else {
+        /* Any other node listens passively to Node 0. */
+        PTP_FOL_SetMode(PTP_SLAVE);
+        PTP_LOG("[FOL] AutoSelectMode: PLCA id=%u -> PTP_SLAVE\r\n",
+                (unsigned)plcaLocalId);
+    }
 }
 
 void PTP_FOL_OnFrame(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)

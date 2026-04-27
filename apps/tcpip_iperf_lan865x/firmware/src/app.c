@@ -230,6 +230,13 @@ void APP_Tasks ( void )
                         PTP_FOL_SetMac(pMac);
                     }
                 }
+#if PTP_AN1847_STYLE
+                /* AN1847 / mult-sync convention: PLCA Coordinator (node 0)
+                 * is the Grandmaster, all other nodes are Followers.  Auto-
+                 * select mode based on the configured PLCA local node ID.
+                 * Can still be overridden later via the `ptp_mode` CLI. */
+                PTP_FOL_AutoSelectMode((uint8_t)DRV_LAN865X_PLCA_NODE_ID_IDX0);
+#endif
                 ptp_fol_initialized = true;
                 /* Bring up the WDT only AFTER the slow boot-time
                  * subsystems have completed (TCP/IP stack, LAN865x,

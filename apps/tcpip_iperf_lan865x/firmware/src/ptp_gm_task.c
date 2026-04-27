@@ -97,7 +97,9 @@ static bool             gm_trace_enabled    = false;
 static uint8_t gm_sync_buf[60];       /* 14 (eth) + 44 (syncMsg_t) + 2 pad bytes */
 static uint8_t gm_followup_buf[90];   /* 14 (eth) + 76 (followUpMsg_t) */
 #define GM_DELAY_RESP_BUF_SIZE  68u    /* 14 (eth) + 54 (delayRespMsg_t) */
+#if !PTP_AN1847_STYLE
 static uint8_t gm_delay_resp_buf[GM_DELAY_RESP_BUF_SIZE];
+#endif
 #if (PTP_GM_SYNC_TX_MODE == 1)
 static uint8_t gm_noip_buf[60];       /* matches Test noip_send frame size */
 static uint32_t gm_noip_seq = 0u;
@@ -208,12 +210,14 @@ static void gm_tx_cb(void *pInst, const uint8_t *pTx,
     gm_tx_busy = false;
 }
 
+#if !PTP_AN1847_STYLE
 static void gm_delay_resp_tx_cb(void *pInst, const uint8_t *pTx,
                                  uint16_t len, void *pTag, void *pGlobalTag)
 {
     (void)pInst; (void)pTx; (void)len; (void)pTag; (void)pGlobalTag;
     gm_delay_resp_tx_busy = false;
 }
+#endif
 
 static bool gm_read_register(uint32_t addr, bool useCallbackProtectedMode)
 {
@@ -1080,6 +1084,16 @@ int64_t PTP_GM_GetExtraAnchorDelay(void)
 
 void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
 {
+#if PTP_AN1847_STYLE
+    /* AN1847 mode: GM never replies to Delay_Req frames.  Followers in
+     * AN1847 mode do not send them, so any incoming Delay_Req comes from
+     * a legacy node sharing the bus and is silently dropped — no
+     * Delay_Resp is generated.  This eliminates the
+     * gm_delay_resp_tx_busy bottleneck that limited the legacy code to
+     * 2 PTP participants on a multidrop segment. */
+    (void)pData; (void)len; (void)rxTimestamp;
+    return;
+#else
     if (len < (uint16_t)(sizeof(ethHeader_t) + sizeof(delayReqMsg_t))) {
         return;  /* frame too short */
     }
@@ -1183,4 +1197,5 @@ void PTP_GM_OnDelayReq(const uint8_t *pData, uint16_t len, uint64_t rxTimestamp)
                               (unsigned)htons(hdr->sequenceID));
         }
     }
+#endif /* !PTP_AN1847_STYLE */
 }

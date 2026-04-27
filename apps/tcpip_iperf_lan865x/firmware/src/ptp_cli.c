@@ -88,7 +88,12 @@ static void ptp_status_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
         PTP_FOL_GetOffset(&offset, &absOffset);
         SYS_CONSOLE_PRINT("Offset ns  : %ld\r\n", (long)offset);
         SYS_CONSOLE_PRINT("Abs off ns : %lu\r\n", (unsigned long)absOffset);
+#if PTP_AN1847_STYLE
+        SYS_CONSOLE_PRINT("Path delay : %ld ns (static, AN1847 mode)\r\n",
+                          (long)PTP_FOL_GetStaticPathDelay());
+#else
         SYS_CONSOLE_PRINT("Mean delay : %ld ns\r\n", (long)PTP_FOL_GetMeanPathDelay());
+#endif
     }
 }
 
@@ -256,6 +261,18 @@ static void ptp_gm_delay_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv)
     SYS_CONSOLE_PRINT("ptp_gm_delay set to %lld ns\r\n", (long long)ns);
 }
 
+static void ptp_path_delay_cmd(SYS_CMD_DEVICE_NODE *pCmdIO, int argc, char **argv) {
+    (void)pCmdIO;
+    if (argc < 2) {
+        SYS_CONSOLE_PRINT("ptp_path_delay: %lld ns (static, AN1847 mode)\r\n",
+                          (long long)PTP_FOL_GetStaticPathDelay());
+        return;
+    }
+    int64_t ns = (int64_t)strtoll(argv[1], NULL, 0);
+    PTP_FOL_SetStaticPathDelay(ns);
+    SYS_CONSOLE_PRINT("ptp_path_delay set to %lld ns\r\n", (long long)ns);
+}
+
 static const SYS_CMD_DESCRIPTOR ptp_cmd_tbl[] = {
     {"ptp_mode",         (SYS_CMD_FNC) ptp_mode_cmd,         ": set/get PTP mode (ptp_mode [off|master|follower])"},
     {"ptp_status",       (SYS_CMD_FNC) ptp_status_cmd,       ": show PTP status"},
@@ -270,6 +287,7 @@ static const SYS_CMD_DESCRIPTOR ptp_cmd_tbl[] = {
     {"ptp_offset_reset", (SYS_CMD_FNC) ptp_offset_reset_cmd, ": clear PTP offset ring buffer"},
     {"ptp_offset_dump",  (SYS_CMD_FNC) ptp_offset_dump_cmd,  ": dump all recorded offsets (one per line, <ns> <status>)"},
     {"ptp_gm_delay",     (SYS_CMD_FNC) ptp_gm_delay_cmd,     ": diagnostic: set extra ns added to GM anchor_wc (ptp_gm_delay [<ns>])"},
+    {"ptp_path_delay",   (SYS_CMD_FNC) ptp_path_delay_cmd,   ": AN1847: set/get static master->follower path delay in ns (ptp_path_delay [<ns>])"},
     {"clk_set_drift",    (SYS_CMD_FNC) clk_set_drift_cmd,    ": diagnostic: manually set PTP_CLOCK drift_ppb (clk_set_drift [<ppb>])"},
     {"drift_iir_n",      (SYS_CMD_FNC) drift_iir_n_cmd,      ": get/set PTP_CLOCK drift IIR window N (drift_iir_n [<8..4096>])"},
     {"drift_iir_reset",  (SYS_CMD_FNC) drift_iir_reset_cmd,  ": re-arm adaptive IIR warm-up (fast convergence with low jitter floor)"},
