@@ -26,10 +26,10 @@
 
 | Datei | Zweck |
 |---|---|
-| [check4/…/src/lan_regs_cli.c](apps/tcpip_iperf_lan865x/firmware/src/lan_regs_cli.c) | Implementierung der Kommandos + Zustandsmaschine |
-| [check4/…/src/lan_regs_cli.h](apps/tcpip_iperf_lan865x/firmware/src/lan_regs_cli.h) | Schnittstelle (`LAN_REGS_CLI_Register`, `LAN_REGS_CLI_Service`) |
-| [check4/…/src/app.c:87](apps/tcpip_iperf_lan865x/firmware/src/app.c#L87) | Registrierung der Kommandogruppe `LAN865X` |
-| [check4/…/src/app.c:259](apps/tcpip_iperf_lan865x/firmware/src/app.c#L259) | Takten der Zustandsmaschine aus der Main-Loop |
+| [check4/…/src/lan_regs_cli.c](../../apps/tcpip_iperf_lan865x/firmware/src/lan_regs_cli.c) | Implementierung der Kommandos + Zustandsmaschine |
+| [check4/…/src/lan_regs_cli.h](../../apps/tcpip_iperf_lan865x/firmware/src/lan_regs_cli.h) | Schnittstelle (`LAN_REGS_CLI_Register`, `LAN_REGS_CLI_Service`) |
+| [check4/…/src/app.c:87](../../apps/tcpip_iperf_lan865x/firmware/src/app.c#L87) | Registrierung der Kommandogruppe `LAN865X` |
+| [check4/…/src/app.c:259](../../apps/tcpip_iperf_lan865x/firmware/src/app.c#L259) | Takten der Zustandsmaschine aus der Main-Loop |
 
 ### 1.2 Kommandos
 
@@ -51,7 +51,7 @@ Fehlerfälle: `LAN865X Read timeout for addr=…`, `LAN865X Read failed for addr
 ### 1.3 Adress-Kodierung
 
 Die Adresse ist **32 Bit: obere 16 Bit = MMS (Memory Map Selector), untere 16 Bit = Registeroffset**.
-Nachweis: [tc6.c:883 ff.](driver/lan865x/src/dynamic/tc6/tc6.c#L883) —
+Nachweis: [tc6.c:883 ff.](../../driver/lan865x/src/dynamic/tc6/tc6.c#L883) —
 `SET_VAL(HDR_C_MMS, (addr >> 16), tx_buf)`.
 
 | Block | MMS | Beispiel |
@@ -216,7 +216,7 @@ Diese bewerten nicht den Sender, sondern Empfangsqualität und Kabel:
 - **SQI wird konfiguriert, aber nie ausgelesen.** Die Init-Map schreibt
   `0x000400B0 = 0x00000103` („SQI CONFIGURATION") und behandelt `0x000400AD` per
   Read-Modify-Write, entsprechend Tabelle 2 der Configuration-App-Note
-  (siehe [drv_lan865x_api.c](apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c)).
+  (siehe [drv_lan865x_api.c](../../apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c)).
   Es gibt keinen Pfad, der einen SQI-Wert an die Konsole meldet.
 - **Kein Register-Dump-Kommando.** Ein Registerabbild muss host-seitig aus vielen
   `lan_read`-Aufrufen zusammengesetzt werden — so arbeiten die Skripte in `AN1847`.
@@ -235,7 +235,7 @@ lan_write 0x0200004A 0x0000   # PLCA_CTRL_STS deaktiviert
 
 Das entspricht **MMS 2 / Offset 0x004A**. Laut der Zusammenfassung der
 LAN8650/1-Configuration-App-Note in
-[check4/…/documentation/pdf/readme_pdf.md](documentation/pdf/readme_pdf.md)
+[check4/…/documentation/pdf/readme_pdf.md](../../documentation/pdf/readme_pdf.md)
 liegt `PLCA_CTRL0` beim LAN8651 dagegen auf **MMS 4 / 0xCA01** (`0x0004CA01`) und
 `PLCA_CTRL1` auf `0xCA02`.
 
@@ -277,10 +277,10 @@ GUI-Tab aus §3.2 — die Doku ist an dieser Stelle also veraltet, nicht die Imp
 
 | Quelle | Ort |
 |---|---|
-| LAN8650/1 Datenblatt, §11 Register Descriptions | [check4/…/documentation/pdf/LAN8650-1-Data-Sheet-60001734.pdf](documentation/pdf/LAN8650-1-Data-Sheet-60001734.pdf) |
-| LAN8650/1 Configuration App-Note (Registersequenzen, PLCA, SQI) | [check4/…/documentation/pdf/LAN8650-1-Configuration-Appnote-60001760.pdf](documentation/pdf/LAN8650-1-Configuration-Appnote-60001760.pdf) |
-| Erratum s1 (DEVID statt OA_PHYID lesen) | [check4/…/documentation/pdf/lan86xx_family.md](documentation/pdf/lan86xx_family.md) |
-| MMS-Blockaufteilung MAC / PHY / Misc | [check4/…/documentation/pdf/lan865x_vs_lan867x_architecture.md](documentation/pdf/lan865x_vs_lan867x_architecture.md) |
+| LAN8650/1 Datenblatt, §11 Register Descriptions | [check4/…/documentation/pdf/LAN8650-1-Data-Sheet-60001734.pdf](../../documentation/pdf/LAN8650-1-Data-Sheet-60001734.pdf) |
+| LAN8650/1 Configuration App-Note (Registersequenzen, PLCA, SQI) | [check4/…/documentation/pdf/LAN8650-1-Configuration-Appnote-60001760.pdf](../../documentation/pdf/LAN8650-1-Configuration-Appnote-60001760.pdf) |
+| Erratum s1 (DEVID statt OA_PHYID lesen) | [check4/…/documentation/pdf/lan86xx_family.md](../../documentation/pdf/lan86xx_family.md) |
+| MMS-Blockaufteilung MAC / PHY / Misc | [check4/…/documentation/pdf/lan865x_vs_lan867x_architecture.md](../../documentation/pdf/lan865x_vs_lan867x_architecture.md) |
 | IEEE Std 802.3-2022, Clause 147.5.2 | extern |
 | OPEN Alliance 10BASE-T1x MAC-PHY Serial Interface (TC6) | extern |
-| Verwendungsbeispiel `lan_read` für Quarz-Abweichung | [check4/…/documentation/features/tfuture.md:487](documentation/features/tfuture.md#L487) |
+| Verwendungsbeispiel `lan_read` für Quarz-Abweichung | [check4/…/documentation/features/tfuture.md:487](../../documentation/features/tfuture.md#L487) |
