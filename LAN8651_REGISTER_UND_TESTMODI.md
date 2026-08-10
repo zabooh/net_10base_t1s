@@ -12,8 +12,8 @@
 
 | Frage | Antwort |
 |---|---|
-| **Registerzugriff zur Laufzeit?** | Ja — `lan_read` / `lan_write` über die serielle Konsole, in [check4/](check4/net_10base_t1s/) |
-| **IEEE-Transmitter-Test-Modi?** | Ja — dokumentiert und per GUI bedienbar, aber in [AN1847/t1s_100baset_bridge/](AN1847/t1s_100baset_bridge/), **nicht** in `check4` |
+| **Registerzugriff zur Laufzeit?** | Ja — `lan_read` / `lan_write` über die serielle Konsole, **in diesem Repository** |
+| **IEEE-Transmitter-Test-Modi?** | Ja — dokumentiert und per GUI bedienbar, aber im separaten Repo [t1s_100baset_bridge](https://github.com/zabooh/t1s_100baset_bridge/tree/vscode-migration), **nicht** hier |
 | **Braucht `check4` dafür Firmware-Änderungen?** | Nein — `lan_write` genügt, die Test-Modi sind reine Register-Writes |
 | **Kabel-/Signalqualitäts-Diagnose?** | Ja — SQI- und CFD-Skriptsammlung, ebenfalls nur in `AN1847` |
 | **Bekanntes Doku-Problem** | Die PLCA-Adresse `0x0200004A` in `README_TEST_MODES.md` ist zweifelhaft → [§6](#6-offene-punkte-und-fallstricke) |
@@ -26,10 +26,10 @@
 
 | Datei | Zweck |
 |---|---|
-| [check4/…/src/lan_regs_cli.c](check4/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/src/lan_regs_cli.c) | Implementierung der Kommandos + Zustandsmaschine |
-| [check4/…/src/lan_regs_cli.h](check4/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/src/lan_regs_cli.h) | Schnittstelle (`LAN_REGS_CLI_Register`, `LAN_REGS_CLI_Service`) |
-| [check4/…/src/app.c:87](check4/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/src/app.c#L87) | Registrierung der Kommandogruppe `LAN865X` |
-| [check4/…/src/app.c:259](check4/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/src/app.c#L259) | Takten der Zustandsmaschine aus der Main-Loop |
+| [check4/…/src/lan_regs_cli.c](apps/tcpip_iperf_lan865x/firmware/src/lan_regs_cli.c) | Implementierung der Kommandos + Zustandsmaschine |
+| [check4/…/src/lan_regs_cli.h](apps/tcpip_iperf_lan865x/firmware/src/lan_regs_cli.h) | Schnittstelle (`LAN_REGS_CLI_Register`, `LAN_REGS_CLI_Service`) |
+| [check4/…/src/app.c:87](apps/tcpip_iperf_lan865x/firmware/src/app.c#L87) | Registrierung der Kommandogruppe `LAN865X` |
+| [check4/…/src/app.c:259](apps/tcpip_iperf_lan865x/firmware/src/app.c#L259) | Takten der Zustandsmaschine aus der Main-Loop |
 
 ### 1.2 Kommandos
 
@@ -51,7 +51,7 @@ Fehlerfälle: `LAN865X Read timeout for addr=…`, `LAN865X Read failed for addr
 ### 1.3 Adress-Kodierung
 
 Die Adresse ist **32 Bit: obere 16 Bit = MMS (Memory Map Selector), untere 16 Bit = Registeroffset**.
-Nachweis: [tc6.c:883 ff.](check4/net_10base_t1s/driver/lan865x/src/dynamic/tc6/tc6.c#L883) —
+Nachweis: [tc6.c:883 ff.](driver/lan865x/src/dynamic/tc6/tc6.c#L883) —
 `SET_VAL(HDR_C_MMS, (addr >> 16), tx_buf)`.
 
 | Block | MMS | Beispiel |
@@ -81,7 +81,7 @@ Nachweis: [tc6.c:883 ff.](check4/net_10base_t1s/driver/lan865x/src/dynamic/tc6/t
 ## 2. IEEE-Transmitter-Test-Modi (`AN1847`)
 
 Primärquelle im Repo:
-[AN1847/…/README_TEST_MODES.md](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/README_TEST_MODES.md)
+[AN1847/…/README_TEST_MODES.md](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/README_TEST_MODES.md)
 (Stand 10. März 2026), abgeleitet aus dem LAN8650/1-Datenblatt §11 und IEEE Std 802.3-2022 §147.5.2.
 
 ### 2.1 T1STSTCTL — Test Mode Control
@@ -164,15 +164,15 @@ Der Wert ergibt sich aus `(mode & 0x7) << 13`.
 
 ### 3.2 Über die GUI (`AN1847`)
 
-[AN1847/…/gui/lan8651_bitfield_gui.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/gui/lan8651_bitfield_gui.py)
+[AN1847/…/gui/lan8651_bitfield_gui.py](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/gui/lan8651_bitfield_gui.py)
 — Tab **„🧪 Test Modes"**, angelegt in
-[`_create_test_modes_tab()` ab Zeile 1127](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/gui/lan8651_bitfield_gui.py#L1127).
+[`_create_test_modes_tab()` ab Zeile 1127](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/gui/lan8651_bitfield_gui.py#L1127).
 
 Enthaltene Bedienelemente:
 
 | Element | Funktion | Implementierung |
 |---|---|---|
-| Dropdown + „▶ Activate Selected" | schreibt `(mode & 0x7) << 13` nach `0x000308FB` | [Zeile 1193](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/gui/lan8651_bitfield_gui.py#L1193) |
+| Dropdown + „▶ Activate Selected" | schreibt `(mode & 0x7) << 13` nach `0x000308FB` | [Zeile 1193](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/gui/lan8651_bitfield_gui.py#L1193) |
 | „⏹ Normal (000)" | schreibt `0x0000` nach `0x000308FB` | `set_test_mode_normal()` |
 | „📖 Read Status" | liest `0x000308FB` und dekodiert den Modus | `read_test_mode_status()` |
 | PMA Loopback ein/aus | Read-Modify-Write auf Bit 0 von `0x000308F9` | `set_pma_loopback()` |
@@ -199,13 +199,13 @@ Diese bewerten nicht den Sender, sondern Empfangsqualität und Kabel:
 
 | Datei | Zweck |
 |---|---|
-| [lan8651_cable_diagnostic.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/lan8651_cable_diagnostic.py) | Kabeldiagnose |
-| [lan8651_cfd_test.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/lan8651_cfd_test.py) | Cable Fault Diagnostics |
-| [lan8651_1760_sqi_diagnostics.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/lan8651_1760_sqi_diagnostics.py) | SQI-Auswertung nach App-Note |
-| [sqi_decoder.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/sqi_decoder.py) / [sqi_correct_registers.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/sqi_correct_registers.py) | Dekodierung, Registeradressen |
-| [lan8651_complete_register_scan.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/lan8651_complete_register_scan.py) | Registerabbild vor/nach einem Test |
-| [README_AN1740_SQI_DIAGNOSTICS.md](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/README_AN1740_SQI_DIAGNOSTICS.md) | Hintergrund |
-| [PROMPT_lan8651_sqi_diagnostics.md](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/PROMPT_lan8651_sqi_diagnostics.md) | Spezifikation: SQI 0–7, TDR-Längenschätzung, Open/Short/Miswiring |
+| [lan8651_cable_diagnostic.py](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/lan8651_cable_diagnostic.py) | Kabeldiagnose |
+| [lan8651_cfd_test.py](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/lan8651_cfd_test.py) | Cable Fault Diagnostics |
+| [lan8651_1760_sqi_diagnostics.py](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/lan8651_1760_sqi_diagnostics.py) | SQI-Auswertung nach App-Note |
+| [sqi_decoder.py](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/sqi_decoder.py) / [sqi_correct_registers.py](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/sqi_correct_registers.py) | Dekodierung, Registeradressen |
+| [lan8651_complete_register_scan.py](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/lan8651_complete_register_scan.py) | Registerabbild vor/nach einem Test |
+| [README_AN1740_SQI_DIAGNOSTICS.md](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/README_AN1740_SQI_DIAGNOSTICS.md) | Hintergrund |
+| [PROMPT_lan8651_sqi_diagnostics.md](https://github.com/zabooh/t1s_100baset_bridge/blob/vscode-migration/firmware/T1S_100BaseT_Bridge.X/PROMPT_lan8651_sqi_diagnostics.md) | Spezifikation: SQI 0–7, TDR-Längenschätzung, Open/Short/Miswiring |
 
 ---
 
@@ -216,7 +216,7 @@ Diese bewerten nicht den Sender, sondern Empfangsqualität und Kabel:
 - **SQI wird konfiguriert, aber nie ausgelesen.** Die Init-Map schreibt
   `0x000400B0 = 0x00000103` („SQI CONFIGURATION") und behandelt `0x000400AD` per
   Read-Modify-Write, entsprechend Tabelle 2 der Configuration-App-Note
-  (siehe [drv_lan865x_api.c](check4/net_10base_t1s/apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c)).
+  (siehe [drv_lan865x_api.c](apps/tcpip_iperf_lan865x/firmware/src/config/default/driver/lan865x/src/dynamic/drv_lan865x_api.c)).
   Es gibt keinen Pfad, der einen SQI-Wert an die Konsole meldet.
 - **Kein Register-Dump-Kommando.** Ein Registerabbild muss host-seitig aus vielen
   `lan_read`-Aufrufen zusammengesetzt werden — so arbeiten die Skripte in `AN1847`.
@@ -235,15 +235,19 @@ lan_write 0x0200004A 0x0000   # PLCA_CTRL_STS deaktiviert
 
 Das entspricht **MMS 2 / Offset 0x004A**. Laut der Zusammenfassung der
 LAN8650/1-Configuration-App-Note in
-[check4/…/documentation/pdf/readme_pdf.md](check4/net_10base_t1s/documentation/pdf/readme_pdf.md)
+[check4/…/documentation/pdf/readme_pdf.md](documentation/pdf/readme_pdf.md)
 liegt `PLCA_CTRL0` beim LAN8651 dagegen auf **MMS 4 / 0xCA01** (`0x0004CA01`) und
 `PLCA_CTRL1` auf `0xCA02`.
 
-Dass im selben Ordner drei Skripte namens
-[test_plca_address_comparison.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/test_plca_address_comparison.py),
-[test_plca_address_variants.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/test_plca_address_variants.py) und
-[test_firmware_plca_addresses.py](AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/test_firmware_plca_addresses.py)
-existieren, deutet darauf hin, dass die PLCA-Adressierung dort tatsächlich unklar war.
+Dass im selben Ordner drei Skripte namens `test_plca_address_comparison.py`,
+`test_plca_address_variants.py` und `test_firmware_plca_addresses.py` existieren,
+deutet darauf hin, dass die PLCA-Adressierung dort tatsächlich unklar war.
+
+Diese drei sind absichtlich **nicht verlinkt**: sie liegen ausschließlich lokal in
+`AN1847/t1s_100baset_bridge/firmware/T1S_100BaseT_Bridge.X/` und werden dort von
+`.gitignore:77` (`test_*.py`) erfasst — sie stehen in keinem Commit und damit auch
+nicht auf GitHub. Wer die Frage abschließend klären will, braucht diese Dateien von
+der Arbeitsplatte; sie sind über das Repository nicht beschaffbar.
 
 **→ Vor einem Loopback-Test die PLCA-Adresse am Gerät verifizieren** (`lan_read 0x0004CA01`
 gegen `lan_read 0x0200004A` vergleichen und mit dem erwarteten Reset-/Konfigurationswert
@@ -273,10 +277,10 @@ GUI-Tab aus §3.2 — die Doku ist an dieser Stelle also veraltet, nicht die Imp
 
 | Quelle | Ort |
 |---|---|
-| LAN8650/1 Datenblatt, §11 Register Descriptions | [check4/…/documentation/pdf/LAN8650-1-Data-Sheet-60001734.pdf](check4/net_10base_t1s/documentation/pdf/LAN8650-1-Data-Sheet-60001734.pdf) |
-| LAN8650/1 Configuration App-Note (Registersequenzen, PLCA, SQI) | [check4/…/documentation/pdf/LAN8650-1-Configuration-Appnote-60001760.pdf](check4/net_10base_t1s/documentation/pdf/LAN8650-1-Configuration-Appnote-60001760.pdf) |
-| Erratum s1 (DEVID statt OA_PHYID lesen) | [check4/…/documentation/pdf/lan86xx_family.md](check4/net_10base_t1s/documentation/pdf/lan86xx_family.md) |
-| MMS-Blockaufteilung MAC / PHY / Misc | [check4/…/documentation/pdf/lan865x_vs_lan867x_architecture.md](check4/net_10base_t1s/documentation/pdf/lan865x_vs_lan867x_architecture.md) |
+| LAN8650/1 Datenblatt, §11 Register Descriptions | [check4/…/documentation/pdf/LAN8650-1-Data-Sheet-60001734.pdf](documentation/pdf/LAN8650-1-Data-Sheet-60001734.pdf) |
+| LAN8650/1 Configuration App-Note (Registersequenzen, PLCA, SQI) | [check4/…/documentation/pdf/LAN8650-1-Configuration-Appnote-60001760.pdf](documentation/pdf/LAN8650-1-Configuration-Appnote-60001760.pdf) |
+| Erratum s1 (DEVID statt OA_PHYID lesen) | [check4/…/documentation/pdf/lan86xx_family.md](documentation/pdf/lan86xx_family.md) |
+| MMS-Blockaufteilung MAC / PHY / Misc | [check4/…/documentation/pdf/lan865x_vs_lan867x_architecture.md](documentation/pdf/lan865x_vs_lan867x_architecture.md) |
 | IEEE Std 802.3-2022, Clause 147.5.2 | extern |
 | OPEN Alliance 10BASE-T1x MAC-PHY Serial Interface (TC6) | extern |
-| Verwendungsbeispiel `lan_read` für Quarz-Abweichung | [check4/…/documentation/features/tfuture.md:487](check4/net_10base_t1s/documentation/features/tfuture.md#L487) |
+| Verwendungsbeispiel `lan_read` für Quarz-Abweichung | [check4/…/documentation/features/tfuture.md:487](documentation/features/tfuture.md#L487) |

@@ -14,6 +14,9 @@ The top-level [readme.md](../readme.md) has the project overview. Risks and open
 
 ## Topics
 
+### Repository root
+- [../LAN8651_REGISTER_UND_TESTMODI.md](../LAN8651_REGISTER_UND_TESTMODI.md) — (German) Register access and IEEE test modes: the `lan_read` / `lan_write` console commands in this tree, the 32-bit `MMS << 16 | offset` address encoding with the MMS block map, async/single-operation/200 ms-timeout limits; IEEE transmitter test modes 1–4 via T1STSTCTL (`0x000308FB`) and T1SPMACTL (`0x000308F9`) with ready-to-paste register writes and operational warnings; what this tree lacks versus the separate `t1s_100baset_bridge` repo (no test-mode CLI, SQI configured but never read back, no register dump); and an unresolved contradiction in the PLCA address (`0x0200004A` vs `0x0004CA01`) that must be verified on device before any loopback test
+
 ### [timing/](timing/) — Timing & Clock Subsystem
 - [software_ptp_clock_design.md](timing/software_ptp_clock_design.md) — Software PTP clock design & architecture
 - [software_ptp_clock_cli_test.md](timing/software_ptp_clock_cli_test.md) — CLI test procedures for the software PTP clock
