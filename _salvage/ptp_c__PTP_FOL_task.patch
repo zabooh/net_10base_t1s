@@ -1,0 +1,99 @@
+diff --git a/apps/tcpip_iperf_lan865x/firmware/src/PTP_FOL_task.c b/apps/tcpip_iperf_lan865x/firmware/src/PTP_FOL_task.c
+index 8138a6a..c0270f8 100644
+--- a/apps/tcpip_iperf_lan865x/firmware/src/PTP_FOL_task.c
++++ b/apps/tcpip_iperf_lan865x/firmware/src/PTP_FOL_task.c
+@@ -105,6 +105,7 @@ static uint8_t  fol_delay_req_buf[FOL_DELAY_REQ_BUF_SIZE];
+ static uint8_t  fol_src_mac[6]           = {0u};
+ static uint16_t fol_delay_req_seq_id     = 0u;
+ static bool     fol_delay_req_pending    = false;  /* awaiting Delay_Resp */
++static uint32_t fol_delay_req_timeout_ms = 0u;     /* counts down to 0 @ 1 kHz service rate */
+ static volatile bool fol_tx_busy         = false;
+ 
+ /* t3: follower Delay_Req send time (ns, from software clock) */
+@@ -114,6 +115,13 @@ static uint32_t fol_t3_nsec            = 0u;     /* TTSCB nanoseconds */
+ static bool     fol_t3_capture_pending = false;  /* awaiting TTSCB read */
+ /* t4: GM receive time of Delay_Req (ns, from Delay_Resp receiveTimestamp) */
+ static int64_t  fol_t4_ns               = 0;
++/* Snapshots of t1/t2 from the Sync cycle when sendDelayReq() was called.
++ * processDelayResp() must use THESE values, not the live TS_SYNC, because
++ * TS_SYNC is updated on every FollowUp and may be several cycles ahead by
++ * the time the Delay_Resp arrives. Using stale TS_SYNC introduces an error
++ * of Δoffset/2 into fol_mean_path_delay. */
++static int64_t  fol_delay_t1_snapshot   = 0;  /* t1 at Delay_Req send time */
++static int64_t  fol_delay_t2_snapshot   = 0;  /* t2 at Delay_Req send time */
+ 
+ /* Mean path delay and corrected offset (both in ns) */
+ static int64_t  fol_mean_path_delay     = 0;
+@@ -290,6 +298,21 @@ void PTP_FOL_Service(void)
+         }
+     }
+ 
++    /* Delay_Req response timeout: if no Delay_Resp arrives within 2 s, release
++     * the pending flag so the next FollowUp can trigger a new exchange.
++     * fol_delay_valid is NOT cleared — the last good measurement is kept. */
++#define FOL_DELAY_REQ_TIMEOUT_MS 2000u
++    if (fol_delay_req_pending) {
++        if (fol_delay_req_timeout_ms > 0u) {
++            fol_delay_req_timeout_ms--;
++        } else {
++            PTP_LOG("[FOL] Delay_Req timeout — no resp, will retry next cycle\r\n");
++            fol_delay_req_pending    = false;
++            fol_t3_capture_pending   = false;
++            fol_delay_req_timeout_ms = 0u;
++        }
++    }
++
+     switch (fol_reg_state) {
+         case FOL_REG_IDLE:
+             if (fol_pending_action != FOL_ACTION_NONE) {
+@@ -554,9 +577,10 @@ static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
+     msg->header.logMessageInterval = 0x7Fu;
+     /* originTimestamp = 0 (as per IEEE 1588 §11.3.2) */
+ 
+-    /* Save t1 and t2 so processDelayResp() can compute delay for this cycle */
+-    /* Store in global TS_SYNC which already holds these values. */
+-    (void)t1_ns; (void)t2_ns;  /* delay calculation uses TS_SYNC directly   */
++    /* Snapshot t1/t2 from this exact Sync cycle so processDelayResp() uses
++     * the matching timestamps even if TS_SYNC advances before the response. */
++    fol_delay_t1_snapshot = (int64_t)t1_ns;
++    fol_delay_t2_snapshot = (int64_t)t2_ns;
+ 
+     /* Arm TX-Match B detector for Delay_Req timestamp capture */
+     (void)DRV_LAN865X_WriteRegister(0u, FOL_TXMBCTL, 0x00000002u, true, NULL, NULL);
+@@ -572,8 +596,9 @@ static void sendDelayReq(uint64_t t1_ns, uint64_t t2_ns)
+         return;
+     }
+ 
+-    fol_delay_req_pending = true;
+-    fol_t3_capture_pending = true;  /* Trigger TTSCB read in Service() */
++    fol_delay_req_pending    = true;
++    fol_delay_req_timeout_ms = FOL_DELAY_REQ_TIMEOUT_MS;
++    fol_t3_capture_pending   = true;  /* Trigger TTSCB read in Service() */
+     PTP_LOG("[FOL] Delay_Req sent (seq=%u), awaiting TTSCB\r\n", (unsigned)fol_delay_req_seq_id);
+     fol_delay_req_seq_id++;
+ }
+@@ -600,9 +625,11 @@ static void processDelayResp(delayRespMsg_t *ptpPkt, uint64_t rxTimestamp)
+     uint32_t t4_nsec = htonl(ptpPkt->receiveTimestamp.nanoseconds);
+     fol_t4_ns = (int64_t)((uint64_t)t4_sec * SEC_IN_NS + (uint64_t)t4_nsec);
+ 
+-    /* Retrieve t1 and t2 from the latest processed FollowUp cycle */
+-    int64_t t1_ns = (int64_t)tsToInternal(&TS_SYNC.origin);
+-    int64_t t2_ns = (int64_t)tsToInternal(&TS_SYNC.receipt);
++    /* Use the t1/t2 snapshot captured at sendDelayReq() time — NOT the live
++     * TS_SYNC values, which may be several FollowUp cycles ahead by now.
++     * Using the wrong cycle introduces an error of Δoffset/2 into delay. */
++    int64_t t1_ns = fol_delay_t1_snapshot;
++    int64_t t2_ns = fol_delay_t2_snapshot;
+ 
+     /* IEEE 1588 §11.3 mean path delay:
+      *   delay = ((t2 - t1) + (t4 - t3)) / 2                           */
+@@ -644,6 +671,9 @@ static void resetSlaveNode(void)
+     fol_t3_nsec            = 0u;
+     fol_t4_ns              = 0;
+     fol_delay_req_seq_id   = 0u;
++    fol_delay_t1_snapshot  = 0;
++    fol_delay_t2_snapshot  = 0;
++    fol_delay_req_timeout_ms = 0u;
+ 
+     memset(&TS_SYNC, 0, sizeof(ptpSync_ct));
+ 
